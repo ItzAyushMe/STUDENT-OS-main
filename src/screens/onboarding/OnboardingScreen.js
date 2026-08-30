@@ -83,8 +83,9 @@ export function OnboardingScreen() {
   const finish = async () => {
     setBusy(true);
     try {
+      const { _group, ...payload } = form;
       await updateProfile({
-        ...form,
+        ...payload,
         exam_date: form.exam_date || null,
         days_off: form.days_off,
         onboarded: true,

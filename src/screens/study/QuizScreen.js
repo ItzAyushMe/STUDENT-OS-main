@@ -254,7 +254,7 @@ export function QuizScreen({ navigation, route }) {
   if (phase === 'playing') {
     const q = questions[qIndex];
     return (
-      <Screen mode="light" scroll={false}>
+      <Screen mode="light">
         <ScreenHeader title={`${MODES[mode].label}`} subtitle={`Q${qIndex + 1} of ${questions.length} · ${fmtClock(elapsed)}`} onBack={() => setPhase('setup')} />
         <ProgressBar progress={(qIndex + (selected != null ? 1 : 0)) / questions.length} mode="light" color="#6D28D9" style={{ marginBottom: 18 }} />
         <Card mode="light" style={{ marginBottom: 18, padding: 18 }}>

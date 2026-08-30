@@ -1,7 +1,7 @@
 // DECK — study flashcards with flip animation and spaced
 // repetition (SM-2 lite): Easy +3d×mastery, Medium +1d, Hard +4h.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, Text, View } from 'react-native';
+import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
@@ -142,15 +142,15 @@ export function DeckScreen({ navigation, route }) {
           </View>
 
           {/* flip card */}
-          <Pressable onPress={() => setFlipped((f) => !f)} style={{ flex: 1, justifyContent: 'center' }}>
+          <Pressable onPress={() => setFlipped((f) => !f)} style={{ height: 300, justifyContent: 'center' }}>
             <Animated.View
               style={{
+                ...StyleSheet.absoluteFillObject,
                 transform: [{ rotateY: frontRotate }],
                 opacity: frontOpacity,
-                backfaceVisibility: 'hidden',
               }}
             >
-              <Card mode="light" style={{ minHeight: 240, justifyContent: 'center', padding: 22, borderWidth: 2, borderColor: color + '55' }}>
+              <Card mode="light" style={{ flex: 1, minHeight: 280, justifyContent: 'center', padding: 22, borderWidth: 2, borderColor: color + '55' }}>
                 <Text style={{ fontFamily: fonts.body, fontSize: 11, color, letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
                   QUESTION
                 </Text>
@@ -165,17 +165,13 @@ export function DeckScreen({ navigation, route }) {
 
             <Animated.View
               style={{
+                ...StyleSheet.absoluteFillObject,
                 transform: [{ rotateY: backRotate }],
                 opacity: backOpacity,
-                backfaceVisibility: 'hidden',
-                position: flipped ? 'relative' : 'absolute',
-                top: flipped ? undefined : '50%',
-                left: flipped ? undefined : 0,
-                right: flipped ? undefined : 0,
               }}
               pointerEvents={flipped ? 'auto' : 'none'}
             >
-              <Card mode="light" style={{ minHeight: 240, justifyContent: 'center', padding: 22, backgroundColor: '#F0FDFA', borderWidth: 2, borderColor: '#10B98155' }}>
+              <Card mode="light" style={{ flex: 1, minHeight: 280, justifyContent: 'center', padding: 22, backgroundColor: '#F0FDFA', borderWidth: 2, borderColor: '#10B98155' }}>
                 <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#0891B2', letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
                   ANSWER
                 </Text>

@@ -30,7 +30,7 @@ const PARTS = [
 const ICON_CHOICES = ['🎯', '📖', '🧘', '💧', '🏃', '📓', '🌙', '🥗', '📵', '🧠', '💪', '🛏️', '☀️', '🎸'];
 
 export function HabitsScreen({ navigation }) {
-  const { profile } = useAuth();
+  const { profile, reloadProfile } = useAuth();
   const { awardXP, freezes } = useGame();
   const [habits, setHabits] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -64,19 +64,34 @@ export function HabitsScreen({ navigation }) {
     return m;
   }, [logs]);
 
-  const streakFor = useCallback(
-    (habitId) => {
-      let streak = 0;
-      for (let i = 0; i < 400; i++) {
+  // chain length counting backwards starting at day-offset startIdx (0 = today)
+  const chainFrom = useCallback(
+    (habitId, startIdx) => {
+      let c = 0;
+      for (let i = startIdx; i < 400; i++) {
         const d = dateStr(dayjs(today).subtract(i, 'day'));
         const l = logMap[`${habitId}::${d}`];
-        if (l && (l.completed || l.frozen)) streak++;
-        else if (i === 0) continue; // today pending doesn't break
+        if (l && (l.completed || l.frozen)) c++;
         else break;
       }
-      return streak;
+      return c;
     },
     [logMap, today]
+  );
+
+  // returns { streak, atRisk } — atRisk means yesterday was missed
+  // but a live chain (>= 1 day) exists just before it: freeze can save it.
+  const streakFor = useCallback(
+    (habitId) => {
+      const yLog = logMap[`${habitId}::${dateStr(dayjs(today).subtract(1, 'day'))}`];
+      const yesterdayOk = yLog && (yLog.completed || yLog.frozen);
+      if (yesterdayOk) {
+        return { streak: chainFrom(habitId, 1) + (logMap[`${habitId}::${today}`]?.completed ? 1 : 0), atRisk: false };
+      }
+      const savedChain = chainFrom(habitId, 2);
+      return { streak: savedChain, atRisk: savedChain > 0 };
+    },
+    [chainFrom, logMap, today]
   );
 
   const toggleToday = async (habit) => {
@@ -87,7 +102,7 @@ export function HabitsScreen({ navigation }) {
       setLogs((prev) => prev.filter((l) => l.id !== existing.id));
       return;
     }
-    const streak = streakFor(habit.id);
+    const streak = streakFor(habit.id).streak;
     const row = await db.insert('habit_logs', {
       habit_id: habit.id,
       user_id: profile.id,
@@ -111,12 +126,13 @@ export function HabitsScreen({ navigation }) {
       date: yesterday,
       completed: false,
       completed_at: nowIso(),
-      streak_count: streakFor(habit.id),
+      streak_count: streakFor(habit.id).streak,
       frozen: true,
     });
     setLogs((prev) => [...prev, row]);
-    // consume a global freeze from the profile
+    // consume a global freeze from the profile and refresh state
     await db.update('users', profile.id, { streak_freezes: Math.max(0, (profile.streak_freezes || 0) - 1) });
+    await reloadProfile();
     await load();
   };
 
@@ -183,19 +199,23 @@ export function HabitsScreen({ navigation }) {
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginBottom: 8 }}>
               {part.label} ({list.filter((h) => logMap[`${h.id}::${today}`]?.completed).length}/{list.length})
             </Text>
-            {list.map((h) => (
-              <HabitRow
-                key={h.id}
-                habit={h}
-                week={week}
-                today={today}
-                logMap={logMap}
-                streak={streakFor(h.id)}
-                freezes={freezes}
-                onToggle={() => toggleToday(h)}
-                onFreeze={() => useFreeze(h)}
-              />
-            ))}
+            {list.map((h) => {
+              const { streak, atRisk } = streakFor(h.id);
+              return (
+                <HabitRow
+                  key={h.id}
+                  habit={h}
+                  week={week}
+                  today={today}
+                  logMap={logMap}
+                  streak={streak}
+                  atRisk={atRisk}
+                  freezes={freezes}
+                  onToggle={() => toggleToday(h)}
+                  onFreeze={() => useFreeze(h)}
+                />
+              );
+            })}
           </View>
         );
       })}
@@ -254,11 +274,10 @@ export function HabitsScreen({ navigation }) {
   );
 }
 
-const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, freezes, onToggle, onFreeze }) {
+const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, onToggle, onFreeze }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
-  const yesterdayMissed =
-    !logMap[`${habit.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`] && streak >= 2 && freezes > 0;
+  const canFreeze = atRisk && streak >= 2 && freezes > 0 && !doneToday;
 
   return (
     <View
@@ -297,10 +316,10 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, fr
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
           <Text style={{ fontSize: 10, marginRight: 4 }}>{cat.icon}</Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: streak > 0 ? '#D97706' : '#94A3B8' }}>
-            {streak > 0 ? `🔥 ${streak}d streak` : 'No streak yet'}
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8' }}>
+            {streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet'}
           </Text>
-          {yesterdayMissed ? (
+          {canFreeze ? (
             <Pressable onPress={onFreeze} style={{ marginLeft: 8, backgroundColor: '#ECFEFF', borderWidth: 1, borderColor: '#A5F3FC', borderRadius: 6, paddingVertical: 2, paddingHorizontal: 6 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10, color: '#0891B2' }}>🧊 save streak</Text>
             </Pressable>

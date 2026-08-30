@@ -34,7 +34,8 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "test:logic": "node --import ./scripts/esm-register.mjs scripts/logic-test.mjs"
   },
   "private": true
 }

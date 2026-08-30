@@ -78,9 +78,10 @@ export function generateSchedule(opts) {
   } = opts;
 
   const today = todayStr();
-  const horizon = examDate
-    ? dayjs.min(dayjs(examDate), dayjs(today).add(weeks * 7, 'day'))
-    : dayjs(today).add(weeks * 7, 'day');
+  const examLimit = examDate ? dayjs(examDate) : null;
+  const rollingLimit = dayjs(today).add(weeks * 7, 'day');
+  const horizon =
+    examLimit && examLimit.isBefore(rollingLimit) ? examLimit : rollingLimit;
   const totalDays = Math.max(1, horizon.diff(dayjs(today), 'day'));
 
   const factor = difficultyFactor(prepLevel);

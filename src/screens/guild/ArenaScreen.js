@@ -2,7 +2,7 @@
 // (date-seeded). 15s per question, +10 XP per correct, +20 finish
 // bonus, global ranking for the day.
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
@@ -143,7 +143,7 @@ export function ArenaScreen({ navigation }) {
 
       {/* ---------------- INTRO ---------------- */}
       {phase === 'intro' ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
           <Card mode="gamer" style={{ marginBottom: 14, alignItems: 'center' }}>
             <Text style={{ fontSize: 50 }}>⚔️</Text>
             <PixelText size={9} color={GAMER.text} style={{ marginTop: 14 }}>
@@ -160,12 +160,12 @@ export function ArenaScreen({ navigation }) {
             </Text>
           </Card>
           <Button title="ENTER THE ARENA 🚀" mode="gamer" pixel size="lg" onPress={start} />
-        </View>
+        </ScrollView>
       ) : null}
 
       {/* ---------------- PLAY ---------------- */}
       {phase === 'play' ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
           <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.body, fontSize: 12, color: GAMER.subtext, flex: 1 }}>
               Q{qIndex + 1}/{questions.length} · ✅ {correct}
@@ -221,12 +221,12 @@ export function ArenaScreen({ navigation }) {
               <Button title={qIndex + 1 >= questions.length ? 'Finish ⚔️' : 'Next →'} size="sm" mode="gamer" onPress={next} style={{ marginTop: 12 }} />
             </Card>
           ) : null}
-        </View>
+        </ScrollView>
       ) : null}
 
       {/* ---------------- RESULT ---------------- */}
       {phase === 'result' && board ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
           <Card mode="gamer" style={{ alignItems: 'center', marginBottom: 14 }}>
             <PixelText size={16} color={correct >= 4 ? GAMER.gold : GAMER.text} glow>
               {correct}/5 CORRECT
@@ -271,7 +271,7 @@ export function ArenaScreen({ navigation }) {
           <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 8, lineHeight: 16 }}>
             {isRemote() ? 'Live board from all StudentOS players today.' : 'Demo rivals (local mode). Cloud mode = real global board.'}
           </Text>
-        </View>
+        </ScrollView>
       ) : null}
     </View>
   );

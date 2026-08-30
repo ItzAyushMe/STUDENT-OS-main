@@ -47,6 +47,12 @@ npm install
 npx expo start          # press w for web, scan QR with Expo Go for Android/iOS
 ```
 
+Sanity-check the core engines any time (XP, streaks, schedule planner, arena determinism):
+
+```bash
+npm run test:logic
+```
+
 With no `.env` at all, the app runs in **Local Mode** — everything works offline on the device (guest/local accounts, demo rivals in the Guild, bundled question bank for quizzes/arena). Add Supabase + AI keys whenever you're ready; nothing else changes.
 
 ---

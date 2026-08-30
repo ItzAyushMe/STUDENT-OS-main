@@ -2,7 +2,7 @@
 // Same seeded question set for both players; winner takes a
 // +60 XP bonus. Local mode battles vs demo rivals.
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
@@ -140,7 +140,7 @@ export function BattleScreen({ navigation }) {
 
       {/* ---------------- PICK OPPONENT ---------------- */}
       {phase === 'pick' ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
           <Card mode="gamer" style={{ marginBottom: 14, alignItems: 'center' }}>
             <Text style={{ fontSize: 44 }}>🤺</Text>
             <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.subtext, marginTop: 12, textAlign: 'center', lineHeight: 19 }}>
@@ -175,12 +175,12 @@ export function BattleScreen({ navigation }) {
               </Text>
             </Card>
           ) : null}
-        </View>
+        </ScrollView>
       ) : null}
 
       {/* ---------------- PLAY ---------------- */}
       {phase === 'play' && q ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
           <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.body, fontSize: 12, color: GAMER.subtext, flex: 1 }}>
               vs {opponent.name} · Q{qIndex + 1}/{questions.length} · ✅ {correct}
@@ -230,12 +230,12 @@ export function BattleScreen({ navigation }) {
           {selected != null ? (
             <Button title={qIndex + 1 >= questions.length ? 'Reveal Winner 🏆' : 'Next →'} size="sm" mode="gamer" onPress={next} />
           ) : null}
-        </View>
+        </ScrollView>
       ) : null}
 
       {/* ---------------- RESULT ---------------- */}
       {phase === 'result' ? (
-        <View style={{ flex: 1 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
           <Card mode="gamer" style={{ alignItems: 'center', marginBottom: 16 }}>
             <Text style={{ fontSize: 48 }}>{correct > rivalScore ? '🏆' : correct === rivalScore ? '🤝' : '😤'}</Text>
             <PixelText size={13} color={correct > rivalScore ? GAMER.gold : GAMER.text} glow style={{ marginTop: 12 }}>
@@ -261,7 +261,7 @@ export function BattleScreen({ navigation }) {
             <Button title="Rematch 🔁" variant="secondary" size="md" mode="gamer" onPress={() => startBattle(opponent)} style={{ flex: 1, marginRight: 8 }} />
             <Button title="Done" size="md" mode="gamer" onPress={() => navigation.goBack()} style={{ flex: 1 }} />
           </View>
-        </View>
+        </ScrollView>
       ) : null}
     </View>
   );
