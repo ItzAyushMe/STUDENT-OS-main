@@ -225,6 +225,14 @@ export function ArenaScreen({ navigation }) {
       ) : null}
 
       {/* ---------------- RESULT ---------------- */}
+      {phase === 'result' && !board ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontSize: 40 }}>⚔️</Text>
+          <PixelText size={9} color={GAMER.subtext} style={{ marginTop: 16 }}>
+            TALLYING THE BATTLEFIELD…
+          </PixelText>
+        </View>
+      ) : null}
       {phase === 'result' && board ? (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
           <Card mode="gamer" style={{ alignItems: 'center', marginBottom: 14 }}>
