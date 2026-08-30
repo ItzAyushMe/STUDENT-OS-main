@@ -17,6 +17,8 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { QUIZ_BANK, pickDailyArena, pickBankQuiz } from '../../lib/quizBank';
+import { aiGenerateQuiz, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiStatus, isOnline } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, fmtClock, nowIso, seededShuffle } from '../../lib/utils';
 
@@ -60,14 +62,35 @@ export function QuizScreen({ navigation, route }) {
     return () => clearInterval(t);
   }, [phase]);
 
-  // ---------- question generation (offline-first) ----------
+  // ---------- question generation (AI first, offline fallback) ----------
   const buildQuestions = async () => {
     const cfg = MODES[mode];
     let qs = [];
     if (mode === 'daily') {
       qs = pickDailyArena(todayStr()).map((q) => ({ ...q, source: 'arena' }));
     } else {
-      // 1) flashcards of this subject -> MCQs (distractors from other cards)
+      // 1) Try AI-generated questions (needs API key + internet)
+      const status = aiStatus();
+      if (status.anyConfigured && (await isOnline())) {
+        try {
+          const aiQs = await aiGenerateQuiz({
+            subject: subject === 'Mixed' ? '' : subject,
+            topic: route?.params?.topic || '',
+            count: cfg.count,
+            difficulty: mode === 'boss' ? 'hard' : 'medium',
+            profileContext: [profile?.class_level, profile?.board, profile?.prep_level].filter(Boolean).join(', '),
+          });
+          if (aiQs.length >= Math.min(3, cfg.count)) {
+            return aiQs.slice(0, cfg.count);
+          }
+        } catch (e) {
+          if (!(e instanceof AIUnavailableError)) {
+            // fall through to offline generation
+          }
+        }
+      }
+
+      // 2) flashcards of this subject -> MCQs (distractors from other cards)
       let cards = await db.list('flashcards', { eq: { user_id: profile.id } });
       if (subject !== 'Mixed') cards = cards.filter((c) => c.subject === subject);
       if (mode === 'boss') cards = cards.filter((c) => (c.mastery_level || 0) <= 3); // attack weak spots
@@ -88,7 +111,7 @@ export function QuizScreen({ navigation, route }) {
           source: 'fc',
         };
       });
-      // 2) bank questions
+      // 3) bank questions
       const bankQs = pickBankQuiz({
         subject: subject === 'Mixed' ? null : subject,
         count: cfg.count + (mode === 'boss' ? 4 : 0),

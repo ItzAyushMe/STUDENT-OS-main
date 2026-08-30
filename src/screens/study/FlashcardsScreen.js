@@ -15,14 +15,20 @@ import { ModalSheet } from '../../components/ui/ModalSheet';
 import { Input } from '../../components/ui/Input';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { aiGenerateFlashcards, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiStatus } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
-import { groupBy, subjectColor } from '../../lib/utils';
+import { groupBy, subjectColor, nowIso } from '../../lib/utils';
 
 export function FlashcardsScreen({ navigation, route }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
   const [cards, setCards] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiForm, setAiForm] = useState({ subject: '', topic: '', count: '8' });
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMsg, setAiMsg] = useState('');
   const [form, setForm] = useState({ front: '', back: '', subject: '', topic: '', type: 'qa' });
   const preSubject = route?.params?.subject;
   const preTopic = route?.params?.topic;
@@ -53,6 +59,41 @@ export function FlashcardsScreen({ navigation, route }) {
     setForm({ front: '', back: '', subject: form.subject, topic: form.topic, type: 'qa' });
     setAddOpen(false);
     await load();
+  };
+
+  const generateDeck = async () => {
+    const subject = (aiForm.subject || preSubject || '').trim();
+    const topic = (aiForm.topic || preTopic || '').trim();
+    if (!subject || !topic || aiBusy) return;
+    setAiBusy(true);
+    setAiMsg('');
+    try {
+      const cards = await aiGenerateFlashcards({
+        subject,
+        topic,
+        count: Math.max(4, Math.min(15, Number(aiForm.count) || 8)),
+        profileContext: [profile?.class_level, profile?.board].filter(Boolean).join(', '),
+      });
+      const rows = cards.map((c) => ({
+        user_id: profile.id,
+        subject,
+        topic,
+        front_text: c.front_text,
+        back_text: c.back_text,
+        card_type: c.card_type,
+        mastery_level: 0,
+        next_review: nowIso(),
+        times_reviewed: 0,
+        created_at: nowIso(),
+      }));
+      await db.insertMany('flashcards', rows);
+      setAiMsg(`Shaabaash! ${rows.length} cards ban gaye. Deck kholo aur shuru karo! 🃏`);
+      await load();
+    } catch (e) {
+      setAiMsg(e instanceof AIUnavailableError ? e.message : 'Deck generate nahi ho paya. Thodi der baad try karo.');
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   if (!cards) {
@@ -91,9 +132,14 @@ export function FlashcardsScreen({ navigation, route }) {
         subtitle={totalDue ? `${totalDue} cards due for revision 🃏` : 'Decks ready — spaced repetition ON'}
         onBack={() => navigation.goBack()}
         right={
-          <Pressable onPress={() => setAddOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
-            <Ionicons name="add" size={19} color="#6D28D9" />
-          </Pressable>
+          <View style={{ flexDirection: 'row' }}>
+            <Pressable onPress={() => setAiOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7, marginRight: 8 }}>
+              <Ionicons name="sparkles-outline" size={19} color="#0891B2" />
+            </Pressable>
+            <Pressable onPress={() => setAddOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
+              <Ionicons name="add" size={19} color="#6D28D9" />
+            </Pressable>
+          </View>
         }
       />
 
@@ -143,6 +189,28 @@ export function FlashcardsScreen({ navigation, route }) {
           );
         })
       )}
+
+      {/* AI deck generation */}
+      <ModalSheet visible={aiOpen} onClose={() => setAiOpen(false)} title="Generate Deck with AI ✨" mode="light">
+        <Input label="Subject" value={aiForm.subject || preSubject || ''} onChangeText={(v) => setAiForm({ ...aiForm, subject: v })} placeholder="e.g. Physics" />
+        <Input label="Topic / chapter" value={aiForm.topic || preTopic || ''} onChangeText={(v) => setAiForm({ ...aiForm, topic: v })} placeholder="e.g. Thermodynamics" />
+        <Input label="How many cards? (4–15)" value={aiForm.count} onChangeText={(v) => setAiForm({ ...aiForm, count: v })} keyboardType="numeric" />
+        {!aiStatus().anyConfigured ? (
+          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#D97706', lineHeight: 17, marginBottom: 10 }}>
+            ⚠️ No AI key set — add a Gemini/Groq key in Settings to use this. Manual card creation always works!
+          </Text>
+        ) : null}
+        {aiMsg ? (
+          <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#0891B2', lineHeight: 18, marginBottom: 10 }}>{aiMsg}</Text>
+        ) : null}
+        <Button
+          title={aiBusy ? 'Professor Byte likh raha hai…' : 'Generate Deck 🪄'}
+          mode="light"
+          loading={aiBusy}
+          onPress={generateDeck}
+          disabled={!aiForm.subject && !preSubject}
+        />
+      </ModalSheet>
 
       <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="New Flashcard" mode="light">
         <Input label="Subject" value={form.subject || preSubject || ''} onChangeText={(v) => setForm({ ...form, subject: v })} placeholder="e.g. Physics" />

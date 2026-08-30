@@ -15,6 +15,8 @@ import { ModalSheet } from '../../components/ui/ModalSheet';
 import { Input } from '../../components/ui/Input';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { aiSummarizeContent, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiStatus } from '../../lib/aiService';
 import { CONTENT_TYPES } from '../../config/constants';
 import { fonts } from '../../config/theme';
 import { nowIso } from '../../lib/utils';
@@ -25,6 +27,8 @@ export function ContentScreen({ navigation }) {
   const [items, setItems] = useState(null);
   const [filter, setFilter] = useState('All');
   const [addOpen, setAddOpen] = useState(false);
+  const [aiBusyId, setAiBusyId] = useState(null);
+  const [aiMsg, setAiMsg] = useState('');
   const [form, setForm] = useState({ kind: 'note', title: '', body: '', subject: '' });
 
   const load = useCallback(async () => {
@@ -70,6 +74,21 @@ export function ContentScreen({ navigation }) {
     await load();
   };
 
+  const summarize = async (item) => {
+    if (!item.text || aiBusyId) return;
+    setAiBusyId(item.id);
+    setAiMsg('');
+    try {
+      const summary = await aiSummarizeContent({ title: item.title, text: item.text });
+      await db.update('content', item.id, { ai_summary: summary });
+      await load();
+    } catch (e) {
+      setAiMsg(e instanceof AIUnavailableError ? e.message : 'Summary nahi ban paya. Baad mein try karo.');
+    } finally {
+      setAiBusyId(null);
+    }
+  };
+
   const open = (item) => {
     if (item.url) Linking.openURL(item.url).catch(() => {});
   };
@@ -111,6 +130,9 @@ export function ContentScreen({ navigation }) {
           />
         ))}
       </View>
+      {aiMsg ? (
+        <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#0891B2', marginBottom: 10, lineHeight: 18 }}>{aiMsg}</Text>
+      ) : null}
 
       {shown.length === 0 ? (
         <Card mode="light">
@@ -157,6 +179,11 @@ export function ContentScreen({ navigation }) {
                     {String(item.created_at || '').slice(0, 10)}
                   </Text>
                 </View>
+                {item.text && !item.ai_summary ? (
+                  <Pressable onPress={() => summarize(item)} disabled={aiBusyId === item.id} hitSlop={8} style={{ padding: 6 }}>
+                    <Ionicons name={aiBusyId === item.id ? 'hourglass-outline' : 'sparkles-outline'} size={16} color="#0891B2" />
+                  </Pressable>
+                ) : null}
                 <Pressable onPress={() => remove(item)} hitSlop={8} style={{ padding: 6 }}>
                   <Ionicons name="trash-outline" size={16} color="#CBD5E1" />
                 </Pressable>
