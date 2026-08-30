@@ -5,14 +5,17 @@
 // ============================================================
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
+import { useSettings } from './SettingsContext';
 import { db } from '../lib/db';
 import { awardXPToProfile, streakOnActivity, levelForXp, tierForXp } from '../lib/xpService';
+import { playSfx } from '../lib/soundService';
 import { todayStr, uuid, nowIso } from '../lib/utils';
 
 const GameCtx = createContext(null);
 
 export function GameProvider({ children }) {
   const { profile, updateProfile } = useAuth();
+  const settings = useSettings();
   const [toasts, setToasts] = useState([]);
   const [celebration, setCelebration] = useState(null);
   const [notices, setNotices] = useState([]); // small info toasts (freeze earned etc.)
@@ -60,6 +63,7 @@ export function GameProvider({ children }) {
         }
         if (leveledUp) {
           setCelebration({ id: uuid(), level, tier });
+          if (settings.soundEffects) playSfx('levelup');
         }
         return result;
       } catch (e) {
@@ -67,7 +71,7 @@ export function GameProvider({ children }) {
         return null;
       }
     },
-    [profile, updateProfile, pushToast, pushNotice]
+    [profile, updateProfile, pushToast, pushNotice, settings.soundEffects]
   );
 
   const dismissCelebration = useCallback(() => setCelebration(null), []);

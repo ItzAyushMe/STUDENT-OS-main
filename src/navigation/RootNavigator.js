@@ -10,9 +10,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../context/AuthContext';
 import { useThemeMode } from '../context/ThemeContext';
 import { useGame } from '../context/GameContext';
+import { useFocus } from '../context/FocusContext';
 import { GAMER, getTheme, fonts } from '../config/theme';
 import { APP_NAME } from '../config/constants';
 import { LevelUpOverlay, XPToastStack } from '../components/gamer/Overlays';
+import { FocusShieldOverlay } from '../components/focus/ShieldOverlay';
 
 import { AuthScreen } from '../screens/auth/AuthScreen';
 import { OnboardingScreen } from '../screens/onboarding/OnboardingScreen';
@@ -114,9 +116,19 @@ const TABS = [
 function MainTabs() {
   const insets = useSafeAreaInsets();
   const game = useGame();
+  const focus = useFocus();
   return (
     <View style={{ flex: 1 }}>
       <Tab.Navigator
+        screenListeners={({ route }) => ({
+          // Focus Shield: softly intercept tab switches during a focus session
+          tabPress: (e) => {
+            if (route.name !== 'FocusTab' && focus.session && !focus.session.pausedAt) {
+              e.preventDefault();
+              focus.attemptDistraction(`switched to ${route.name.replace('Tab', '')}`);
+            }
+          },
+        })}
       screenOptions={({ route }) => {
         const tab = TABS.find((t) => t.name === route.name);
         return {
@@ -149,6 +161,7 @@ function MainTabs() {
     </Tab.Navigator>
       <XPToastStack toasts={game.toasts} />
       <NoticeStack notices={game.notices} />
+      <FocusShieldOverlay shield={focus.shield} onStay={focus.stayFocused} onLeave={focus.leaveAnyway} />
       <LevelUpOverlay celebration={game.celebration} onDone={game.dismissCelebration} />
     </View>
   );
