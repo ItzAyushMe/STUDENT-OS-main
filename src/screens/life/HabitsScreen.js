@@ -1,7 +1,7 @@
 // HABITS — tracker with morning/afternoon/evening groups, weekly
 // 7-day view, per-habit streaks, streak freeze power-up and
 // custom habit creation. Light mode.
-import { useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -254,7 +254,7 @@ export function HabitsScreen({ navigation }) {
   );
 }
 
-function HabitRow({ habit, week, today, logMap, streak, freezes, onToggle, onFreeze }) {
+const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, freezes, onToggle, onFreeze }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
   const yesterdayMissed =
@@ -333,4 +333,4 @@ function HabitRow({ habit, week, today, logMap, streak, freezes, onToggle, onFre
       </View>
     </View>
   );
-}
+});

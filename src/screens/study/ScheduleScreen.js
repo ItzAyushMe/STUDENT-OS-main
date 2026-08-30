@@ -1,7 +1,7 @@
 // Smart Schedule — daily time-blocks, weekly grid, monthly calendar.
 // Generates plans offline (scheduleGenerator) with revision cycles,
 // mock days and buffer days; missed quests auto-reschedule.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -284,7 +284,7 @@ function DailyView({ selected, setSelected, sessions, onComplete, onSkip, onGene
   );
 }
 
-function SessionBlock({ s, onComplete, onSkip }) {
+const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
   const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study;
   const color = type.color;
   const completed = s.status === 'completed';
@@ -349,7 +349,7 @@ function SessionBlock({ s, onComplete, onSkip }) {
       )}
     </View>
   );
-}
+});
 
 // ---------------- WEEKLY ----------------
 function WeeklyView({ weekDays, sessions, today, onPickDay }) {

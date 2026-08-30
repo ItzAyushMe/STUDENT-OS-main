@@ -17,11 +17,13 @@ import { PixelText } from '../../components/gamer/PixelText';
 import { XPCounter, LevelBadge, StreakFlame, TierBadge } from '../../components/gamer/Badges';
 import { Confetti } from '../../components/gamer/Confetti';
 import { ProgressBar } from '../../components/ui/ProgressBar';
+import { useIsOnline } from '../../hooks/useIsOnline';
 
 export function HomeScreen({ navigation }) {
   const { profile } = useAuth();
   const { awardXP, level, tier, totalXp, streak, freezes } = useGame();
   const insets = useSafeAreaInsets();
+  const online = useIsOnline();
   const [todayQuests, setTodayQuests] = useState([]);
   const [habitStats, setHabitStats] = useState({ done: 0, total: 0 });
   const [dayStarted, setDayStarted] = useState(false);
@@ -91,6 +93,27 @@ export function HomeScreen({ navigation }) {
       showsVerticalScrollIndicator={false}
     >
       <Confetti trigger={confetti} origin={{ x: '50%', y: '25%' }} />
+
+      {/* offline banner */}
+      {!online ? (
+        <View
+          style={{
+            backgroundColor: 'rgba(245,158,11,0.12)',
+            borderWidth: 1,
+            borderColor: 'rgba(245,158,11,0.4)',
+            borderRadius: 12,
+            padding: 10,
+            marginBottom: 14,
+            flexDirection: 'row',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ fontSize: 15, marginRight: 8 }}>📴</Text>
+          <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12, color: GAMER.warn, lineHeight: 17 }}>
+            You're offline — quests, timer, habits & quizzes (bank) are still working. AI needs internet.
+          </Text>
+        </View>
+      ) : null}
 
       {/* greeting */}
       <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
