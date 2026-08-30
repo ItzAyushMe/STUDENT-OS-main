@@ -9,8 +9,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../context/AuthContext';
 import { useThemeMode } from '../context/ThemeContext';
+import { useGame } from '../context/GameContext';
 import { GAMER, getTheme, fonts } from '../config/theme';
 import { APP_NAME } from '../config/constants';
+import { LevelUpOverlay, XPToastStack } from '../components/gamer/Overlays';
 
 import { AuthScreen } from '../screens/auth/AuthScreen';
 import { OnboardingScreen } from '../screens/onboarding/OnboardingScreen';
@@ -111,8 +113,10 @@ const TABS = [
 
 function MainTabs() {
   const insets = useSafeAreaInsets();
+  const game = useGame();
   return (
-    <Tab.Navigator
+    <View style={{ flex: 1 }}>
+      <Tab.Navigator
       screenOptions={({ route }) => {
         const tab = TABS.find((t) => t.name === route.name);
         return {
@@ -143,6 +147,34 @@ function MainTabs() {
         <Tab.Screen key={t.name} name={t.name} component={t.component} options={{ title: t.label }} />
       ))}
     </Tab.Navigator>
+      <XPToastStack toasts={game.toasts} />
+      <NoticeStack notices={game.notices} />
+      <LevelUpOverlay celebration={game.celebration} onDone={game.dismissCelebration} />
+    </View>
+  );
+}
+
+function NoticeStack({ notices }) {
+  if (!notices?.length) return null;
+  return (
+    <View pointerEvents="none" style={{ position: 'absolute', bottom: 92, left: 0, right: 0, alignItems: 'center' }}>
+      {notices.map((n) => (
+        <View
+          key={n.id}
+          style={{
+            backgroundColor: 'rgba(13,17,23,0.94)',
+            borderWidth: 1,
+            borderColor: GAMER.secondary + '66',
+            borderRadius: 999,
+            paddingVertical: 8,
+            paddingHorizontal: 16,
+            marginBottom: 6,
+          }}
+        >
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: GAMER.secondary }}>{n.text}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
