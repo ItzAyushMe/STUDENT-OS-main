@@ -26,6 +26,7 @@ create table if not exists public.users (
   olympiad text,
   olympiad_date date,
   school_exams jsonb default '[]',
+  priorities jsonb default null, -- { order, enabled, timeSplit } for the scheduler
   exam_date date,
   daily_study_hours numeric default 2,
   preferred_time text,

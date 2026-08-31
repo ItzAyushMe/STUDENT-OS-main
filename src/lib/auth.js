@@ -112,10 +112,18 @@ export const authService = {
     if (!isSupabaseConfigured) {
       throw new Error('Google sign-in needs Supabase. Configure .env first (see README).');
     }
-    const redirectTo =
-      Platform.OS === 'web'
-        ? window.location.origin
-        : 'studentos://auth-callback';
+    // WEB: full-page redirect via the Supabase client — most reliable.
+    // detectSessionInUrl:true in supabase.js picks the session up on return.
+    if (Platform.OS === 'web') {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin },
+      });
+      if (error) throw new Error(`Google sign-in nahi chala: ${error.message}`);
+      return { redirecting: true }; // page navigates away
+    }
+    // NATIVE (Expo Go / app): auth session popup
+    const redirectTo = 'studentos://auth-callback';
     const authUrl = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`;
     const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectTo);
     if (result.type !== 'success' || !result.url) {

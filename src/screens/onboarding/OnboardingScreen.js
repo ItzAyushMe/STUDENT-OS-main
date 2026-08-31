@@ -91,8 +91,14 @@ export function OnboardingScreen() {
       const { _group, ...payload } = form;
       // clean school exams: keep only entries with a valid date
       const schoolExams = (form.school_exams || [])
-        .map((e) => ({ label: (e.label || 'School exam').trim() || 'School exam', date: (e.date || '').trim() }))
-        .filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e.date));
+        .map((e) => ({
+          label: (e.label || 'School exam').trim() || 'School exam',
+          exact: Boolean(e.exact),
+          ...(e.exact
+            ? { date: (e.date || '').trim() }
+            : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
+        }))
+        .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
       await updateProfile({
         ...payload,
         exam_date: form.exam_date || null,
@@ -341,31 +347,64 @@ export function OnboardingScreen() {
                 Mid-terms, finals… add them and StudentOS will finish your CLASS syllabus ~2 weeks before each one.
               </InfoText>
               {(form.school_exams || []).map((e, i) => (
-                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                  <View style={{ flex: 1.4, marginRight: 8 }}>
-                    <Input
-                      mode="gamer"
-                      value={e.label}
-                      onChangeText={(v) => setSchoolExam(i, { label: v })}
-                      placeholder="e.g. Mid-Term"
-                    />
+                <View key={i} style={{ marginBottom: 8 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <Input
+                        mode="gamer"
+                        value={e.label}
+                        onChangeText={(v) => setSchoolExam(i, { label: v })}
+                        placeholder="e.g. Mid-Term"
+                      />
+                    </View>
+                    <Pressable onPress={() => set({ school_exams: form.school_exams.filter((_, j) => j !== i) })} hitSlop={8} style={{ padding: 6, marginLeft: 4 }}>
+                      <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                    </Pressable>
                   </View>
-                  <View style={{ flex: 1 }}>
+                  {e.exact ? (
                     <Input
                       mode="gamer"
                       value={e.date}
                       onChangeText={(v) => setSchoolExam(i, { date: v })}
-                      placeholder="2026-09-20"
+                      placeholder="Exact date YYYY-MM-DD"
                       keyboardType="numeric"
                     />
-                  </View>
-                  <Pressable onPress={() => set({ school_exams: form.school_exams.filter((_, j) => j !== i) })} hitSlop={8} style={{ padding: 6, marginLeft: 4 }}>
-                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <Input
+                          mode="gamer"
+                          value={e.start_date}
+                          onChangeText={(v) => setSchoolExam(i, { start_date: v })}
+                          placeholder="From YYYY-MM-DD"
+                          keyboardType="numeric"
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Input
+                          mode="gamer"
+                          value={e.end_date}
+                          onChangeText={(v) => setSchoolExam(i, { end_date: v })}
+                          placeholder="To YYYY-MM-DD"
+                          keyboardType="numeric"
+                        />
+                      </View>
+                    </View>
+                  )}
+                  <Pressable
+                    onPress={() => setSchoolExam(i, { exact: !e.exact })}
+                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}
+                    hitSlop={6}
+                  >
+                    <Ionicons name={e.exact ? 'checkbox' : 'square-outline'} size={15} color="#A78BFA" />
+                    <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#C4B5FD', marginLeft: 6 }}>
+                      Exact date pata hai
+                    </Text>
                   </Pressable>
                 </View>
               ))}
               <Pressable
-                onPress={() => set({ school_exams: [...(form.school_exams || []), { label: '', date: '' }] })}
+                onPress={() => set({ school_exams: [...(form.school_exams || []), { label: '', start_date: '', end_date: '', exact: false }] })}
                 style={({ pressed }) => ({
                   flexDirection: 'row',
                   alignItems: 'center',

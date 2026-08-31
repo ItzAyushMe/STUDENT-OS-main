@@ -126,6 +126,19 @@ Without keys, AI features (tutor chat, AI quizzes/decks/summaries/reflections) s
 
 ---
 
+## 🔑 Google Sign-In setup (Supabase cloud mode)
+
+StudentOS ships with the full Google OAuth flow wired (`src/lib/auth.js`). To switch it on in YOUR Supabase project:
+
+1. **Supabase → Authentication → Providers → Google** → enable it.
+2. **Google Cloud Console** (console.cloud.google.com, free): create OAuth credentials → "Web application".
+   - Add the **Authorized redirect URI** Supabase shows you (looks like `https://PROJECT-ref.supabase.co/auth/v1/callback`).
+3. Copy the Google **Client ID** and **Client Secret** into the Supabase provider screen.
+4. Make sure your `.env` has the Supabase URL + anon key (see `.env.example`) — Google sign-in only exists in cloud mode.
+5. In the app: Auth screen → **Continue with Google**. On web it redirects and returns with the session; on mobile it opens the auth popup.
+
+No hardcoded keys anywhere — everything reads from `EXPO_PUBLIC_*` env vars. The app runs fully in Local Mode without them.
+
 ## 📱 Building the Android APK
 
 **Easiest — EAS Build (cloud, no Android Studio needed):**

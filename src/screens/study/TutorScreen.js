@@ -9,6 +9,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { aiTutorReply, aiMotivate, AIUnavailableError } from '../../lib/aiFeatures';
+import { MathText } from '../../components/ui/MathText';
 import { aiStatus } from '../../lib/aiService';
 import { isOnline } from '../../lib/aiService';
 import { ScreenHeader } from '../../components/ui/ScreenHeader';
@@ -269,7 +270,7 @@ function Bubble({ m }) {
             color: m.error ? '#991B1B' : isUser ? '#FFF' : LIGHT.text,
           }}
         >
-          {m.content}
+          <MathText>{m.content}</MathText>
         </Text>
       </View>
       {!isUser ? (

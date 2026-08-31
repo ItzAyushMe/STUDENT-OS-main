@@ -18,6 +18,7 @@ import { db } from '../../lib/db';
 import { aiSummarizeContent, AIUnavailableError } from '../../lib/aiFeatures';
 import { aiStatus } from '../../lib/aiService';
 import { CONTENT_TYPES } from '../../config/constants';
+import { FREE_LIBRARY, LIB_KIND_ICON } from '../../data/contentLibrary';
 import { fonts } from '../../config/theme';
 import { nowIso } from '../../lib/utils';
 
@@ -26,6 +27,8 @@ export function ContentScreen({ navigation }) {
   const { awardXP } = useGame();
   const [items, setItems] = useState(null);
   const [filter, setFilter] = useState('All');
+  const [tab, setTab] = useState('locker'); // 'locker' | 'library'
+  const [openSubject, setOpenSubject] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
   const [aiBusyId, setAiBusyId] = useState(null);
   const [aiMsg, setAiMsg] = useState('');
@@ -118,6 +121,16 @@ export function ContentScreen({ navigation }) {
         }
       />
 
+      {/* Locker vs Free Library switcher */}
+      <View style={{ flexDirection: 'row', marginBottom: 14 }}>
+        <TabBtn label="🗂️ My Locker" active={tab === 'locker'} onPress={() => setTab('locker')} />
+        <TabBtn label="📚 Free Library" active={tab === 'library'} onPress={() => setTab('library')} />
+      </View>
+
+      {tab === 'library' ? (
+        <FreeLibrary openSubject={openSubject} setOpenSubject={setOpenSubject} onOpen={(url) => Linking.openURL(url).catch(() => {})} />
+      ) : (
+      <>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 }}>
         {types.map((t) => (
           <Chip
@@ -193,6 +206,9 @@ export function ContentScreen({ navigation }) {
         })
       )}
 
+      </>
+      )}
+
       <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="Add to Locker" mode="light">
         <View style={{ flexDirection: 'row', marginBottom: 14 }}>
           <Chip label="📝 Note" selected={form.kind === 'note'} onPress={() => setForm({ ...form, kind: 'note' })} mode="light" />
@@ -210,5 +226,138 @@ export function ContentScreen({ navigation }) {
         <Button title="Save (+5 XP)" mode="light" onPress={add} disabled={!form.title.trim() || (form.kind === 'link' && !form.body.trim())} />
       </ModalSheet>
     </Screen>
+  );
+}
+
+function TabBtn({ label, active, onPress }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => ({
+        flex: 1,
+        paddingVertical: 9,
+        borderRadius: 12,
+        alignItems: 'center',
+        backgroundColor: active ? '#6D28D9' : '#FFFFFF',
+        borderWidth: 1,
+        borderColor: active ? '#6D28D9' : '#E2E8F0',
+        marginRight: 8,
+        opacity: pressed ? 0.75 : 1,
+      })}
+    >
+      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: active ? '#FFF' : '#334155' }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+// Pre-loaded FREE resources — notes, videos, PYQ banks, olympiad set.
+// Nothing to set up; students can add their own on the My Locker tab.
+function FreeLibrary({ openSubject, setOpenSubject, onOpen }) {
+  const subjects = Object.keys(FREE_LIBRARY.subjects);
+  return (
+    <View>
+      <Card mode="light" style={{ marginBottom: 14, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+        <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#5B21B6' }}>
+          📚 Free Library — kuch bhi setup nahi karna
+        </Text>
+        <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#6D28D9', marginTop: 4, lineHeight: 17 }}>
+          Official NCERT/CBSE/NTA resources + best free teaching channels, subject-wise. Apne notes/links My Locker tab
+          mein add karo.
+        </Text>
+      </Card>
+
+      {FREE_LIBRARY.general.map((r, i) => (
+        <Card key={`g${i}`} mode="light" onPress={() => onOpen(r.url)} style={{ marginBottom: 10 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+            <Text style={{ fontSize: 22, marginRight: 12 }}>{LIB_KIND_ICON[r.kind] || '🔗'}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B' }}>{r.title}</Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginTop: 3, lineHeight: 16 }}>{r.desc}</Text>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#0891B2', marginTop: 5 }}>✅ FREE · {r.source}</Text>
+            </View>
+            <Ionicons name="open-outline" size={16} color="#CBD5E1" style={{ marginTop: 2 }} />
+          </View>
+        </Card>
+      ))}
+
+      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginTop: 6, marginBottom: 8 }}>
+        Subject-wise chapters
+      </Text>
+      {subjects.map((subj) => {
+        const open = openSubject === subj;
+        return (
+          <View key={subj} style={{ marginBottom: 10 }}>
+            <Pressable
+              onPress={() => setOpenSubject(open ? null : subj)}
+              style={({ pressed }) => ({
+                backgroundColor: '#FFFFFF',
+                borderWidth: 1,
+                borderColor: '#E2E8F0',
+                borderRadius: 12,
+                padding: 13,
+                opacity: pressed ? 0.75 : 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+              })}
+            >
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', flex: 1 }}>{subj}</Text>
+              <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={18} color="#64748B" />
+            </Pressable>
+            {open
+              ? FREE_LIBRARY.subjects[subj].map((ch, ci) => (
+                  <View key={ci} style={{ marginLeft: 8, marginTop: 8 }}>
+                    <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#475569', marginBottom: 6 }}>
+                      {ch.chapter}
+                    </Text>
+                    {ch.items.map((it, ii) => (
+                      <Pressable
+                        key={ii}
+                        onPress={() => onOpen(it.url)}
+                        style={({ pressed }) => ({
+                          backgroundColor: '#F8FAFC',
+                          borderWidth: 1,
+                          borderColor: '#E2E8F0',
+                          borderRadius: 10,
+                          padding: 10,
+                          marginBottom: 6,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          opacity: pressed ? 0.7 : 1,
+                        })}
+                      >
+                        <Text style={{ fontSize: 16, marginRight: 10 }}>{LIB_KIND_ICON[it.kind] || '🔗'}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#1E293B' }}>{it.title}</Text>
+                          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 2 }}>
+                            ✅ FREE · {it.source}
+                          </Text>
+                        </View>
+                        <Ionicons name="open-outline" size={14} color="#CBD5E1" />
+                      </Pressable>
+                    ))}
+                  </View>
+                ))
+              : null}
+          </View>
+        );
+      })}
+
+      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#B45309', marginTop: 6, marginBottom: 8 }}>
+        🏅 Olympiad Library
+      </Text>
+      {FREE_LIBRARY.olympiad.map((r, i) => (
+        <Card key={`o${i}`} mode="light" onPress={() => onOpen(r.url)} style={{ marginBottom: 10, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+            <Text style={{ fontSize: 22, marginRight: 12 }}>{LIB_KIND_ICON[r.kind] || '🔗'}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#92400E' }}>{r.title}</Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#A16207', marginTop: 3, lineHeight: 16 }}>{r.desc}</Text>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#B45309', marginTop: 5 }}>✅ FREE · {r.source}</Text>
+            </View>
+            <Ionicons name="open-outline" size={16} color="#FDE68A" style={{ marginTop: 2 }} />
+          </View>
+        </Card>
+      ))}
+    </View>
   );
 }

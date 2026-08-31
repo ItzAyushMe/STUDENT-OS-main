@@ -18,6 +18,7 @@ import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { QUIZ_BANK, pickDailyArena, pickBankQuiz } from '../../lib/quizBank';
 import { aiGenerateQuiz, AIUnavailableError } from '../../lib/aiFeatures';
+import { MathText } from '../../components/ui/MathText';
 import { aiStatus, isOnline } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, fmtClock, nowIso, seededShuffle } from '../../lib/utils';
@@ -290,7 +291,7 @@ export function QuizScreen({ navigation, route }) {
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#6D28D9', letterSpacing: 1, marginBottom: 10 }}>
             {q.subject?.toUpperCase()} · {q.topic?.toUpperCase()}
           </Text>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 17.5, color: '#1E293B', lineHeight: 26 }}>{q.q}</Text>
+          <MathText style={{ fontFamily: fonts.bodySemiBold, fontSize: 17.5, color: '#1E293B', lineHeight: 26 }}>{q.q}</MathText>
         </Card>
 
         {q.options.map((opt, i) => {
@@ -328,7 +329,7 @@ export function QuizScreen({ navigation, route }) {
                   {String.fromCharCode(65 + i)}
                 </Text>
               </View>
-              <Text style={{ flex: 1, fontFamily: fonts.bodyMedium, fontSize: 14, color: '#1E293B', lineHeight: 20 }}>{opt}</Text>
+              <MathText style={{ flex: 1, fontFamily: fonts.bodyMedium, fontSize: 14, color: '#1E293B', lineHeight: 20 }}>{opt}</MathText>
               {isCorrect ? <Text style={{ fontSize: 16 }}>✅</Text> : null}
               {isWrongPick ? <Text style={{ fontSize: 16 }}>❌</Text> : null}
             </Pressable>
@@ -339,7 +340,7 @@ export function QuizScreen({ navigation, route }) {
           <Card mode="light" style={{ backgroundColor: '#F8FAFC' }}>
             <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#475569', lineHeight: 18 }}>
               {selected === q.answer ? '🎉 Sahi jawab! ' : 'Oops — '}
-              {q.explanation}
+              <MathText>{q.explanation}</MathText>
             </Text>
             <Button
               title={qIndex + 1 >= questions.length ? 'See Results →' : 'Next Question →'}

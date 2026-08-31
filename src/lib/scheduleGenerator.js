@@ -47,25 +47,92 @@ function difficultyFactor(prepLevel = '') {
 
 const rowTrack = (r) => (r.track === 'olympiad' || r.track === 'exam' ? r.track : 'class');
 
-// Nearest upcoming school exam on/after a date (YYYY-MM-DD or null)
+// Normalize a school exam entry. Supports BOTH:
+//   exact:  { label, date }                        (old shape = exact)
+//   range:  { label, start_date, end_date }        (new shape)
+//   mixed:  { label, start_date, end_date, exact, date }
+// -> { label, start, end, exact }
+function normalizeSchoolExam(e) {
+  if (!e) return null;
+  const label = e.label || e.name || 'School exam';
+  // idempotent: accepts raw entries {date|start_date|end_date|exact}
+  // AND already-normalized entries {start, end, exact}
+  const d = typeof e.date === 'string' ? e.date : e.date ? dateStr(dayjs(e.date)) : null;
+  const startRaw =
+    (typeof e.start_date === 'string' ? e.start_date : null) ||
+    (typeof e.start === 'string' ? e.start : null) ||
+    (e.start_date ? dateStr(dayjs(e.start_date)) : null);
+  const endRaw =
+    (typeof e.end_date === 'string' ? e.end_date : null) ||
+    (typeof e.end === 'string' ? e.end : null) ||
+    (e.end_date ? dateStr(dayjs(e.end_date)) : null);
+  if (e.exact && d) return { label, start: d, end: d, exact: true };
+  if (startRaw || endRaw || d) {
+    const start = startRaw || d || endRaw;
+    const end = endRaw || start;
+    return { label, start, end: end < start ? start : end, exact: false };
+  }
+  return null;
+}
+
+// Nearest upcoming school exam (by range START) on/after a date
 function nextSchoolExamOnOrAfter(schoolExams = [], date) {
-  const valid = (schoolExams || [])
-    .map((e) => ({ label: e.label || 'School exam', date: typeof e.date === 'string' ? e.date : dateStr(dayjs(e.date)) }))
-    .filter((e) => e.date && !dayjs(e.date).isBefore(dayjs(date), 'day'));
+  const valid = allSchoolExams(schoolExams).filter((e) => !dayjs(e.start).isBefore(dayjs(date), 'day'));
   if (!valid.length) return null;
-  valid.sort((a, b) => a.date.localeCompare(b.date));
   return valid[0];
 }
 
 function allSchoolExams(schoolExams = []) {
   return (schoolExams || [])
-    .map((e) => ({ label: e.label || 'School exam', date: typeof e.date === 'string' ? e.date : dateStr(dayjs(e.date)) }))
-    .filter((e) => e.date)
-    .sort((a, b) => a.date.localeCompare(b.date));
+    .map(normalizeSchoolExam)
+    .filter(Boolean)
+    .sort((a, b) => a.start.localeCompare(b.start));
+}
+
+// Student-configurable priorities (FIX B).
+// Shape on users.priorities:
+//   { order: ['class','exam','olympiad'], enabled: {class:true,...},
+//     timeSplit: { class: 60, exam: 30, olympiad: 10 } }
+const DEFAULT_PRIORITIES = {
+  order: ['class', 'exam', 'olympiad'],
+  enabled: { class: true, exam: true, olympiad: true },
+  timeSplit: { class: 60, exam: 30, olympiad: 10 },
+};
+
+export function normalizePriorities(p) {
+  const next = {
+    order: Array.isArray(p?.order) && ['class', 'exam', 'olympiad'].every((t) => p.order.includes(t))
+      ? [...p.order]
+      : [...DEFAULT_PRIORITIES.order],
+    enabled: { ...DEFAULT_PRIORITIES.enabled, ...(p?.enabled || {}) },
+    timeSplit: { ...DEFAULT_PRIORITIES.timeSplit, ...(p?.timeSplit || {}) },
+  };
+  // only keep enabled tracks in the scheduling order
+  next.order = next.order.filter((t) => next.enabled[t] !== false);
+  // normalize time split of ENABLED tracks to 100
+  const active = next.order;
+  const sum = active.reduce((a, t) => a + (Number(next.timeSplit[t]) || 0), 0);
+  if (sum > 0) {
+    let running = 0;
+    active.forEach((t, i) => {
+      if (i === active.length - 1) {
+        next.timeSplit[t] = Math.max(0, Math.round(100 - running));
+      } else {
+        next.timeSplit[t] = Math.round(((Number(next.timeSplit[t]) || 0) / sum) * 100);
+        running += next.timeSplit[t];
+      }
+    });
+  } else {
+    const even = Math.floor(100 / Math.max(1, active.length));
+    active.forEach((t, i) => {
+      next.timeSplit[t] = i === active.length - 1 ? 100 - even * (active.length - 1) : even;
+    });
+  }
+  return next;
 }
 
 // ---------- deadlines: track-aware, school-exam aware ----------
-// class rows -> 14 days before nearest school exam (else exam date)
+// class rows -> 14 days before nearest school exam RANGE START (else exam date)
 // olympiad rows -> olympiad date (else exam date)
 // exam rows -> exam date
 export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolExams = []) {
@@ -74,17 +141,6 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
   const exams = allSchoolExams(schoolExams);
   const nextSchool = nextSchoolExamOnOrAfter(exams, today);
 
-  const out = {};
-  for (const row of syllabusRows) {
-    const track = rowTrack(row);
-    let target = examDate || null;
-    if (track === 'class' && nextSchool) {
-      target = dateStr(dayjs(nextSchool.date).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'));
-    } else if (track === 'olympiad' && row.olympiad_date) {
-      target = row.olympiad_date;
-    }
-    out[row.id] = target;
-  }
   // distribute within the target window per track
   const byTrack = { class: [], olympiad: [], exam: [] };
   for (const row of syllabusRows) {
@@ -95,7 +151,7 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
   for (const [track, rows] of Object.entries(byTrack)) {
     if (!rows.length) continue;
     const target = track === 'class' && nextSchool
-      ? dateStr(dayjs(nextSchool.date).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'))
+      ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'))
       : examDate;
     if (!target) continue;
     const totalDays = Math.max(1, dayjs(target).diff(dayjs(today), 'day'));
@@ -122,7 +178,8 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
 // ---------- the main planner ----------
 // opts: {
 //   syllabus, examDate, olympiadDate,
-//   schoolExams: [{label, date}],
+//   schoolExams: [{label, date}] | [{label, start_date, end_date, exact}],
+//   priorities: { order, enabled, timeSplit }  (student's own — FIX B),
 //   dailyHours, preferredTime, daysOff[], prepLevel, weeks?, userId
 // }
 export function generateSchedule(opts) {
@@ -131,6 +188,7 @@ export function generateSchedule(opts) {
     examDate = null,
     olympiadDate = null,
     schoolExams = [],
+    priorities = null,
     dailyHours = 3,
     preferredTime = '',
     daysOff = [],
@@ -151,9 +209,19 @@ export function generateSchedule(opts) {
   const dailyCapacityMin = Math.max(30, Math.round(dailyHours * 60));
 
   const exams = allSchoolExams(schoolExams);
-  const schoolExamDates = new Set(exams.map((e) => e.date));
+  // every day inside an exam RANGE (or the exact day) is an exam day
+  const schoolExamDates = new Set();
+  for (const e of exams) {
+    const days = dayjs(e.end).diff(dayjs(e.start), 'day');
+    for (let i = 0; i <= Math.min(days, 30); i++) schoolExamDates.add(dateStr(dayjs(e.start).add(i, 'day')));
+  }
 
-  // PRIORITY QUEUE: class -> olympiad -> exam (the core rule).
+  // STUDENT-CONFIGURED PRIORITIES (FIX B): order + weekly time split.
+  // Default: class → exam → olympiad. Disabled tracks are skipped.
+  const prio = normalizePriorities(priorities);
+  const activeOrder = prio.order; // only enabled tracks
+
+  // PRIORITY QUEUE in the student's chosen order.
   // Within a track: weightage desc, deadline asc.
   const trackSorted = (rows) =>
     rows.sort((a, b) => {
@@ -166,19 +234,27 @@ export function generateSchedule(opts) {
     if (r.status === 'completed') continue;
     pendingByTrack[rowTrack(r)].push(r);
   }
-  const queue = [
-    ...trackSorted(pendingByTrack.class),
-    ...trackSorted(pendingByTrack.olympiad),
-    ...trackSorted(pendingByTrack.exam),
-  ];
-  // position in the queue where each track starts (for track-of-the-day logic)
-  const classEnd = pendingByTrack.class.length;
-  const olympiadEnd = classEnd + pendingByTrack.olympiad.length;
+  // one queue per track; we pull from each in priority order each day
+  const queues = {};
+  const trackStart = {};
+  for (const t of activeOrder) {
+    queues[t] = trackSorted(pendingByTrack[t]);
+    trackStart[t] = 0;
+  }
+
+  // per-track daily time budget from the student's split (minutes).
+  // Unused budget rolls over to the NEXT track that same day.
+  const trackBudget = (isDayOff) => {
+    const cap = isDayOff ? Math.min(60, dailyCapacityMin) : dailyCapacityMin;
+    const budgets = {};
+    for (const t of activeOrder) budgets[t] = Math.round((cap * (Number(prio.timeSplit[t]) || 0)) / 100);
+    return budgets;
+  };
 
   const out = [];
   const studied = []; // {subject, chapter, date, track} for revision cycles
-  let topicIdx = 0;
   let blockCount = 0;
+  const covered = { class: 0, olympiad: 0, exam: 0 };
 
   for (let d = 0; d < totalDays; d++) {
     const date = dateStr(dayjs(today).add(d, 'day'));
@@ -186,10 +262,10 @@ export function generateSchedule(opts) {
     const isDayOff = daysOff.includes(weekday);
     const daysToExam = examDate ? dayjs(examDate).diff(dayjs(date), 'day') : null;
     const schoolExamToday = schoolExamDates.has(date);
-    const dayBeforeSchoolExam = exams.some((e) => dateStr(dayjs(e.date).subtract(1, 'day')) === date);
-    // revision wave: 14 days before each school exam
+    const dayBeforeSchoolExam = exams.some((e) => dateStr(dayjs(e.start).subtract(1, 'day')) === date);
+    // revision wave: 14 days before each school exam RANGE START
     const inSchoolExamRev = exams.some((e) => {
-      const diff = dayjs(e.date).diff(dayjs(date), 'day');
+      const diff = dayjs(e.start).diff(dayjs(date), 'day');
       return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS;
     });
     const isMockDay =
@@ -197,8 +273,6 @@ export function generateSchedule(opts) {
       ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 70 : olympiadDate != null)) ||
         dayBeforeSchoolExam ||
         (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date));
-    const isBufferDay = false; // main-exam buffer handled in the day loop below
-    void isBufferDay;
 
     let cursor = startM;
     let remaining = isDayOff ? Math.min(60, dailyCapacityMin) : dailyCapacityMin;
@@ -263,20 +337,40 @@ export function generateSchedule(opts) {
     }
 
     // ---- normal study day ----
-    // 1) the priority queue (class → olympiad → exam)
-    while (remaining >= 30 && topicIdx < queue.length) {
-      const t = queue[topicIdx];
-      const needMin = Math.round((t.estimated_hours || 4) * 60 * factor);
-      const block = Math.min(50, remaining, Math.max(30, needMin));
-      push(t.subject, t.chapter, 'study', block, rowTrack(t));
-      studied.push({ subject: t.subject, chapter: t.chapter, date, track: rowTrack(t) });
-      blockCount += 1;
-      if (block >= Math.min(50, needMin)) {
-        topicIdx += 1;
-        // every 2nd finished topic gets a timed-practice block
-        if (blockCount % 2 === 0 && remaining >= 35) {
-          push(t.subject, `Timed practice: 10 Qs in 25 min (${t.chapter})`, 'practice', 30, rowTrack(t));
+    // 1) tracks in the STUDENT'S priority order, each with its own
+    //    time budget (timeSplit). Unused budget rolls to the next track.
+    const budgets = trackBudget(isDayOff);
+    for (const track of activeOrder) {
+      let budget = budgets[track] || 0;
+      // school-exam guard: near a school exam the class track may exceed
+      // its split — class work cannot be postponed past the exam
+      const classUrgent =
+        track === 'class' &&
+        exams.some((e) => {
+          const diff = dayjs(e.start).diff(dayjs(date), 'day');
+          return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS + 7;
+        });
+      while (remaining >= 30 && (budget >= 30 || (classUrgent && remaining >= 30))) {
+        const q = queues[track];
+        const idx = trackStart[track];
+        if (idx >= q.length) break; // this track is done — budget rolls over
+        const t = q[idx];
+        const needMin = Math.round((t.estimated_hours || 4) * 60 * factor);
+        const block = Math.min(50, remaining, Math.max(30, needMin), Math.max(30, budget));
+        push(t.subject, t.chapter, 'study', block, track);
+        studied.push({ subject: t.subject, chapter: t.chapter, date, track });
+        blockCount += 1;
+        budget -= block + 5;
+        if (block >= Math.min(50, needMin)) {
+          trackStart[track] = idx + 1;
+          covered[track] = (covered[track] || 0) + 1;
+          // every 2nd finished topic gets a timed-practice block
+          if (blockCount % 2 === 0 && remaining >= 35) {
+            push(t.subject, `Timed practice: 10 Qs in 25 min (${t.chapter})`, 'practice', 30, track);
+            budget -= 35;
+          }
         }
+        if (!classUrgent && budget < 30) break;
       }
     }
 
@@ -302,18 +396,19 @@ export function generateSchedule(opts) {
     }
   }
 
-  // Track coverage summary — powers the "class first ✅" banner in the UI
+  // Track coverage summary — powers the priority banner in the UI
+  const nextSchool = nextSchoolExamOnOrAfter(exams, today);
   const coverage = {
+    priorityOrder: activeOrder,
+    timeSplit: prio.timeSplit,
     classTotal: pendingByTrack.class.length,
-    classPlanned: Math.min(topicIdx, classEnd),
+    classPlanned: covered.class || 0,
     olympiadTotal: pendingByTrack.olympiad.length,
-    olympiadPlanned: Math.max(0, Math.min(topicIdx, olympiadEnd) - classEnd),
+    olympiadPlanned: covered.olympiad || 0,
     examTotal: pendingByTrack.exam.length,
-    examPlanned: Math.max(0, topicIdx - olympiadEnd),
-    nextSchoolExam: nextSchoolExamOnOrAfter(exams, today),
-    classDoneBy: nextSchoolExamOnOrAfter(exams, today)
-      ? dateStr(dayjs(nextSchoolExamOnOrAfter(exams, today).date).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'))
-      : null,
+    examPlanned: covered.exam || 0,
+    nextSchoolExam: nextSchool,
+    classDoneBy: nextSchool ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')) : null,
   };
   out.coverage = coverage;
   return out;

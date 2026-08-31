@@ -39,6 +39,16 @@ export function ScheduleScreen({ navigation }) {
   const [coverage, setCoverage] = useState(null);
   const [aiPlanMsg, setAiPlanMsg] = useState('');
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
+  const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
+
+  // human-readable priority line for the generate modal (reads the
+  // student's own priority settings — FIX B)
+  const prioritySummary = () => {
+    const p = profile.priorities || {};
+    const order = Array.isArray(p.order) && p.order.length ? p.order : ['class', 'exam', 'olympiad'];
+    const names = { class: '🏫 Class', exam: `🎯 ${profile.competitive_exam || 'Exam'}`, olympiad: '🏅 Olympiad' };
+    return order.map((t) => names[t] || t).join(' → ');
+  };
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -90,17 +100,26 @@ export function ScheduleScreen({ navigation }) {
     setSessions((prev) => prev.map((x) => (x.id === s.id ? { ...x, status: 'skipped' } : x)));
   };
 
-  const generate = async (alsoDeadlines) => {
+  // FIX D: regeneration always ASKS first — never silently appends on
+  // top of old data. Two modes: fresh start, or keep-completed history.
+  const generate = async (mode = 'keep-completed') => {
     setGenBusy(true);
     try {
       const syllabus = await db.list('syllabus', { eq: { user_id: profile.id } });
-      // wipe pending future sessions (history stays)
-      await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+      if (mode === 'fresh') {
+        // wipe ALL schedule entries (fresh start). Syllabus progress
+        // (completed topics/deadlines) is untouched — only slots rebuild.
+        await db.removeWhere('schedule', { user_id: profile.id });
+      } else {
+        // keep completed/skipped history; replace only pending entries
+        await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+      }
       const rows = generateSchedule({
         syllabus,
         examDate: profile.exam_date,
         olympiadDate: profile.olympiad_date || null,
         schoolExams: Array.isArray(profile.school_exams) ? profile.school_exams : [],
+        priorities: profile.priorities || null,
         dailyHours: profile.daily_study_hours,
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
@@ -110,7 +129,7 @@ export function ScheduleScreen({ navigation }) {
       });
       setCoverage(rows.coverage || null);
       if (rows.length) await db.insertMany('schedule', rows);
-      if (alsoDeadlines && syllabus.length) {
+      if (syllabus.length) {
         const deadlines = autoSetDeadlines(
           syllabus,
           profile.exam_date,
@@ -273,31 +292,58 @@ export function ScheduleScreen({ navigation }) {
           label="School exams"
           value={
             (profile.school_exams || []).length
-              ? (profile.school_exams || []).map((e) => `${e.label} (${e.date})`).join(', ')
+              ? (profile.school_exams || [])
+                  .map((e) => `${e.label} (${e.exact ? e.date || e.start_date : `${e.start_date || e.date} → ${e.end_date || e.date}`})`)
+                  .join(', ')
               : 'Not set — add in Settings for class-first planning'
           }
         />
         <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#5B21B6', marginTop: 10, marginBottom: 4, lineHeight: 17 }}>
-          Priority: 🏫 Class syllabus FIRST → 🏅 Olympiad → 🎯 {profile.competitive_exam || 'exam'} (leftover time). Revision
-          waves + mocks + timed practice included.
-        </Text>
-        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginTop: 10, marginBottom: 14 }}>
-          Note: existing pending quests will be replaced. Completed history safe rahega.
+          Priority: {prioritySummary()}. Revision waves + mocks + timed practice included.
         </Text>
         <Button
           title="Generate My Plan ⚡"
           mode="light"
           loading={genBusy}
-          onPress={() => generate(true)}
+          onPress={() => setRegenChoiceOpen(true)}
           style={{ marginBottom: 10 }}
         />
+      </ModalSheet>
+
+      {/* FIX D: regeneration always asks — never silently piles new on old */}
+      <ModalSheet visible={regenChoiceOpen} onClose={() => setRegenChoiceOpen(false)} title="How should we rebuild?" mode="light">
+        <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#475569', lineHeight: 19, marginBottom: 14 }}>
+          Regenerating builds a fresh plan from your syllabus progress. Your completed chapters, deadlines and XP stay safe —
+          only the schedule slots change.
+        </Text>
         <Button
-          title="Generate without touching deadlines"
+          title="🔄 Keep completed, replace the rest"
+          mode="light"
+          loading={genBusy}
+          onPress={() => {
+            setRegenChoiceOpen(false);
+            generate('keep-completed');
+          }}
+          style={{ marginBottom: 10 }}
+        />
+        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginTop: -4, marginBottom: 14, lineHeight: 16 }}>
+          Recommended — completed/skipped history stays, pending quests rebuild from where you are.
+        </Text>
+        <Button
+          title="🧹 Replace my whole schedule (fresh start)"
           variant="secondary"
           mode="light"
           disabled={genBusy}
-          onPress={() => generate(false)}
+          onPress={() => {
+            setRegenChoiceOpen(false);
+            generate('fresh');
+          }}
+          style={{ marginBottom: 6 }}
         />
+        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginBottom: 10, lineHeight: 16 }}>
+          Wipes ALL schedule entries (including completed history) and starts clean. Syllabus progress is still preserved.
+        </Text>
+        <Button title="Cancel" variant="ghost" mode="light" onPress={() => setRegenChoiceOpen(false)} />
       </ModalSheet>
 
       {/* Add block modal */}

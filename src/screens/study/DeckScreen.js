@@ -12,6 +12,7 @@ import { Button } from '../../components/ui/Button';
 import { Confetti } from '../../components/gamer/Confetti';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { MathText } from '../../components/ui/MathText';
 import { fonts, radius } from '../../config/theme';
 import { subjectColor, nowIso } from '../../lib/utils';
 
@@ -155,7 +156,7 @@ export function DeckScreen({ navigation, route }) {
                   QUESTION
                 </Text>
                 <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 19, color: '#1E293B', textAlign: 'center', lineHeight: 28 }}>
-                  {card.front_text}
+                  <MathText>{card.front_text}</MathText>
                 </Text>
                 <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', textAlign: 'center', marginTop: 20 }}>
                   Tap to flip 🔄
@@ -176,7 +177,7 @@ export function DeckScreen({ navigation, route }) {
                   ANSWER
                 </Text>
                 <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 18, color: '#1E293B', textAlign: 'center', lineHeight: 27 }}>
-                  {card.back_text}
+                  <MathText>{card.back_text}</MathText>
                 </Text>
               </Card>
             </Animated.View>

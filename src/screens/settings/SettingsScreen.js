@@ -15,6 +15,7 @@ import { fonts, radius } from '../../config/theme';
 import { askAI, AIUnavailableError } from '../../lib/aiService';
 import { infoAlert, confirmAlert } from '../../lib/alert';
 import { wipeLocalData } from '../../lib/db';
+import { normalizePriorities } from '../../lib/scheduleGenerator';
 import { APP_NAME, APP_TAGLINE, APP_VERSION } from '../../config/constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
@@ -30,7 +31,18 @@ export function SettingsScreen({ navigation }) {
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
   const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
   const [schoolExams, setSchoolExams] = useState(
-    Array.isArray(profile?.school_exams) ? profile.school_exams.map((e) => ({ label: e.label || '', date: e.date || '' })) : []
+    Array.isArray(profile?.school_exams)
+      ? profile.school_exams.map((e) => ({
+          label: e.label || '',
+          exact: Boolean(e.exact || (e.date && !e.start_date)),
+          date: e.date || '',
+          start_date: e.start_date || e.date || '',
+          end_date: e.end_date || e.start_date || e.date || '',
+        }))
+      : []
+  );
+  const [priorities, setPriorities] = useState(() =>
+    normalizePriorities(profile?.priorities || null)
   );
   const [lastError, setLastError] = useState(null);
 
@@ -196,6 +208,99 @@ export function SettingsScreen({ navigation }) {
         ) : null}
       </Card>
 
+      {/* FIX B: student-configurable priority order + weekly time split */}
+      <SectionTitle mode="light">🎚️ Priority & Time Split</SectionTitle>
+      <Card mode="light" style={{ marginBottom: 16 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginBottom: 10, lineHeight: 17 }}>
+          Kaunsa pehle? Order set karo (↑↓), time split do (%), ya kisi track ko off bhi kar sakte ho. Scheduler inhi
+          settings pe chalega.
+        </Text>
+        {priorities.order.map((track, i) => {
+          const meta = { class: { icon: '🏫', name: 'School / Class' }, exam: { icon: '🎯', name: 'Competitive Exam' }, olympiad: { icon: '🏅', name: 'Olympiad' } }[track];
+          const enabled = priorities.enabled[track] !== false;
+          const pct = priorities.timeSplit[track] || 0;
+          return (
+            <View key={track} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={{ fontSize: 13, color: '#94A3B8', fontFamily: fonts.bodySemiBold, width: 18 }}>{i + 1}.</Text>
+              <Text style={{ fontSize: 17, marginRight: 8 }}>{meta.icon}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: enabled ? '#1E293B' : '#94A3B8', textDecorationLine: enabled ? 'none' : 'line-through' }}>
+                  {meta.name}
+                </Text>
+                <View style={{ height: 5, backgroundColor: '#F1F5F9', borderRadius: 3, marginTop: 5, overflow: 'hidden' }}>
+                  <View style={{ height: 5, width: `${Math.min(100, pct)}%`, backgroundColor: track === 'class' ? '#7C3AED' : track === 'olympiad' ? '#F59E0B' : '#EF4444' }} />
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <StepBtn icon="remove" disabled={pct <= 0} onPress={() => setPriorities((p) => ({ ...p, timeSplit: { ...p.timeSplit, [track]: Math.max(0, pct - 5) } }))} />
+                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#334155', width: 38, textAlign: 'center' }}>{pct}%</Text>
+                <StepBtn icon="add" disabled={pct >= 100} onPress={() => setPriorities((p) => ({ ...p, timeSplit: { ...p.timeSplit, [track]: Math.min(100, pct + 5) } }))} />
+                <Pressable
+                  onPress={() =>
+                    setPriorities((p) => {
+                      const enabled = { ...p.enabled, [track]: p.enabled[track] === false };
+                      return normalizePriorities({ ...p, enabled });
+                    })
+                  }
+                  hitSlop={6}
+                  style={{ padding: 6, marginLeft: 2 }}
+                >
+                  <Ionicons name={enabled ? 'eye' : 'eye-off'} size={17} color={enabled ? '#6D28D9' : '#94A3B8'} />
+                </Pressable>
+              </View>
+              <View style={{ marginLeft: 4 }}>
+                <Pressable
+                  onPress={() =>
+                    setPriorities((p) => {
+                      const order = [...p.order];
+                      const at = order.indexOf(track);
+                      if (at > 0) {
+                        order.splice(at, 1);
+                        order.splice(at - 1, 0, track);
+                      }
+                      return { ...p, order };
+                    })
+                  }
+                  hitSlop={6}
+                  style={{ padding: 3 }}
+                >
+                  <Ionicons name="chevron-up" size={15} color={i === 0 ? '#E2E8F0' : '#6D28D9'} />
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    setPriorities((p) => {
+                      const order = [...p.order];
+                      const at = order.indexOf(track);
+                      if (at < order.length - 1) {
+                        order.splice(at, 1);
+                        order.splice(at + 1, 0, track);
+                      }
+                      return { ...p, order };
+                    })
+                  }
+                  hitSlop={6}
+                  style={{ padding: 3 }}
+                >
+                  <Ionicons name="chevron-down" size={15} color={i === priorities.order.length - 1 ? '#E2E8F0' : '#6D28D9'} />
+                </Pressable>
+              </View>
+            </View>
+          );
+        })}
+        <Button
+          title="Save Priorities"
+          size="sm"
+          mode="light"
+          onPress={() => {
+            const norm = normalizePriorities(priorities);
+            setPriorities(norm);
+            updateProfile({ priorities: norm });
+            setTestResult('Priorities saved ✅ — regenerate your schedule to apply');
+          }}
+          style={{ marginTop: 6 }}
+        />
+      </Card>
+
       {/* Profile basics */}
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
@@ -223,33 +328,64 @@ export function SettingsScreen({ navigation }) {
           Mid-terms, finals… add them and the scheduler finishes your CLASS syllabus ~2 weeks before each one.
         </Text>
         {(schoolExams || []).map((e, i) => (
-          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-            <View style={{ flex: 1.4, marginRight: 8 }}>
-              <Input
-                value={e.label}
-                onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, label: v } : x)))}
-                placeholder="e.g. Mid-Term"
-              />
+          <View key={i} style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: radius.md, padding: 10, marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <View style={{ flex: 1, marginRight: 6 }}>
+                <Input
+                  value={e.label}
+                  onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, label: v } : x)))}
+                  placeholder="e.g. Mid-Term / Pre-boards"
+                />
+              </View>
+              <Pressable
+                onPress={() => setSchoolExams((prev) => prev.filter((_, j) => j !== i))}
+                hitSlop={8}
+                style={{ padding: 6, marginLeft: 4 }}
+              >
+                <Ionicons name="close-circle" size={20} color="#94A3B8" />
+              </Pressable>
             </View>
-            <View style={{ flex: 1 }}>
+            {e.exact ? (
               <Input
                 value={e.date}
                 onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, date: v } : x)))}
-                placeholder="2026-09-20"
+                placeholder="Exact date YYYY-MM-DD"
                 keyboardType="numeric"
               />
-            </View>
+            ) : (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <Input
+                    value={e.start_date}
+                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, start_date: v } : x)))}
+                    placeholder="From YYYY-MM-DD"
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Input
+                    value={e.end_date}
+                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, end_date: v } : x)))}
+                    placeholder="To YYYY-MM-DD"
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+            )}
             <Pressable
-              onPress={() => setSchoolExams((prev) => prev.filter((_, j) => j !== i))}
-              hitSlop={8}
-              style={{ padding: 6, marginLeft: 4 }}
+              onPress={() => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, exact: !x.exact } : x)))}
+              style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}
+              hitSlop={6}
             >
-              <Ionicons name="close-circle" size={20} color="#94A3B8" />
+              <Ionicons name={e.exact ? 'checkbox' : 'square-outline'} size={16} color="#6D28D9" />
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#475569', marginLeft: 6 }}>
+                I know the exact date (range ki jagah)
+              </Text>
             </Pressable>
           </View>
         ))}
         <Pressable
-          onPress={() => setSchoolExams((prev) => [...prev, { label: '', date: '' }])}
+          onPress={() => setSchoolExams((prev) => [...prev, { label: '', start_date: '', end_date: '', exact: false }])}
           style={({ pressed }) => ({
             flexDirection: 'row',
             alignItems: 'center',
@@ -265,7 +401,7 @@ export function SettingsScreen({ navigation }) {
         >
           <Ionicons name="add" size={15} color="#6D28D9" />
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#6D28D9', marginLeft: 6 }}>
-            Add school exam
+            Add school exam (date range ya exact)
           </Text>
         </Pressable>
 
@@ -275,13 +411,20 @@ export function SettingsScreen({ navigation }) {
           mode="light"
           onPress={() => {
             const clean = schoolExams
-              .map((e) => ({ label: (e.label || 'School exam').trim() || 'School exam', date: (e.date || '').trim() }))
-              .filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e.date));
-            setSchoolExams(clean.length ? clean : []);
+              .map((e) => ({
+                label: (e.label || 'School exam').trim() || 'School exam',
+                exact: Boolean(e.exact),
+                ...(e.exact
+                  ? { date: (e.date || '').trim() }
+                  : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
+              }))
+              .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
+            setSchoolExams(clean);
             updateProfile({
               exam_date: examDate || null,
               olympiad_date: olympiadDate || null,
               school_exams: clean,
+              priorities: normalizePriorities(priorities),
             });
             setTestResult('Exam setup saved ✅');
           }}
@@ -393,4 +536,26 @@ async function scheduleReminder(hhmm) {
     },
     trigger: { hour: h || 20, minute: m || 0, repeats: true, type: 'daily' },
   });
+}
+
+function StepBtn({ icon, onPress, disabled }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={4}
+      style={({ pressed }) => ({
+        width: 26,
+        height: 26,
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: disabled ? '#F8FAFC' : pressed ? '#EDE9FE' : '#F1F5F9',
+        borderWidth: 1,
+        borderColor: disabled ? '#F1F5F9' : '#E2E8F0',
+      })}
+    >
+      <Ionicons name={icon} size={15} color={disabled ? '#CBD5E1' : '#6D28D9'} />
+    </Pressable>
+  );
 }

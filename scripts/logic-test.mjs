@@ -123,52 +123,91 @@ for (const cls of ['Class 6', 'Class 7', 'Class 8', 'Class 9', 'Class 10', 'Clas
 assert.ok(Object.keys(EXAM_SYLLABI).length >= 3, 'exam tracks exist');
 assert.ok(Object.keys(OLYMPIAD_SYLLABI).length >= 4, 'olympiad tracks exist');
 
-// ---- FIX 7: priority scheduler (class → olympiad → exam) ----
+// ---- FIX 7 + B + C: student-configurable priority scheduler ----
 const multiTrackSyllabus = [
   { id: 'c1', subject: 'Science', chapter: 'Chemical Reactions', weightage: 4, estimated_hours: 6, status: 'locked', track: 'class' },
   { id: 'c2', subject: 'Maths', chapter: 'Trigonometry', weightage: 5, estimated_hours: 10, status: 'locked', track: 'class' },
+  { id: 'c3', subject: 'Science', chapter: 'Life Processes', weightage: 5, estimated_hours: 10, status: 'locked', track: 'class' },
+  { id: 'c4', subject: 'Maths', chapter: 'Quadratic Equations', weightage: 4, estimated_hours: 8, status: 'locked', track: 'class' },
   { id: 'o1', subject: 'Maths Olympiad', chapter: 'Number Theory', weightage: 5, estimated_hours: 12, status: 'locked', track: 'olympiad' },
   { id: 'e1', subject: 'Physics (JEE)', chapter: 'Rotational Dynamics', weightage: 5, estimated_hours: 14, status: 'locked', track: 'exam' },
 ];
-const schoolExamDate = new Date(Date.now() + 40 * 86400000).toISOString().slice(0, 10);
+const schoolStart = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
+const schoolEnd = new Date(Date.now() + 66 * 86400000).toISOString().slice(0, 10);
 const plan = generateSchedule({
   syllabus: multiTrackSyllabus,
   examDate: null,
-  schoolExams: [{ label: 'Mid-Term', date: schoolExamDate }],
-  dailyHours: 4,
+  schoolExams: [{ label: 'Mid-Terms', start_date: schoolStart, end_date: schoolEnd, exact: false }], // RANGE (FIX C)
+  dailyHours: 3,
+  preferredTime: 'Morning',
+  daysOff: [],
+  prepLevel: 'Intermediate',
+  weeks: 10, // horizon must include the exam range at +60 days
+  userId: 'u2',
+});
+const studyMin = (t) => plan.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
+assert.ok(plan.some(r => r.track === 'class'), 'class rows scheduled');
+// default split 60/30/10 -> class gets the most study minutes
+assert.ok(studyMin('class') >= studyMin('exam'), `class (${studyMin('class')}min) >= exam (${studyMin('exam')}min) with default 60/30/10 split`);
+assert.ok(studyMin('exam') >= studyMin('olympiad'), `exam (${studyMin('exam')}min) >= olympiad (${studyMin('olympiad')}min)`);
+assert.ok(plan.some(r => r.session_type === 'practice'), 'timed practice sessions present');
+assert.ok(plan.some(r => r.session_type === 'revision'), 'revision present');
+assert.ok(plan.some(r => r.session_type === 'mock'), 'mock days present (before school exam)');
+// exam RANGE: every day in the range is light-revision-only
+const rangeDay = new Date(Date.now() + 62 * 86400000).toISOString().slice(0, 10);
+const rangeRows = plan.filter(r => r.date === rangeDay);
+assert.ok(rangeRows.length > 0 && rangeRows.every(r => r.session_type === 'revision'), 'school exam RANGE day = light revision only');
+// class study wraps up ~2 weeks before the range START
+const lastClassDate = plan.filter(r => r.track === 'class' && r.session_type === 'study').map(r => r.date).sort().pop();
+if (lastClassDate) {
+  const bufferMs = new Date(schoolStart).getTime() - 14 * 86400000 - new Date(lastClassDate).getTime();
+  assert.ok(bufferMs >= -86400000, 'class study wraps up ~2 weeks before the school exam range');
+}
+
+// tight capacity: the split actually constrains who gets time (FIX B)
+const planTight = generateSchedule({
+  syllabus: multiTrackSyllabus, examDate: null, dailyHours: 1, preferredTime: 'Morning',
+  daysOff: [], prepLevel: 'Intermediate', weeks: 6, userId: 'u2',
+});
+const tightMin = (t) => planTight.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
+assert.ok(tightMin('class') > tightMin('exam') && tightMin('class') > tightMin('olympiad'), `tight capacity honours 60/30/10 split (class ${tightMin('class')} vs exam ${tightMin('exam')} vs olympiad ${tightMin('olympiad')} min)`);
+
+// custom priority: olympiad first with a big split (FIX B)
+const plan2 = generateSchedule({
+  syllabus: multiTrackSyllabus,
+  examDate: null,
+  dailyHours: 1,
   preferredTime: 'Morning',
   daysOff: [],
   prepLevel: 'Intermediate',
   weeks: 6,
   userId: 'u2',
+  priorities: { order: ['olympiad', 'class', 'exam'], enabled: { class: true, exam: true, olympiad: true }, timeSplit: { olympiad: 70, class: 20, exam: 10 } },
 });
-// class rows must ALL appear before any olympiad/exam row
-const order = plan.filter(r => r.session_type === 'study').map(r => r.track);
-const firstNonClass = order.findIndex(t => t !== 'class');
-if (firstNonClass >= 0) {
-  assert.ok(order.slice(firstNonClass).every(t => t !== 'class'), 'class rows all scheduled BEFORE olympiad/exam rows');
-}
-assert.ok(plan.some(r => r.track === 'class'), 'class rows scheduled');
-assert.ok(plan.coverage && typeof plan.coverage.classTotal === 'number', 'coverage summary attached');
-// timed practice + revision + school-exam revision wave
-assert.ok(plan.some(r => r.session_type === 'practice'), 'timed practice sessions present');
-assert.ok(plan.some(r => r.session_type === 'revision'), 'revision present');
-assert.ok(plan.some(r => r.session_type === 'mock'), 'mock days present (before school exam)');
-// nothing scheduled ON the school exam day except light revision
-const examDayRows = plan.filter(r => r.date === schoolExamDate);
-assert.ok(examDayRows.length > 0 && examDayRows.every(r => r.session_type === 'revision'), 'school exam day = light revision only');
-// class syllabus coverage before the exam (2-week buffer respected)
-const lastClassDate = plan.filter(r => r.track === 'class' && r.session_type === 'study').map(r => r.date).sort().pop();
-if (lastClassDate) {
-  const bufferMs = new Date(schoolExamDate).getTime() - 14 * 86400000 - new Date(lastClassDate).getTime();
-  assert.ok(bufferMs >= -86400000, 'class study wraps up ~2 weeks before the school exam');
-}
+const studyMin2 = (t) => plan2.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
+assert.ok(studyMin2('olympiad') > studyMin2('class'), `olympiad-first priorities give olympiad more time (${studyMin2('olympiad')} vs ${studyMin2('class')} min)`);
+assert.ok(plan2.coverage.priorityOrder[0] === 'olympiad', 'coverage reports custom order');
+
+// disabled track never appears (FIX B)
+const plan3 = generateSchedule({
+  syllabus: multiTrackSyllabus,
+  examDate: null,
+  dailyHours: 3,
+  preferredTime: 'Morning',
+  daysOff: [],
+  prepLevel: 'Intermediate',
+  weeks: 4,
+  userId: 'u2',
+  priorities: { order: ['class', 'exam', 'olympiad'], enabled: { class: true, exam: false, olympiad: false }, timeSplit: { class: 100, exam: 0, olympiad: 0 } },
+});
+assert.ok(!plan3.some(r => r.track === 'exam'), 'disabled exam track never scheduled');
+assert.ok(!plan3.some(r => r.track === 'olympiad'), 'disabled olympiad track never scheduled');
 
 // track-aware deadlines: class rows due before school exam minus buffer
-const dls2 = autoSetDeadlines(multiTrackSyllabus, null, 4, [{ label: 'Mid-Term', date: schoolExamDate }]);
+const dls2 = autoSetDeadlines(multiTrackSyllabus, null, 4, [{ label: 'Mid-Term', start_date: schoolStart, end_date: schoolEnd }]);
 assert.ok(dls2.c1 && dls2.c2, 'class deadlines set from school exam');
-assert.ok(dls2.c1 <= schoolExamDate && dls2.c2 <= schoolExamDate, 'class deadlines before school exam');
-const deadlineBuffer = (new Date(schoolExamDate) - new Date(dls2.c2)) / 86400000;
+assert.ok(dls2.c1 <= schoolStart && dls2.c2 <= schoolStart, 'class deadlines before school exam range');
+const deadlineBuffer = (new Date(schoolStart) - new Date(dls2.c2)) / 86400000;
 assert.ok(deadlineBuffer >= 10, `class deadline ~2 weeks before school exam (buffer: ${deadlineBuffer.toFixed(1)} days)`);
 
 console.log('ALL LOGIC TESTS PASSED ✅');
