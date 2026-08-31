@@ -33,7 +33,79 @@ async function localAll(table) {
 }
 
 async function localSave(table, rows) {
-  await AsyncStorage.setItem(KEY(table), JSON.stringify(rows));
+  const payload = JSON.stringify(rows);
+  try {
+    await AsyncStorage.setItem(KEY(table), payload);
+  } catch (e) {
+    // Storage quota exceeded (localStorage ~5MB on web). Prune growth
+    // tables and retry — this is what made the app fail "more and
+    // more" over time as xp_events/schedule/quiz history piled up.
+    console.warn(`[db] storage write failed for ${table} — pruning old data and retrying…`);
+    await pruneGrowthTables(true);
+    try {
+      await AsyncStorage.setItem(KEY(table), payload);
+    } catch (e2) {
+      // last resort: if THIS table is a growth table, keep only the newest rows
+      const keep = GROWTH_KEEP[table];
+      if (keep && Array.isArray(rows) && rows.length > Math.floor(keep / 2)) {
+        const newest = [...rows]
+          .sort((a, b) => String(b.created_at || b.date || '').localeCompare(String(a.created_at || a.date || '')))
+          .slice(0, Math.floor(keep / 2));
+        await AsyncStorage.setItem(KEY(table), JSON.stringify(newest));
+        return;
+      }
+      throw new Error(
+        `Storage full — could not save ${table}. Settings → "Reset local data" se purana data hatao. (Original error: ${
+          e2?.message || e?.message || 'quota'
+        })`
+      );
+    }
+  }
+}
+
+// Tables that grow forever in Local Mode. Capped automatically.
+const GROWTH_KEEP = {
+  xp_events: 250, // 1 row per XP award — biggest offender over time
+  quiz_results: 120,
+  focus_sessions: 120,
+  mood_logs: 60,
+  workout_logs: 80,
+  habit_logs: 500,
+};
+
+// Prune old rows so the app NEVER dies of a full storage.
+// aggressive=true (quota recovery) prunes to half the cap.
+export async function pruneGrowthTables(aggressive = false) {
+  const results = {};
+  for (const [table, cap] of Object.entries(GROWTH_KEEP)) {
+    try {
+      const rows = await localAll(table);
+      const keep = aggressive ? Math.floor(cap / 2) : cap;
+      if (rows.length > keep) {
+        const newest = [...rows]
+          .sort((a, b) => String(b.created_at || b.date || '').localeCompare(String(a.created_at || a.date || '')))
+          .slice(0, keep);
+        await AsyncStorage.setItem(KEY(table), JSON.stringify(newest));
+        results[table] = `${rows.length} → ${newest.length}`;
+      }
+    } catch {
+      /* keep going — pruning must never throw */
+    }
+  }
+  // schedule history: drop rows older than 60 days
+  try {
+    const rows = await localAll('schedule');
+    const cutoff = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+    const kept = rows.filter((r) => !r.date || r.date >= cutoff);
+    if (kept.length !== rows.length) {
+      await AsyncStorage.setItem(KEY('schedule'), JSON.stringify(kept));
+      results.schedule = `${rows.length} → ${kept.length}`;
+    }
+  } catch {
+    /* ignore */
+  }
+  if (Object.keys(results).length) console.log('[db] pruned:', JSON.stringify(results));
+  return results;
 }
 
 function matches(row, opts) {

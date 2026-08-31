@@ -15,8 +15,23 @@ import { PressStart2P_400Regular } from '@expo-google-fonts/press-start-2p';
 
 import { AppProviders } from './src/context/AppProviders';
 import { RootNavigator } from './src/navigation/RootNavigator';
+import { ErrorBoundary } from './src/components/ui/ErrorBoundary';
 import { GAMER, fonts } from './src/config/theme';
-import { Text, View } from 'react-native';
+import { Platform, Text, View } from 'react-native';
+
+// Global error capture (web): persist the last JS error so recurring
+// problems are self-diagnosing — visible in Settings → Data & Account.
+if (Platform.OS === 'web' && typeof window !== 'undefined') {
+  const saveErr = (msg) => {
+    try {
+      window.localStorage.setItem('sos.lastError', JSON.stringify({ msg: String(msg || '').slice(0, 300), ts: Date.now() }));
+    } catch {
+      /* ignore */
+    }
+  };
+  window.addEventListener('error', (e) => saveErr(e?.message || 'unknown error'));
+  window.addEventListener('unhandledrejection', (e) => saveErr(e?.reason?.message || e?.reason || 'unhandled rejection'));
+}
 
 function FontSplash() {
   return (
@@ -42,9 +57,11 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <AppProviders>
-        <RootNavigator />
-      </AppProviders>
+      <ErrorBoundary>
+        <AppProviders>
+          <RootNavigator />
+        </AppProviders>
+      </ErrorBoundary>
     </SafeAreaProvider>
   );
 }

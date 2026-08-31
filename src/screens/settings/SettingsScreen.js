@@ -1,5 +1,5 @@
 // Settings — AI provider & keys, notifications, account, local data.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Platform, Pressable, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -32,6 +32,25 @@ export function SettingsScreen({ navigation }) {
   const [schoolExams, setSchoolExams] = useState(
     Array.isArray(profile?.school_exams) ? profile.school_exams.map((e) => ({ label: e.label || '', date: e.date || '' })) : []
   );
+  const [lastError, setLastError] = useState(null);
+
+  useEffect(() => {
+    try {
+      const raw = Platform.OS === 'web' ? window.localStorage.getItem('sos.lastError') : null;
+      if (raw) setLastError(JSON.parse(raw));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const clearLastError = () => {
+    try {
+      if (Platform.OS === 'web') window.localStorage.removeItem('sos.lastError');
+    } catch {
+      /* ignore */
+    }
+    setLastError(null);
+  };
 
   const saveAI = () => {
     settings.update({ geminiKey: geminiKey.trim(), groqKey: groqKey.trim() });
@@ -297,6 +316,17 @@ export function SettingsScreen({ navigation }) {
         <Row label="Username" value={profile?.username || '—'} />
         <Row label="Class" value={profile?.class_level || '—'} />
         <Row label="Total XP" value={String(profile?.total_xp || 0)} />
+        {lastError ? (
+          <View style={{ marginTop: 10, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: radius.md, padding: 10 }}>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#B91C1C' }}>
+              LAST APP ERROR ({new Date(lastError.ts).toLocaleString()}) — copy this when reporting bugs:
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7F1D1D', marginTop: 4, lineHeight: 16 }}>{lastError.msg}</Text>
+            <Pressable onPress={clearLastError} hitSlop={6} style={{ alignSelf: 'flex-start', marginTop: 8, padding: 4 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#6D28D9' }}>Clear</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={{ flexDirection: 'row', marginTop: 12 }}>
           <Button
             title="Reset local data"
