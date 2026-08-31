@@ -33,10 +33,12 @@ export function SettingsScreen({ navigation }) {
     setTestResult('Saved! ✅');
   };
 
+  // Always save the pasted keys before testing — no "forgot to save" moments.
   const testAI = async () => {
     setTesting(true);
     setTestResult('');
     try {
+      await settings.update({ geminiKey: geminiKey.trim(), groqKey: groqKey.trim() });
       const reply = await askAI({
         prompt: 'Say hello to a student in max 12 words, Hinglish flavor, one emoji.',
         noCache: true,
@@ -84,9 +86,39 @@ export function SettingsScreen({ navigation }) {
       {/* AI */}
       <SectionTitle mode="light">🤖 AI — Professor Byte</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#64748B', marginBottom: 8, lineHeight: 18 }}>
+          No key yet? Get a FREE one in 30 seconds:{' '}
+          <Text style={{ color: '#6D28D9', fontFamily: fonts.bodyMedium }}>aistudio.google.com/apikey</Text> (Gemini){' '}
+          or <Text style={{ color: '#6D28D9', fontFamily: fonts.bodyMedium }}>console.groq.com/keys</Text> (Groq).
+          Paste it below and tap Test AI — it saves automatically.
+        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+          <View
+            style={{
+              backgroundColor: settings.aiStatus.anyConfigured ? '#ECFDF5' : '#FEF2F2',
+              borderWidth: 1,
+              borderColor: settings.aiStatus.anyConfigured ? '#A7F3D0' : '#FECACA',
+              borderRadius: 999,
+              paddingVertical: 4,
+              paddingHorizontal: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={{ fontSize: 11, marginRight: 5 }}>{settings.aiStatus.anyConfigured ? '✅' : '⚠️'}</Text>
+            <Text
+              style={{
+                fontFamily: fonts.bodyMedium,
+                fontSize: 11.5,
+                color: settings.aiStatus.anyConfigured ? '#059669' : '#DC2626',
+              }}
+            >
+              {settings.aiStatus.anyConfigured ? `AI ON · ${settings.aiStatus.provider} ready` : 'AI OFF — no key saved yet'}
+            </Text>
+          </View>
+        </View>
         <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#64748B', marginBottom: 12, lineHeight: 18 }}>
-          Pick the default provider. If it fails, StudentOS automatically tries the other one. Keys can also come from
-          .env (EXPO_PUBLIC_GEMINI_API_KEY / EXPO_PUBLIC_GROQ_API_KEY).
+          Pick the default provider. If it fails, StudentOS automatically tries the other one.
         </Text>
         <SegmentedControl
           options={[
@@ -115,17 +147,25 @@ export function SettingsScreen({ navigation }) {
         <View style={{ flexDirection: 'row' }}>
           <Button title="Save keys" size="sm" mode="light" onPress={saveAI} style={{ flex: 1, marginRight: 8 }} />
           <Button
-            title={testing ? 'Testing…' : 'Test AI'}
+            title={testing ? 'Testing…' : 'Save & Test AI'}
             size="sm"
             variant="secondary"
             mode="light"
             onPress={testAI}
             loading={testing}
-            style={{ flex: 1 }}
+            style={{ flex: 1.4 }}
           />
         </View>
         {testResult ? (
-          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#0891B2', marginTop: 10, lineHeight: 17 }}>
+          <Text
+            style={{
+              fontFamily: fonts.body,
+              fontSize: 12,
+              color: testResult.startsWith('Professor Byte') ? '#0891B2' : '#DC2626',
+              marginTop: 10,
+              lineHeight: 17,
+            }}
+          >
             {testResult}
           </Text>
         ) : null}

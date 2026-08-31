@@ -1,11 +1,12 @@
 // ============================================================
 // StudentOS — AI service (the ONLY module features call for AI)
 //
-// - Providers: Google Gemini (gemini-2.0-flash) and Groq
-//   (llama-3.3-70b-versatile). Switch via config/constants.js
-//   AI_PROVIDER, env EXPO_PUBLIC_AI_PROVIDER, or Settings screen.
-// - Automatic fallback: if the primary provider fails, the other
-//   one is tried.
+// - Providers: Google Gemini and Groq (Llama). Switch via config/
+//   env EXPO_PUBLIC_AI_PROVIDER, or at runtime in Settings.
+// - Model fallback: if a model is unavailable/deprecated (404),
+//   the next model in the chain is tried automatically.
+// - Provider fallback: if the primary provider fails, the other
+//   one is tried. Real errors are surfaced so you can diagnose.
 // - Response caching for common prompts (30 min).
 // - Graceful degradation: friendly errors, never a crash.
 //
@@ -29,6 +30,11 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CACHE_TTL = 30 * 60 * 1000;
 const RUNTIME_KEY = 'sos.ai.runtime';
 
+// Fallback chains — the first entry is the default model. If the API
+// returns "model not found" (deprecation/rollout), we try the next.
+const GEMINI_MODELS = [AI_MODELS.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'llama-3.3-70b-specdec'];
+
 // ---------- runtime config (Settings screen overrides env) ----------
 let runtime = {
   provider: null, // null -> use AI_PROVIDER constant
@@ -48,7 +54,11 @@ export async function initRuntimeConfig() {
 
 export async function setRuntimeConfig(patch) {
   runtime = { ...runtime, ...patch };
-  await AsyncStorage.setItem(RUNTIME_KEY, JSON.stringify(runtime));
+  try {
+    await AsyncStorage.setItem(RUNTIME_KEY, JSON.stringify(runtime));
+  } catch {
+    /* ignore */
+  }
   cache.clear();
   return runtime;
 }
@@ -60,8 +70,8 @@ function providerOrder() {
 }
 
 function keyFor(provider) {
-  if (provider === 'gemini') return runtime.geminiKey || process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
-  if (provider === 'groq') return runtime.groqKey || process.env.EXPO_PUBLIC_GROQ_API_KEY || '';
+  if (provider === 'gemini') return (runtime.geminiKey || process.env.EXPO_PUBLIC_GEMINI_API_KEY || '').trim();
+  if (provider === 'groq') return (runtime.groqKey || process.env.EXPO_PUBLIC_GROQ_API_KEY || '').trim();
   return '';
 }
 
@@ -77,13 +87,16 @@ export function aiStatus() {
 // ---------- connectivity ----------
 export async function isOnline() {
   try {
-    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.onLine === false) {
-      return false;
+    if (Platform.OS === 'web') {
+      // trust the browser first
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+      return true;
     }
     const state = await NetInfo.fetch();
-    return Boolean(state?.isConnected);
-  } catch {
+    if (state && typeof state.isConnected === 'boolean') return state.isConnected;
     return true; // don't block on unknown
+  } catch {
+    return true;
   }
 }
 
@@ -94,8 +107,7 @@ function cacheKey(provider, prompt, system, json) {
 }
 
 // ---------- raw provider calls ----------
-async function callGemini({ prompt, system, json, temperature, key }) {
-  const model = AI_MODELS.gemini;
+async function geminiRequest(model, { prompt, system, json, temperature, key }) {
   const body = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
@@ -114,21 +126,20 @@ async function callGemini({ prompt, system, json, temperature, key }) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Gemini ${res.status}: ${detail.slice(0, 180)}`);
+    throw new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
   }
   const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
   if (!text) throw new Error('Gemini returned an empty response.');
   return text;
 }
 
-async function callGroq({ prompt, system, json, temperature, key }) {
+async function groqRequest(model, { prompt, system, json, temperature, key }) {
   const messages = [];
   if (system) messages.push({ role: 'system', content: system });
   messages.push({ role: 'user', content: prompt });
   const body = {
-    model: AI_MODELS.groq,
+    model,
     messages,
     temperature: temperature ?? 0.7,
     max_tokens: 4096,
@@ -141,12 +152,44 @@ async function callGroq({ prompt, system, json, temperature, key }) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Groq ${res.status}: ${detail.slice(0, 180)}`);
+    throw new Error(`Groq ${res.status}: ${detail.slice(0, 160)}`);
   }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content || '';
   if (!text) throw new Error('Groq returned an empty response.');
   return text;
+}
+
+function looksLikeMissingModel(errMsg) {
+  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model/i.test(String(errMsg));
+}
+
+async function callGemini(args) {
+  let lastErr;
+  for (const model of GEMINI_MODELS) {
+    try {
+      return await geminiRequest(model, args);
+    } catch (e) {
+      lastErr = e;
+      if (looksLikeMissingModel(e?.message)) continue; // try next model
+      throw e; // auth/quota/network error — trying other models won't help
+    }
+  }
+  throw lastErr;
+}
+
+async function callGroq(args) {
+  let lastErr;
+  for (const model of GROQ_MODELS) {
+    try {
+      return await groqRequest(model, args);
+    } catch (e) {
+      lastErr = e;
+      if (looksLikeMissingModel(e?.message)) continue;
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 // ---------- public API ----------
@@ -158,6 +201,7 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
     );
   }
 
+  const failures = [];
   for (const provider of providerOrder()) {
     const key = keyFor(provider);
     if (!key) continue;
@@ -173,8 +217,9 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
       cache.set(ck, { ts: Date.now(), value });
       return value;
     } catch (e) {
-      // try the next provider
+      failures.push(`${provider}: ${e?.message || 'failed'}`);
       console.warn(`[aiService] ${provider} failed:`, e?.message);
+      // try the next provider
     }
   }
 
@@ -184,8 +229,9 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
       'AI keys missing hai. Add a Gemini or Groq API key in Settings (ya .env file) — tab Professor Byte full power mein aayenge! ⚡'
     );
   }
+  const detail = failures.join(' | ').slice(0, 220);
   throw new AIUnavailableError(
-    'AI thoda busy hai (ya keys galat hain). Thodi der baad try karo — meanwhile padhai continue! 💪'
+    `AI call fail ho gayi. Details: ${detail}\n\nKey sahi hai? Gemini keys aistudio.google.com/apikey se, Groq keys console.groq.com/keys se. Key check karke dobara try karo! 💪`
   );
 }
 

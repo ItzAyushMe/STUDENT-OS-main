@@ -3,7 +3,7 @@
 // AI provider + keys (runtime override), sound effects toggle,
 // ambient sound default volume, daily reminder.
 // ============================================================
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setRuntimeConfig, initRuntimeConfig, aiStatus } from '../lib/aiService';
 import { AI_PROVIDER } from '../config/constants';
@@ -23,6 +23,9 @@ const SettingsCtx = createContext(null);
 
 export function SettingsProvider({ children }) {
   const [settings, setSettings] = useState(DEFAULTS);
+  // always-current mirror of settings (side effects read from this,
+  // never from the React state updater — keeps updates race-free)
+  const ref = useRef(DEFAULTS);
 
   useEffect(() => {
     (async () => {
@@ -31,7 +34,17 @@ export function SettingsProvider({ children }) {
         const raw = await AsyncStorage.getItem(KEY);
         if (raw) {
           const stored = JSON.parse(raw);
-          setSettings((s) => ({ ...s, ...stored }));
+          const next = { ...DEFAULTS, ...stored };
+          ref.current = next;
+          setSettings(next);
+          // make sure the AI service sees stored keys immediately
+          if (next.geminiKey || next.groqKey || next.aiProvider) {
+            setRuntimeConfig({
+              provider: next.aiProvider || null,
+              geminiKey: next.geminiKey || null,
+              groqKey: next.groqKey || null,
+            });
+          }
         }
       } catch {
         /* ignore */
@@ -40,19 +53,19 @@ export function SettingsProvider({ children }) {
   }, []);
 
   const update = useCallback(async (patch) => {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      AsyncStorage.setItem(KEY, JSON.stringify(next)).catch(() => {});
-      // push AI config into the service layer
-      if ('aiProvider' in patch || 'geminiKey' in patch || 'groqKey' in patch) {
-        setRuntimeConfig({
-          provider: next.aiProvider || null,
-          geminiKey: next.geminiKey || null,
-          groqKey: next.groqKey || null,
-        });
-      }
-      return next;
-    });
+    const next = { ...ref.current, ...patch };
+    ref.current = next;
+    // pure state update
+    setSettings(next);
+    // side effects (fire-and-forget storage + AI runtime config)
+    AsyncStorage.setItem(KEY, JSON.stringify(next)).catch(() => {});
+    if ('aiProvider' in patch || 'geminiKey' in patch || 'groqKey' in patch) {
+      await setRuntimeConfig({
+        provider: next.aiProvider || null,
+        geminiKey: next.geminiKey || null,
+        groqKey: next.groqKey || null,
+      });
+    }
   }, []);
 
   const value = useMemo(() => {
