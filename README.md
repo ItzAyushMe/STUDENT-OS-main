@@ -126,6 +126,46 @@ Without keys, AI features (tutor chat, AI quizzes/decks/summaries/reflections) s
 
 ---
 
+## 🌐 Going Online (Production Setup) — v1.0
+
+The app is already cloud-ready — going online is **configuration, not code**. Two modes, switched automatically by whether Supabase is configured:
+
+| | 📱 Local Mode (default) | ☁️ Cloud Mode (the real online app) |
+|---|---|---|
+| Trigger | `.env` has no Supabase URL/key | `.env` has `EXPO_PUBLIC_SUPABASE_URL` + anon key |
+| Storage | Device-only (AsyncStorage) | PostgreSQL |
+| Auth | Guest / device accounts | Email + Google sign-in |
+| Guild players | Demo rivals (Arjun, Priya…) | Real friends from the database |
+| Sync | Not synced | Synced across devices |
+
+Demo rivals are gated behind Local Mode (`isRemote()` in `src/screens/guild/GuildScreen.js`) — they vanish automatically in Cloud Mode.
+
+### Steps
+
+1. **Create the database**: supabase.com → New project (region: Mumbai/Singapore) → **SQL Editor** → paste the whole `supabase/schema.sql` → Run. This creates all tables with Row-Level Security. *(Skipping this is the #1 cause of "backend doesn't work".)*
+2. **Flip to Cloud Mode**: `cp .env.example .env`, then from Supabase → Settings → API paste:
+   ```
+   EXPO_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT-ref.supabase.co
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=eyJhbGci...
+   ```
+   Add your AI keys too (`EXPO_PUBLIC_GEMINI_API_KEY` / `EXPO_PUBLIC_GROQ_API_KEY`).
+3. **Enable Google sign-in**: Supabase → Authentication → Providers → Google → Enable; create OAuth credentials in Google Cloud Console (Web application) with the redirect URI Supabase shows (`https://YOUR-PROJECT-ref.supabase.co/auth/v1/callback`); paste Client ID/Secret into the Supabase provider screen. Add your app URLs under Authentication → URL Configuration (web: `http://localhost:8081` + your deployed URL; mobile: `studentos://auth-callback`).
+4. **(Optional) pure online release**: set `EXPO_PUBLIC_CLOUD_ONLY=1` in `.env` — guest login is hidden, demo rivals never render, and without a backend the auth screen shows clear setup instructions instead of falling back to local data.
+5. **Restart**: `npx expo start -c` (env vars load at startup only).
+6. **Verify**: sign in with Google → complete onboarding → add a habit → see the row appear in Supabase's Table Editor. Guild shows real/empty friends state, no demo rivals.
+
+### Build & release
+
+```bash
+npm install -g eas-cli
+eas login                    # free Expo account
+eas build:configure
+eas build -p android --profile preview    # installable APK to share
+eas build -p android --profile production # Play Store AAB
+```
+
+Web: `npx expo export --platform web` → deploy `dist/` to Vercel/Netlify (enable SPA fallback). Add an Android package id in `app.json` (e.g. `com.yourname.studentos`) before building.
+
 ## 🔑 Google Sign-In setup (Supabase cloud mode)
 
 StudentOS ships with the full Google OAuth flow wired (`src/lib/auth.js`). To switch it on in YOUR Supabase project:

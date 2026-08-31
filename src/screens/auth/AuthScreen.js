@@ -5,8 +5,8 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } fro
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
+import { CLOUD_ONLY, APP_NAME, APP_TAGLINE } from '../../config/constants';
 import { GAMER, fonts, radius } from '../../config/theme';
-import { APP_NAME, APP_TAGLINE } from '../../config/constants';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { PixelText } from '../../components/gamer/PixelText';
@@ -41,6 +41,26 @@ export function AuthScreen() {
         await signUp({ email, password, username });
       }
     });
+
+  // Pure online mode without a backend = clear instructions, not a silent demo
+  if (CLOUD_ONLY && !cloudMode) {
+    return (
+      <View style={{ flex: 1, backgroundColor: GAMER.bg, alignItems: 'center', justifyContent: 'center', padding: 26 }}>
+        <Text style={{ fontSize: 54 }}>🔌</Text>
+        <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 17, color: GAMER.text, marginTop: 16, textAlign: 'center' }}>
+          Backend not configured
+        </Text>
+        <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.subtext, textAlign: 'center', marginTop: 10, lineHeight: 19 }}>
+          This build is the ONLINE-ONLY version of StudentOS. It needs a Supabase backend:{'\n\n'}
+          1. Create a project at supabase.com{'\n'}
+          2. Run supabase/schema.sql in the SQL editor{'\n'}
+          3. Put the Project URL + anon key in .env (EXPO_PUBLIC_SUPABASE_URL / _ANON_KEY){'\n'}
+          4. Restart with: npx expo start -c{'\n\n'}
+          See README → 'Going Online (Production Setup)'.
+        </Text>
+      </View>
+    );
+  }
 
   return (
     <KeyboardAvoidingView
@@ -191,16 +211,18 @@ export function AuthScreen() {
           style={{ marginTop: 12 }}
         />
 
-        {/* Guest */}
-        <Pressable
-          onPress={() => run(continueAsGuest)}
-          disabled={busy}
-          style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1, marginTop: 18, alignSelf: 'center' })}
-        >
-          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: GAMER.secondary }}>
-            Just explore first — Continue as Guest →
-          </Text>
-        </Pressable>
+        {/* Guest — hidden in Cloud Mode: the real online app has accounts only */}
+        {cloudMode ? null : (
+          <Pressable
+            onPress={() => run(continueAsGuest)}
+            disabled={busy}
+            style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1, marginTop: 18, alignSelf: 'center' })}
+          >
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: GAMER.secondary }}>
+              Just explore first — Continue as Guest →
+            </Text>
+          </Pressable>
+        )}
 
         <Text
           style={{

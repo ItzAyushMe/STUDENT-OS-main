@@ -11,6 +11,7 @@ import { useGame } from '../../context/GameContext';
 import { useTheme } from '../../context/ThemeContext';
 import { GAMER, fonts, radius } from '../../config/theme';
 import { db, isRemote } from '../../lib/db';
+import { CLOUD_ONLY } from '../../config/constants';
 import {
   DEMO_RIVALS, demoRivalWeeklyXp, demoFeed, syncMyWeeklyLeaderboard, tierFor,
 } from '../../lib/guildData';
@@ -78,7 +79,7 @@ export function GuildScreen({ navigation }) {
 
       // ----- friends -----
       const fr = await db.list('friends', { eq: { user_id: profile.id } });
-      const demoFriends = fr.length || isRemote() ? [] : DEMO_RIVALS.slice(0, 3).map((r) => ({ id: `demo-${r.id}`, friend: r, status: 'accepted', demo: true }));
+      const demoFriends = fr.length || isRemote() || CLOUD_ONLY ? [] : DEMO_RIVALS.slice(0, 3).map((r) => ({ id: `demo-${r.id}`, friend: r, status: 'accepted', demo: true }));
       setFriends([...fr.map((f) => ({ ...f, friend: { id: f.friend_id, display_name: f.friend_name || 'Player', username: f.friend_name || 'player' } })), ...demoFriends]);
 
       // ----- feed -----

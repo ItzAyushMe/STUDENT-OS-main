@@ -74,6 +74,14 @@ export const SESSION_TYPES = {
 // olympiad second, competitive exam last (optional/leisure layer).
 export const TRACK_PRIORITY = { class: 1, olympiad: 2, exam: 3 };
 
+// PURE ONLINE MODE (v1.0 release): set EXPO_PUBLIC_CLOUD_ONLY=1 in .env
+// to force the real online app — guest login is hidden in Cloud Mode,
+// and without Supabase configured the auth screen says so clearly
+// instead of silently falling back to demo/local data.
+export const CLOUD_ONLY = ['1', 'true', 'yes'].includes(
+  String(process.env.EXPO_PUBLIC_CLOUD_ONLY || '').toLowerCase()
+);
+
 // Empathetic focus quotes — shown ~every 20 min of a focus session.
 // Supportive, never guilt-tripping. Rotated in order.
 export const FOCUS_QUOTES = [
