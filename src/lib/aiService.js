@@ -30,10 +30,10 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CACHE_TTL = 30 * 60 * 1000;
 const RUNTIME_KEY = 'sos.ai.runtime';
 
-// Fallback chains — the first entry is the default model. If the API
-// returns "model not found" (deprecation/rollout), we try the next.
+// Fallback chains — the first entry is the default model.
+// llama-3.3-70b-specdec was DECOMMISSIONED by Groq and is removed.
 const GEMINI_MODELS = [AI_MODELS.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-1.5-flash'];
-const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'llama-3.3-70b-specdec'];
+const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'openai/gpt-oss-20b'];
 
 // ---------- runtime config (Settings screen overrides env) ----------
 let runtime = {
@@ -191,35 +191,71 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
 }
 
 function looksLikeMissingModel(errMsg) {
-  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model/i.test(String(errMsg));
+  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model|model_not_found/i.test(String(errMsg));
+}
+
+// Transient failures worth retrying: overload (503), rate limit (429),
+// bad gateway (502/504). These are common on free tiers.
+function isRetryable(errMsg) {
+  return /429|502|503|504|overload|high demand|rate.?limit|too many requests|service unavailable|temporarily/i.test(
+    String(errMsg)
+  );
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Call a provider with model fallback + retry-with-backoff:
+//  - primary model gets 3 attempts (2s → 4s backoff) on transient errors
+//  - transient/missing-model errors then advance to the next model
+//  - auth errors fail fast (retrying won't help)
+async function callProvider(models, requester, args) {
+  let lastErr;
+  for (let mi = 0; mi < models.length; mi++) {
+    const attempts = mi === 0 ? 3 : 1; // backoff retries only on the primary model
+    const waits = [0, 2000, 4000];
+    for (let a = 0; a < attempts; a++) {
+      if (waits[a]) await sleep(waits[a]);
+      try {
+        return await requester(models[mi], args);
+      } catch (e) {
+        lastErr = e;
+        const msg = String(e?.message || '');
+        if (isRetryable(msg) && a < attempts - 1) continue; // wait + retry same model
+        if (isRetryable(msg) || looksLikeMissingModel(msg)) break; // next model
+        throw e; // hard error (bad key, bad request…) — no point continuing
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function callGemini(args) {
-  let lastErr;
-  for (const model of GEMINI_MODELS) {
-    try {
-      return await geminiRequest(model, args);
-    } catch (e) {
-      lastErr = e;
-      if (looksLikeMissingModel(e?.message)) continue; // try next model
-      throw e; // auth/quota/network error — trying other models won't help
-    }
-  }
-  throw lastErr;
+  return callProvider(GEMINI_MODELS, geminiRequest, args);
 }
 
 async function callGroq(args) {
-  let lastErr;
-  for (const model of GROQ_MODELS) {
-    try {
-      return await groqRequest(model, args);
-    } catch (e) {
-      lastErr = e;
-      if (looksLikeMissingModel(e?.message)) continue;
-      throw e;
-    }
+  return callProvider(GROQ_MODELS, groqRequest, args);
+}
+
+// Plain-English translation of provider errors (FIX C: honest messages).
+function humanizeError(provider, errMsg) {
+  const m = String(errMsg || '');
+  if (/decommissioned|not found|does not exist|model_not_found/i.test(m)) {
+    return `${provider} ka model retire ho gaya tha — naye build me fix ho gaya hai. App refresh karke try karo.`;
   }
-  throw lastErr;
+  if (/503|overload|high demand|service unavailable/i.test(m)) {
+    return `${provider} servers busy hain (free tier pe common hai) — thodi der baad try karo.`;
+  }
+  if (/429|rate.?limit|too many requests/i.test(m)) {
+    return `${provider} rate limit hit — ek minute ruk ke dobara try karo.`;
+  }
+  if (/401|403|api[ _]?key|invalid|permission/i.test(m)) {
+    return `${provider} key accept nahi hui — key dobara check karo.`;
+  }
+  if (/failed to fetch|network|offline/i.test(m)) {
+    return `${provider} tak network nahi pahunch raha — connection check karo.`;
+  }
+  return `${provider}: ${m.slice(0, 140)}`;
 }
 
 // ---------- public API ----------
@@ -259,9 +295,15 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
       'AI keys missing hai. Add a Gemini or Groq API key in Settings (ya .env file) — tab Professor Byte full power mein aayenge! ⚡'
     );
   }
-  const detail = failures.join(' | ').slice(0, 220);
+  // Honest, human-readable reasons — no misleading "check your key"
+  // when the key is fine (e.g. provider overloaded / model retired).
+  const reasons = failures.map((f) => {
+    const [provider, ...rest] = String(f).split(':');
+    return humanizeError(provider.trim(), rest.join(':').trim());
+  });
+  const unique = [...new Set(reasons)];
   throw new AIUnavailableError(
-    `AI call fail ho gayi. Details: ${detail}\n\nKey sahi hai? Gemini keys aistudio.google.com/apikey se, Groq keys console.groq.com/keys se. Key check karke dobara try karo! 💪`
+    `AI thodi der ke liye busy hai. Asli wajah: ${unique.join(' | ').slice(0, 260)}\n\nAuto-retry + dusre provider pe fallback ho chuka hai. Thodi der baad dobara try karo 💪`
   );
 }
 
