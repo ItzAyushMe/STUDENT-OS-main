@@ -19,7 +19,8 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines } from '../../lib/scheduleGenerator';
-import { SESSION_TYPES } from '../../config/constants';
+import { aiReschedule } from '../../lib/aiFeatures';
+import { SESSION_TYPES, TRACK_PRIORITY } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { dayjs, todayStr, dateStr, subjectColor, fmtDuration, mondayOf, nowIso } from '../../lib/utils';
 
@@ -35,6 +36,9 @@ export function ScheduleScreen({ navigation }) {
   const [addOpen, setAddOpen] = useState(false);
   const [confetti, setConfetti] = useState(0);
   const [genBusy, setGenBusy] = useState(false);
+  const [coverage, setCoverage] = useState(null);
+  const [aiPlanMsg, setAiPlanMsg] = useState('');
+  const [aiPlanBusy, setAiPlanBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -95,6 +99,8 @@ export function ScheduleScreen({ navigation }) {
       const rows = generateSchedule({
         syllabus,
         examDate: profile.exam_date,
+        olympiadDate: profile.olympiad_date || null,
+        schoolExams: Array.isArray(profile.school_exams) ? profile.school_exams : [],
         dailyHours: profile.daily_study_hours,
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
@@ -102,9 +108,15 @@ export function ScheduleScreen({ navigation }) {
         weeks: 6,
         userId: profile.id,
       });
+      setCoverage(rows.coverage || null);
       if (rows.length) await db.insertMany('schedule', rows);
-      if (alsoDeadlines && profile.exam_date && syllabus.length) {
-        const deadlines = autoSetDeadlines(syllabus, profile.exam_date, profile.daily_study_hours);
+      if (alsoDeadlines && syllabus.length) {
+        const deadlines = autoSetDeadlines(
+          syllabus,
+          profile.exam_date,
+          profile.daily_study_hours,
+          Array.isArray(profile.school_exams) ? profile.school_exams : []
+        );
         for (const [id, deadline] of Object.entries(deadlines)) {
           await db.update('syllabus', id, { deadline });
         }
@@ -116,10 +128,31 @@ export function ScheduleScreen({ navigation }) {
     }
   };
 
+  // AI-assisted catch-up: heuristic moves first, then Professor Byte
+  // explains what to prioritise / drop (graceful if AI is offline).
   const rescheduleMissed = async () => {
-    const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours });
-    for (const m of moved) await db.update('schedule', m.id, { date: m.date, status: 'pending' });
-    await load();
+    setAiPlanBusy(true);
+    try {
+      const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours });
+      for (const m of moved) await db.update('schedule', m.id, { date: m.date, status: 'pending' });
+      await load();
+      // AI advice on what to prioritise / drop (best-effort)
+      try {
+        const behindTopics = missed.map((m) => m.topic || m.subject).filter(Boolean);
+        const plan = await aiReschedule({
+          missed: missed.slice(0, 8),
+          upcomingCount: sessions.filter((s) => s.date >= todayStr() && s.status === 'pending').length,
+          examDate: profile.exam_date,
+          dailyHours: profile.daily_study_hours,
+          behindTopics,
+        });
+        if (plan?.advice) setAiPlanMsg(plan.advice);
+      } catch {
+        setAiPlanMsg(''); // offline — heuristic moves already applied
+      }
+    } finally {
+      setAiPlanBusy(false);
+    }
   };
 
   return (
@@ -153,8 +186,37 @@ export function ScheduleScreen({ navigation }) {
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#92400E', flex: 1 }}>
             {missed.length} quest{missed.length > 1 ? 's' : ''} miss ho gaye. Chinta mat karo — ek tap mein aage shift karo.
+            Class-track quests pehle shift honge 🏫
           </Text>
-          <Button title="Auto-reschedule" size="sm" mode="light" onPress={rescheduleMissed} style={{ marginTop: 10 }} />
+          <Button
+            title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule (AI catch-up plan)'}
+            size="sm"
+            mode="light"
+            onPress={rescheduleMissed}
+            loading={aiPlanBusy}
+            style={{ marginTop: 10 }}
+          />
+          {aiPlanMsg ? (
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#B45309', marginTop: 8, lineHeight: 17 }}>
+              Professor Byte: {aiPlanMsg}
+            </Text>
+          ) : null}
+        </Card>
+      ) : null}
+
+      {/* Priority coverage banner — class first, olympiad second, exam last */}
+      {coverage ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
+            🏫 Class {coverage.classPlanned}/{coverage.classTotal} planned
+            {coverage.olympiadTotal ? ` · 🏅 Olympiad ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
+            {coverage.examTotal ? ` · 🎯 ${profile.competitive_exam || 'Exam'} ${coverage.examPlanned}/${coverage.examTotal}` : ''}
+          </Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
+            {coverage.classDoneBy && coverage.nextSchoolExam
+              ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.date}) 📅`
+              : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
+          </Text>
         </Card>
       ) : null}
 
@@ -206,6 +268,19 @@ export function ScheduleScreen({ navigation }) {
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
         <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week` : 'None'} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
+        <InfoRow label="Olympiad" value={profile.olympiad && profile.olympiad !== 'None' ? `${profile.olympiad}${profile.olympiad_date ? ` · ${profile.olympiad_date}` : ''}` : 'None'} />
+        <InfoRow
+          label="School exams"
+          value={
+            (profile.school_exams || []).length
+              ? (profile.school_exams || []).map((e) => `${e.label} (${e.date})`).join(', ')
+              : 'Not set — add in Settings for class-first planning'
+          }
+        />
+        <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#5B21B6', marginTop: 10, marginBottom: 4, lineHeight: 17 }}>
+          Priority: 🏫 Class syllabus FIRST → 🏅 Olympiad → 🎯 {profile.competitive_exam || 'exam'} (leftover time). Revision
+          waves + mocks + timed practice included.
+        </Text>
         <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginTop: 10, marginBottom: 14 }}>
           Note: existing pending quests will be replaced. Completed history safe rahega.
         </Text>
@@ -284,11 +359,14 @@ function DailyView({ selected, setSelected, sessions, onComplete, onSkip, onGene
   );
 }
 
+const TRACK_BADGE = { class: { icon: '🏫', label: 'Class' }, olympiad: { icon: '🏅', label: 'Olympiad' }, exam: { icon: '🎯', label: 'Exam' } };
+
 const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
   const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study;
   const color = type.color;
   const completed = s.status === 'completed';
   const skipped = s.status === 'skipped';
+  const badge = TRACK_BADGE[(s.track === 'olympiad' || s.track === 'exam') ? s.track : 'class'];
   return (
     <View
       style={{
@@ -305,9 +383,18 @@ const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
     >
       <View style={{ width: 5, height: 52, borderRadius: 3, backgroundColor: color, marginRight: 12 }} />
       <View style={{ flex: 1 }}>
-        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B' }}>
-          {s.start_time}–{s.end_time} · {fmtDuration(s.duration_minutes)} · {type.icon} {type.label}
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', flexShrink: 1 }}>
+            {s.start_time}–{s.end_time} · {fmtDuration(s.duration_minutes)} · {type.icon} {type.label}
+          </Text>
+          {badge && badge.label !== 'Class' ? (
+            <View style={{ backgroundColor: '#FFFBEB', borderColor: badge.label === 'Olympiad' ? '#FDE68A' : '#FEE2E2', borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1, marginLeft: 6 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 9.5, color: badge.label === 'Olympiad' ? '#B45309' : '#B91C1C' }}>
+                {badge.icon} {badge.label}
+              </Text>
+            </View>
+          ) : null}
+        </View>
         <Text
           numberOfLines={1}
           style={{
@@ -400,7 +487,7 @@ function WeeklyView({ weekDays, sessions, today, onPickDay }) {
                       marginBottom: 6,
                     }}
                   >
-                    <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#1E293B', maxWidth: 130 }}>
+                    <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#1E293B', flexShrink: 1 }}>
                       {s.start_time} {s.topic || s.subject}
                     </Text>
                   </View>

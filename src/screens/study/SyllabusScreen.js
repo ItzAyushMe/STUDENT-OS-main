@@ -1,7 +1,9 @@
-// Syllabus Map — subjects → chapters → topics with status,
-// weightage stars, progress and add/import.
+// Syllabus Map — TRACK-SCOPED: "My Class" is the default map
+// (highest priority), with optional "My Olympiad" and "My Exam"
+// layers. Subjects → chapters with status, weightage stars,
+// progress, per-track import and AI generation.
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -13,21 +15,27 @@ import { Chip } from '../../components/ui/Chip';
 import { Button } from '../../components/ui/Button';
 import { ProgressBar } from '../../components/ui/ProgressBar';
 import { ModalSheet } from '../../components/ui/ModalSheet';
-import { EmptyState, SectionTitle } from '../../components/ui/EmptyState';
+import { EmptyState } from '../../components/ui/EmptyState';
 import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
+import { seedSyllabusTrack } from '../../lib/starterData';
 import { aiGenerateSyllabus, AIUnavailableError } from '../../lib/aiFeatures';
-import { SYLLABUS_PRESETS, SUBJECT_COLORS } from '../../config/constants';
+import { TRACKS, pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI } from '../../data/syllabusData';
+import { SUBJECT_COLORS } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { pct, subjectColor, nowIso } from '../../lib/utils';
 
 const STATUS_ICON = { completed: '✅', in_progress: '🔄', locked: '🔒' };
+
+// rows saved before tracks existed belong to the class map
+const rowTrack = (r) => (r.track === 'olympiad' || r.track === 'exam' ? r.track : 'class');
 
 export function SyllabusScreen({ navigation }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [activeTrack, setActiveTrack] = useState('class');
   const [openSubject, setOpenSubject] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
@@ -37,7 +45,19 @@ export function SyllabusScreen({ navigation }) {
   const [newChapter, setNewChapter] = useState('');
   const [newWeight, setNewWeight] = useState('3');
   const [newHours, setNewHours] = useState('6');
-  const [subjects, setSubjects] = useState([]);
+
+  // which tracks does this student have? (profile + any saved rows)
+  const set = useMemo(() => pickSyllabusSet(profile || {}), [profile?.class_level, profile?.competitive_exam, profile?.olympiad]);
+  const availableTracks = useMemo(() => {
+    const t = ['class'];
+    if (set.olympiad || rows.some((r) => rowTrack(r) === 'olympiad')) t.push('olympiad');
+    if (set.exam || rows.some((r) => rowTrack(r) === 'exam')) t.push('exam');
+    return t;
+  }, [set, rows]);
+
+  useEffect(() => {
+    if (!availableTracks.includes(activeTrack)) setActiveTrack('class');
+  }, [availableTracks]);
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -45,9 +65,6 @@ export function SyllabusScreen({ navigation }) {
     try {
       const data = await db.list('syllabus', { eq: { user_id: profile.id } });
       setRows(data);
-      const subs = [...new Set(data.map((r) => r.subject))].sort();
-      setSubjects(subs);
-      setOpenSubject((prev) => (prev && subs.includes(prev) ? prev : subs[0] || null));
     } finally {
       setLoading(false);
     }
@@ -55,16 +72,24 @@ export function SyllabusScreen({ navigation }) {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const trackRows = useMemo(() => rows.filter((r) => rowTrack(r) === activeTrack), [rows, activeTrack]);
+
   const bySubject = useMemo(() => {
     const map = {};
-    for (const r of rows) {
+    for (const r of trackRows) {
       (map[r.subject] = map[r.subject] || []).push(r);
     }
     for (const s of Object.keys(map)) {
       map[s].sort((a, b) => String(a.deadline || '9999').localeCompare(String(b.deadline || '9999')));
     }
+    // auto-open first subject of this track
     return map;
-  }, [rows]);
+  }, [trackRows]);
+
+  useEffect(() => {
+    const subs = Object.keys(bySubject);
+    setOpenSubject((prev) => (prev && subs.includes(prev) ? prev : subs[0] || null));
+  }, [bySubject]);
 
   const addChapter = async () => {
     const subject = (newSubject || '').trim();
@@ -76,6 +101,7 @@ export function SyllabusScreen({ navigation }) {
       chapter,
       topic: null,
       subtopic: null,
+      track: activeTrack,
       weightage: Math.max(1, Math.min(5, Number(newWeight) || 3)),
       estimated_hours: Math.max(0.5, Number(newHours) || 4),
       status: 'locked',
@@ -89,13 +115,14 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
-  const importPreset = async (preset) => {
+  const importPreset = async (preset, track) => {
     const rowsToInsert = preset.rows.map((r) => ({
       user_id: profile.id,
       subject: r.subject,
       chapter: r.chapter,
       topic: null,
       subtopic: null,
+      track,
       weightage: r.weightage || 3,
       estimated_hours: r.estimated_hours || 4,
       status: 'locked',
@@ -104,11 +131,17 @@ export function SyllabusScreen({ navigation }) {
       completed_at: null,
       created_at: nowIso(),
     }));
-    // avoid duplicate chapters for the same subject
-    const existing = new Set(rows.map((r) => `${r.subject}::${r.chapter}`));
+    // avoid duplicate chapters for the same subject+track
+    const existing = new Set(rows.filter((r) => rowTrack(r) === track).map((r) => `${r.subject}::${r.chapter}`));
     const fresh = rowsToInsert.filter((r) => !existing.has(`${r.subject}::${r.chapter}`));
     if (fresh.length) await db.insertMany('syllabus', fresh);
     setPresetOpen(false);
+    await load();
+  };
+
+  // one-tap import of the student's OWN track (class-first!)
+  const importMyTrack = async () => {
+    await seedSyllabusTrack(profile.id, profile || {}, activeTrack);
     await load();
   };
 
@@ -119,7 +152,7 @@ export function SyllabusScreen({ navigation }) {
       const gen = await aiGenerateSyllabus({
         classLevel: profile?.class_level || 'Class 10',
         board: profile?.board || '',
-        exam: profile?.competitive_exam || '',
+        exam: activeTrack === 'exam' ? profile?.competitive_exam || '' : '',
         subjects: '',
       });
       const existing = new Set(rows.map((r) => `${r.subject}::${r.chapter}`));
@@ -131,6 +164,7 @@ export function SyllabusScreen({ navigation }) {
           chapter: r.chapter,
           topic: null,
           subtopic: null,
+          track: activeTrack,
           weightage: r.weightage,
           estimated_hours: r.estimated_hours,
           status: 'locked',
@@ -155,6 +189,9 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
+  const trackMeta = TRACKS[activeTrack];
+  const trackDone = trackRows.filter((r) => r.status === 'completed').length;
+
   return (
     <Screen mode="light">
       <ScreenHeader
@@ -169,18 +206,75 @@ export function SyllabusScreen({ navigation }) {
         }
       />
 
-      {loading ? null : rows.length === 0 ? (
+      {/* Track switcher — CLASS is the default map */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 10 }}>
+        {availableTracks.map((t) => {
+          const meta = TRACKS[t];
+          const active = activeTrack === t;
+          const count = rows.filter((r) => rowTrack(r) === t).length;
+          return (
+            <Pressable
+              key={t}
+              onPress={() => setActiveTrack(t)}
+              style={({ pressed }) => ({
+                backgroundColor: active ? '#6D28D9' : '#FFFFFF',
+                borderWidth: 1,
+                borderColor: active ? '#6D28D9' : '#E2E8F0',
+                borderRadius: 999,
+                paddingVertical: 8,
+                paddingHorizontal: 14,
+                marginRight: 8,
+                flexDirection: 'row',
+                alignItems: 'center',
+                opacity: pressed ? 0.75 : 1,
+              })}
+            >
+              <Text style={{ fontSize: 13, marginRight: 5 }}>{meta.icon}</Text>
+              <Text
+                style={{
+                  fontFamily: fonts.bodySemiBold,
+                  fontSize: 13,
+                  color: active ? '#FFF' : '#334155',
+                }}
+              >
+                {meta.label}
+              </Text>
+              {count ? (
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: active ? '#EDE9FE' : '#94A3B8', marginLeft: 6 }}>
+                  {count}
+                </Text>
+              ) : null}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
+      <View style={{ paddingHorizontal: 16 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginBottom: 10 }}>
+          {activeTrack === 'class'
+            ? 'Your class syllabus — the #1 priority. School ke exams isi se aayenge. 🏫'
+            : activeTrack === 'olympiad'
+            ? 'Olympiad track — second priority, class ke baad. 🏅'
+            : 'Exam track — optional layer. Class + olympiad ke baad bachi hui time isi mein. 🎯'}
+        </Text>
+      </View>
+
+      {loading ? null : trackRows.length === 0 ? (
         <Card mode="light">
           <EmptyState
-            icon="🗺️"
-            title="Syllabus khali hai"
-            subtitle="Import a starter syllabus (Class 10 CBSE, JEE PCM, NEET Bio…) ya apna khud ka chapter add karo."
-            actionLabel="Import starter syllabus"
-            onAction={() => setPresetOpen(true)}
+            icon={trackMeta.icon}
+            title={`${trackMeta.label} khali hai`}
+            subtitle={
+              set[activeTrack]
+                ? `${set[activeTrack].label} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
+                : 'Apna khud ka chapter add karo, ya AI se generate karao.'
+            }
+            actionLabel={set[activeTrack] ? `Import ${set[activeTrack].label.split('·')[0].trim()}` : 'Add chapter'}
+            onAction={() => (set[activeTrack] ? importMyTrack() : setAddOpen(true))}
           />
         </Card>
       ) : (
-        subjects.map((subject) => {
+        Object.keys(bySubject).map((subject) => {
           const list = bySubject[subject] || [];
           const done = list.filter((r) => r.status === 'completed').length;
           const open = openSubject === subject;
@@ -235,7 +329,7 @@ export function SyllabusScreen({ navigation }) {
       )}
 
       {/* Add chapter modal */}
-      <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="Add Chapter" mode="light">
+      <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title={`Add Chapter → ${trackMeta.label}`} mode="light">
         <Input label="Subject" value={newSubject} onChangeText={setNewSubject} placeholder="e.g. Physics" />
         <Input label="Chapter / topic" value={newChapter} onChangeText={setNewChapter} placeholder="e.g. Thermodynamics" />
         <View style={{ flexDirection: 'row' }}>
@@ -249,7 +343,7 @@ export function SyllabusScreen({ navigation }) {
         <Button title="Add to Syllabus" onPress={addChapter} mode="light" disabled={!newSubject || !newChapter} />
       </ModalSheet>
 
-      {/* Preset import modal */}
+      {/* Preset import modal — grouped by track */}
       <ModalSheet visible={presetOpen} onClose={() => setPresetOpen(false)} title="Import Syllabus" mode="light">
         {aiMsg ? (
           <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#0891B2', marginBottom: 10, lineHeight: 18 }}>{aiMsg}</Text>
@@ -263,22 +357,75 @@ export function SyllabusScreen({ navigation }) {
             ✨ Generate with AI
           </Text>
           <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#475569', marginTop: 3 }}>
-            {aiBusy ? 'Professor Byte syllabus bana raha hai…' : `Based on your class (${profile?.class_level || 'class'}), board & exam`}
+            {aiBusy
+              ? 'Professor Byte syllabus bana raha hai…'
+              : `For your class (${profile?.class_level || 'class'})${profile?.board ? `, ${profile.board}` : ''} — into "${trackMeta.label}"`}
           </Text>
         </Card>
-        {Object.entries(SYLLABUS_PRESETS).map(([key, preset]) => (
-          <Card key={key} mode="light" onPress={() => importPreset(preset)} style={{ marginBottom: 10 }}>
+
+        {/* Student's own presets first */}
+        <SectionLabel>🏫 Your tracks</SectionLabel>
+        {set.class ? (
+          <Card mode="light" onPress={() => importPreset(set.class, 'class')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#1E293B' }}>{set.class.label}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+              {set.class.rows.length} chapters · {rows.filter((r) => rowTrack(r) === 'class').length ? 'already imported — duplicates skipped' : 'one tap'}
+            </Text>
+          </Card>
+        ) : null}
+        {set.olympiad ? (
+          <Card mode="light" onPress={() => importPreset(set.olympiad, 'olympiad')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#B45309' }}>🏅 {set.olympiad.label}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+              {set.olympiad.rows.length} chapters · olympiad track
+            </Text>
+          </Card>
+        ) : null}
+        {set.exam ? (
+          <Card mode="light" onPress={() => importPreset(set.exam, 'exam')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#B91C1C' }}>🎯 {set.exam.label}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+              {set.exam.rows.length} chapters · exam track (secondary)
+            </Text>
+          </Card>
+        ) : null}
+
+        {/* Full library */}
+        <SectionLabel>📚 Full library (any track)</SectionLabel>
+        {Object.entries(CLASS_SYLLABI).map(([name, preset]) => (
+          <Card key={name} mode="light" onPress={() => importPreset(preset, 'class')} style={{ marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#1E293B' }}>{preset.label}</Text>
             <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
-              {preset.rows.length} chapters · duplicates skipped
+              {preset.rows.length} chapters · class track
             </Text>
           </Card>
         ))}
-        <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 6 }}>
-          Tip: Professor Byte (AI) bhi syllabus generate kar sakta hai — Study Hub → Professor Byte.
-        </Text>
+        {Object.entries(OLYMPIAD_SYLLABI).map(([name, preset]) => (
+          <Card key={name} mode="light" onPress={() => importPreset(preset, 'olympiad')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#B45309' }}>🏅 {preset.label}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+              {preset.rows.length} chapters · olympiad track
+            </Text>
+          </Card>
+        ))}
+        {Object.entries(EXAM_SYLLABI).map(([name, preset]) => (
+          <Card key={name} mode="light" onPress={() => importPreset(preset, 'exam')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#B91C1C' }}>🎯 {preset.label}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+              {preset.rows.length} chapters · exam track
+            </Text>
+          </Card>
+        ))}
       </ModalSheet>
     </Screen>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#94A3B8', marginTop: 6, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      {children}
+    </Text>
   );
 }
 

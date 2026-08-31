@@ -9,6 +9,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { aiTutorReply, aiMotivate, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiStatus } from '../../lib/aiService';
 import { isOnline } from '../../lib/aiService';
 import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Chip } from '../../components/ui/Chip';
@@ -145,6 +146,28 @@ export function TutorScreen({ navigation, route }) {
               <Text style={{ fontFamily: fonts.body, fontSize: 13, color: LIGHT.subtext, textAlign: 'center', marginTop: 8, lineHeight: 19, paddingHorizontal: 12 }}>
                 Kuch bhi poocho — concept samjhaana, problem solve karna, quiz karna, ya thoda motivation. Chalo shuru karein?
               </Text>
+              {aiStatus().anyConfigured ? null : (
+                <Pressable
+                  onPress={() => navigation.navigate('Settings')}
+                  style={({ pressed }) => ({
+                    marginTop: 14,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: pressed ? '#FEF3C7' : '#FFFBEB',
+                    borderWidth: 1,
+                    borderColor: '#FDE68A',
+                    borderRadius: 12,
+                    paddingVertical: 10,
+                    paddingHorizontal: 14,
+                    opacity: pressed ? 0.75 : 1,
+                  })}
+                >
+                  <Text style={{ fontSize: 14, marginRight: 8 }}>🔑</Text>
+                  <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#B45309', flex: 1, lineHeight: 17 }}>
+                    AI not connected — add your free API key in Settings and I'll be fully awake. Right now I can't reply!
+                  </Text>
+                </Pressable>
+              )}
             </View>
           ) : (
             messages.map((m, i) => <Bubble key={i} m={m} />)

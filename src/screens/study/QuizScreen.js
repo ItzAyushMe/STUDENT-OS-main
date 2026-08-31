@@ -67,18 +67,47 @@ export function QuizScreen({ navigation, route }) {
     const cfg = MODES[mode];
     let qs = [];
     if (mode === 'daily') {
+      // AI first (class-aware), static arena bank as offline fallback
+      const status = aiStatus();
+      if (status.anyConfigured && (await isOnline())) {
+        try {
+          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const chapters = syllabusRows.slice(0, 60).map((r) => r.chapter);
+          const aiQs = await aiGenerateQuiz({
+            subject: '',
+            topic: '',
+            count: cfg.count,
+            difficulty: 'medium',
+            profileContext: [profile?.class_level, profile?.board, profile?.prep_level].filter(Boolean).join(', '),
+            syllabusChapters: chapters,
+          });
+          if (aiQs.length >= 3) return aiQs.slice(0, cfg.count);
+        } catch {
+          /* offline — fall to arena bank */
+        }
+      }
       qs = pickDailyArena(todayStr()).map((q) => ({ ...q, source: 'arena' }));
     } else {
       // 1) Try AI-generated questions (needs API key + internet)
       const status = aiStatus();
       if (status.anyConfigured && (await isOnline())) {
         try {
+          // pull the student's OWN syllabus chapters for this subject
+          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const trackRows = syllabusRows.filter(
+            (r) => !r.track || r.track === 'class' || r.track === 'olympiad' || r.track === 'exam'
+          );
+          const chapters = (subject === 'Mixed'
+            ? trackRows
+            : trackRows.filter((r) => r.subject === subject)
+          ).map((r) => r.chapter);
           const aiQs = await aiGenerateQuiz({
             subject: subject === 'Mixed' ? '' : subject,
             topic: route?.params?.topic || '',
             count: cfg.count,
             difficulty: mode === 'boss' ? 'hard' : 'medium',
             profileContext: [profile?.class_level, profile?.board, profile?.prep_level].filter(Boolean).join(', '),
+            syllabusChapters: chapters,
           });
           if (aiQs.length >= Math.min(3, cfg.count)) {
             return aiQs.slice(0, cfg.count);

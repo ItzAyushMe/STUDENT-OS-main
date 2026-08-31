@@ -68,13 +68,18 @@ export function DeadlinesScreen({ navigation }) {
   const applyFilter = (list) => (filter === 'All' ? list : list.filter((r) => r.subject === filter));
 
   const autoPlan = async () => {
-    if (!profile.exam_date) {
-      infoAlert('Exam date missing', 'Pehle exam date set karo (Settings) — phir auto-plan dabao.');
+    const schoolExams = Array.isArray(profile.school_exams) ? profile.school_exams : [];
+    if (!profile.exam_date && !schoolExams.length) {
+      infoAlert(
+        'Exam dates missing',
+        'Pehle school exam ya competitive exam date set karo (Settings) — phir auto-plan dabao.'
+      );
       return;
     }
     setBusy(true);
     try {
-      const deadlines = autoSetDeadlines(rows, profile.exam_date, profile.daily_study_hours);
+      // class-track rows get deadlines ~2 weeks before the nearest school exam
+      const deadlines = autoSetDeadlines(rows, profile.exam_date, profile.daily_study_hours, schoolExams);
       for (const [id, deadline] of Object.entries(deadlines)) {
         await db.update('syllabus', id, { deadline });
       }
@@ -122,7 +127,7 @@ export function DeadlinesScreen({ navigation }) {
       />
 
       {/* Summary cards */}
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14 }}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 14 }}>
         <SummaryCard label="Completed" value={categorized.completed.length} color="#10B981" icon="✅" />
         <SummaryCard label="In progress" value={categorized.inProgress.length} color="#0891B2" icon="🔄" />
         <SummaryCard label="Behind" value={categorized.behind.length} color="#DC2626" icon="⚠️" />
@@ -223,13 +228,16 @@ function SummaryCard({ label, value, color, icon }) {
   return (
     <View
       style={{
-        flex: 0.24,
+        flexBasis: '48%', // 2×2 grid on narrow phones, 4-up on wide
+        flexGrow: 1,
+        maxWidth: '48%',
         backgroundColor: '#FFFFFF',
         borderWidth: 1,
         borderColor: '#E2E8F0',
         borderRadius: radius.md,
         paddingVertical: 10,
         alignItems: 'center',
+        marginBottom: 8,
       }}
     >
       <Text style={{ fontSize: 15 }}>{icon}</Text>

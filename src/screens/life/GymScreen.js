@@ -2,7 +2,7 @@
 // Advanced), per-exercise logging (sets/reps/weight), personal
 // records, weekly consistency, +30 XP per workout.
 import { useCallback, useMemo, useState } from 'react';
-import { Pressable, Text, TextInput, View } from 'react-native';
+import { Pressable, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -22,6 +22,8 @@ import { todayStr, dateStr, dayjs, mondayOf, nowIso, fmtDate } from '../../lib/u
 export function GymScreen({ navigation }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
+  const { width } = useWindowDimensions();
+  const narrow = width < 420; // 9:16 phones → stacked cards instead of the wide table
   const [logs, setLogs] = useState(null);
   const [planKey, setPlanKey] = useState('home');
   const [entries, setEntries] = useState({}); // exercise name -> {sets, reps, weight}
@@ -156,42 +158,26 @@ export function GymScreen({ navigation }) {
         {plan.hint} — sets/reps/weight edit karke apna log banao.
       </Text>
 
-      {/* log table */}
+      {/* log table — responsive: wide screens get a table row,
+          narrow phones (9:16) get a stacked card per exercise */}
       <Card mode="light" style={{ marginBottom: 14, padded: false }} padded={false}>
-        <View style={{ flexDirection: 'row', paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8 }}>
-          <Text style={[styles.colHead, { flex: 1.8 }]}>Exercise</Text>
-          <Text style={[styles.colHead, { flex: 0.6 }]}>Sets</Text>
-          <Text style={[styles.colHead, { flex: 0.6 }]}>Reps</Text>
-          <Text style={[styles.colHead, { flex: 0.6 }]}>Wt(kg)</Text>
-        </View>
-        {plan.exercises.map((ex) => {
-          const entry = entries[ex.name] || {};
-          return (
-            <View
-              key={ex.name}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                borderTopWidth: 1,
-                borderTopColor: '#F1F5F9',
-              }}
-            >
-              <View style={{ flex: 1.8, marginRight: 6 }}>
-                <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B' }}>
-                  {ex.name}
-                </Text>
-                <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8' }}>
-                  target {ex.sets}×{ex.reps}
-                </Text>
-              </View>
-              <MiniInput value={entry.sets ?? String(ex.sets)} onChangeText={(v) => setEntry(ex.name, { sets: v })} placeholder={String(ex.sets)} />
-              <MiniInput value={entry.reps ?? String(ex.reps)} onChangeText={(v) => setEntry(ex.name, { reps: v })} placeholder={String(ex.reps)} />
-              <MiniInput value={entry.weight ?? ''} onChangeText={(v) => setEntry(ex.name, { weight: v })} placeholder="0" />
-            </View>
-          );
-        })}
+        {!narrow ? (
+          <View style={{ flexDirection: 'row', paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8 }}>
+            <Text style={[styles.colHead, { flex: 1.8 }]}>Exercise</Text>
+            <Text style={[styles.colHead, { flex: 0.6 }]}>Sets</Text>
+            <Text style={[styles.colHead, { flex: 0.6 }]}>Reps</Text>
+            <Text style={[styles.colHead, { flex: 0.6 }]}>Wt(kg)</Text>
+          </View>
+        ) : null}
+        {plan.exercises.map((ex) => (
+          <ExerciseRow
+            key={ex.name}
+            ex={ex}
+            entry={entries[ex.name] || {}}
+            narrow={narrow}
+            onSet={(patch) => setEntry(ex.name, patch)}
+          />
+        ))}
       </Card>
       <Button title="Finish Workout (+30 XP) 💪" mode="light" size="lg" onPress={finishWorkout} loading={saving} style={{ marginBottom: 18 }} />
 
@@ -250,7 +236,7 @@ const styles = {
   colHead: { fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#64748B' },
 };
 
-function MiniInput({ value, onChangeText, placeholder }) {
+function MiniInput({ value, onChangeText, placeholder, flex }) {
   return (
     <TextInput
       value={value}
@@ -259,7 +245,9 @@ function MiniInput({ value, onChangeText, placeholder }) {
       placeholderTextColor="#CBD5E1"
       keyboardType="numeric"
       style={{
-        flex: 0.6,
+        flex: flex === undefined ? 0.6 : flex,
+        minWidth: 44, // comfortable touch target even when squeezed
+        minHeight: 36,
         marginLeft: 4,
         backgroundColor: '#F8FAFC',
         borderWidth: 1,
@@ -273,5 +261,61 @@ function MiniInput({ value, onChangeText, placeholder }) {
         textAlign: 'center',
       }}
     />
+  );
+}
+
+// One exercise: table-row on wide screens, stacked card on narrow phones.
+function ExerciseRow({ ex, entry, narrow, onSet }) {
+  if (!narrow) {
+    return (
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: 12,
+          paddingVertical: 8,
+          borderTopWidth: 1,
+          borderTopColor: '#F1F5F9',
+        }}
+      >
+        <View style={{ flex: 1.8, marginRight: 6 }}>
+          <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B' }}>
+            {ex.name}
+          </Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8' }}>
+            target {ex.sets}×{ex.reps}
+          </Text>
+        </View>
+        <MiniInput value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} />
+        <MiniInput value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} />
+        <MiniInput value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" />
+      </View>
+    );
+  }
+  // narrow: stacked card — name on top, labelled inputs below, nothing clipped
+  return (
+    <View
+      style={{
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderTopWidth: 1,
+        borderTopColor: '#F1F5F9',
+      }}
+    >
+      <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', flexShrink: 1 }}>
+        {ex.name}
+      </Text>
+      <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 1, marginBottom: 8 }}>
+        target {ex.sets}×{ex.reps}
+      </Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 38 }}>Sets</Text>
+        <MiniInput flex={1} value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} />
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 34, marginLeft: 8 }}>Reps</Text>
+        <MiniInput flex={1} value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} />
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 34, marginLeft: 8 }}>Wt</Text>
+        <MiniInput flex={1} value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" />
+      </View>
+    </View>
   );
 }

@@ -1,6 +1,7 @@
 // Settings — AI provider & keys, notifications, account, local data.
 import { useState } from 'react';
-import { Platform, Switch, Text, View } from 'react-native';
+import { Platform, Pressable, Switch, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { Screen } from '../../components/ui/Screen';
@@ -27,6 +28,10 @@ export function SettingsScreen({ navigation }) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState('');
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
+  const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
+  const [schoolExams, setSchoolExams] = useState(
+    Array.isArray(profile?.school_exams) ? profile.school_exams.map((e) => ({ label: e.label || '', date: e.date || '' })) : []
+  );
 
   const saveAI = () => {
     settings.update({ geminiKey: geminiKey.trim(), groqKey: groqKey.trim() });
@@ -44,6 +49,7 @@ export function SettingsScreen({ navigation }) {
         noCache: true,
       });
       setTestResult(`Professor Byte: "${reply.trim().slice(0, 120)}"`);
+      if (settings.refreshAIHealth) settings.refreshAIHealth();
     } catch (e) {
       setTestResult(e instanceof AIUnavailableError ? e.message : `Failed: ${e?.message || 'unknown'}`);
     } finally {
@@ -175,13 +181,92 @@ export function SettingsScreen({ navigation }) {
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
         <Input
-          label="Exam date (YYYY-MM-DD)"
+          label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}
           onChangeText={setExamDate}
           placeholder="2027-05-24"
           hint="Smart schedule + auto deadlines isse use karte hain."
         />
-        <Button title="Save Exam Date" size="sm" mode="light" onPress={saveExamDate} />
+        {profile?.olympiad && profile.olympiad !== 'None' ? (
+          <Input
+            label={`Olympiad date — ${profile.olympiad} (YYYY-MM-DD)`}
+            value={olympiadDate}
+            onChangeText={setOlympiadDate}
+            placeholder="2026-11-15"
+            style={{ marginTop: 10 }}
+          />
+        ) : null}
+
+        <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B', marginTop: 14, marginBottom: 4 }}>
+          📅 My School Exams
+        </Text>
+        <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginBottom: 8, lineHeight: 16 }}>
+          Mid-terms, finals… add them and the scheduler finishes your CLASS syllabus ~2 weeks before each one.
+        </Text>
+        {(schoolExams || []).map((e, i) => (
+          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <View style={{ flex: 1.4, marginRight: 8 }}>
+              <Input
+                value={e.label}
+                onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, label: v } : x)))}
+                placeholder="e.g. Mid-Term"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Input
+                value={e.date}
+                onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, date: v } : x)))}
+                placeholder="2026-09-20"
+                keyboardType="numeric"
+              />
+            </View>
+            <Pressable
+              onPress={() => setSchoolExams((prev) => prev.filter((_, j) => j !== i))}
+              hitSlop={8}
+              style={{ padding: 6, marginLeft: 4 }}
+            >
+              <Ionicons name="close-circle" size={20} color="#94A3B8" />
+            </Pressable>
+          </View>
+        ))}
+        <Pressable
+          onPress={() => setSchoolExams((prev) => [...prev, { label: '', date: '' }])}
+          style={({ pressed }) => ({
+            flexDirection: 'row',
+            alignItems: 'center',
+            alignSelf: 'flex-start',
+            paddingVertical: 8,
+            paddingHorizontal: 12,
+            borderRadius: 10,
+            backgroundColor: pressed ? '#EDE9FE' : '#F5F3FF',
+            borderWidth: 1,
+            borderColor: '#DDD6FE',
+            marginBottom: 12,
+          })}
+        >
+          <Ionicons name="add" size={15} color="#6D28D9" />
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#6D28D9', marginLeft: 6 }}>
+            Add school exam
+          </Text>
+        </Pressable>
+
+        <Button
+          title="Save Exam Setup"
+          size="sm"
+          mode="light"
+          onPress={() => {
+            const clean = schoolExams
+              .map((e) => ({ label: (e.label || 'School exam').trim() || 'School exam', date: (e.date || '').trim() }))
+              .filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e.date));
+            setSchoolExams(clean.length ? clean : []);
+            updateProfile({
+              exam_date: examDate || null,
+              olympiad_date: olympiadDate || null,
+              school_exams: clean,
+            });
+            setTestResult('Exam setup saved ✅');
+          }}
+        />
       </Card>
 
       {/* Notifications */}

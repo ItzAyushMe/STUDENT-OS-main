@@ -8,6 +8,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
+import { useSettings } from '../../context/SettingsContext';
+import { aiDailyMessage, AIUnavailableError } from '../../lib/aiFeatures';
 import { GAMER, fonts, radius } from '../../config/theme';
 import { QUOTES, SESSION_TYPES } from '../../config/constants';
 import { db } from '../../lib/db';
@@ -22,12 +24,17 @@ import { useIsOnline } from '../../hooks/useIsOnline';
 export function HomeScreen({ navigation }) {
   const { profile } = useAuth();
   const { awardXP, level, tier, totalXp, streak, freezes } = useGame();
+  const settings = useSettings();
   const insets = useSafeAreaInsets();
   const online = useIsOnline();
   const [todayQuests, setTodayQuests] = useState([]);
   const [habitStats, setHabitStats] = useState({ done: 0, total: 0 });
   const [dayStarted, setDayStarted] = useState(false);
   const [confetti, setConfetti] = useState(0);
+  const [aiDailyMsg, setAiDailyMsg] = useState('');
+
+  const aiConfigured = settings.aiStatus?.anyConfigured;
+  const aiDown = settings.aiHealth && settings.aiHealth.ok === false;
 
   const name = profile?.display_name || profile?.username || 'Champ';
   const today = todayStr();
@@ -52,6 +59,51 @@ export function HomeScreen({ navigation }) {
   }, [profile?.id, today]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Personalized AI morning message — uses today's REAL plan + weak areas.
+  // Cached per day; degrades silently when AI is offline.
+  useEffect(() => {
+    if (!profile?.id || !aiConfigured) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cacheKey = `sos.aiDailyMsg.${profile.id}.${today}`;
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached) {
+          if (!cancelled) setAiDailyMsg(cached);
+          return;
+        }
+        // weak areas = subjects with most wrong answers in recent quizzes
+        const recent = await db.list('quiz_results', { eq: { user_id: profile.id }, order: { col: 'created_at', asc: false }, limit: 12 });
+        const wrongBySubject = {};
+        for (const r of recent) {
+          if (!r.subject) continue;
+          const total = Number(r.total_questions) || 0;
+          const right = Number(r.score) || 0;
+          const wrong = Math.max(0, total - right);
+          if (wrong > 0) wrongBySubject[r.subject] = (wrongBySubject[r.subject] || 0) + wrong;
+        }
+        const weakAreas = Object.entries(wrongBySubject)
+          .sort((a, b) => b[1] - a[1])
+          .map(([s]) => s);
+        const msg = await aiDailyMessage({
+          profile,
+          todaySessions: todayQuests,
+          weakAreas,
+          streak,
+          xp: totalXp,
+          habitsPending: Math.max(0, habitStats.total - habitStats.done),
+        });
+        if (!cancelled && msg) {
+          setAiDailyMsg(msg.trim().slice(0, 260));
+          AsyncStorage.setItem(cacheKey, msg.trim().slice(0, 260)).catch(() => {});
+        }
+      } catch {
+        /* AI offline — the static quote below still shows */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profile?.id, aiConfigured, today, todayQuests.length, streak]);
 
   const quote = QUOTES[hashString(today) % QUOTES.length];
 
@@ -111,6 +163,72 @@ export function HomeScreen({ navigation }) {
           <Text style={{ fontSize: 15, marginRight: 8 }}>📴</Text>
           <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12, color: GAMER.warn, lineHeight: 17 }}>
             You're offline — quests, timer, habits & quizzes (bank) are still working. AI needs internet.
+          </Text>
+        </View>
+      ) : null}
+
+      {/* AI not connected banner — visible reason, one tap to fix */}
+      {!aiConfigured ? (
+        <Pressable
+          onPress={() => navigation.navigate('Settings')}
+          style={({ pressed }) => ({
+            flexDirection: 'row',
+            alignItems: 'center',
+            backgroundColor: pressed ? 'rgba(245,158,11,0.14)' : 'rgba(245,158,11,0.08)',
+            borderWidth: 1,
+            borderColor: 'rgba(245,158,11,0.45)',
+            borderRadius: radius.md,
+            padding: 10,
+            marginBottom: 12,
+            opacity: pressed ? 0.75 : 1,
+          })}
+        >
+          <Text style={{ fontSize: 15, marginRight: 8 }}>🤖</Text>
+          <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12, color: GAMER.warn, lineHeight: 17 }}>
+            AI not connected — add your free API key to unlock Professor Byte, AI quizzes, plans & flashcards. Tap here →
+          </Text>
+          <Ionicons name="chevron-forward" size={16} color={GAMER.warn} />
+        </Pressable>
+      ) : aiDown ? (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            backgroundColor: 'rgba(239,68,68,0.08)',
+            borderWidth: 1,
+            borderColor: 'rgba(239,68,68,0.45)',
+            borderRadius: radius.md,
+            padding: 10,
+            marginBottom: 12,
+          }}
+        >
+          <Text style={{ fontSize: 15, marginRight: 8 }}>⚠️</Text>
+          <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12, color: GAMER.warn, lineHeight: 17 }}>
+            AI key saved but the test call failed — check the key in Settings. Everything else keeps working.
+          </Text>
+        </View>
+      ) : null}
+
+      {/* AI daily message (personalized — class, plan, weak areas) */}
+      {aiDailyMsg ? (
+        <View
+          style={{
+            backgroundColor: GAMER.surface,
+            borderWidth: 1,
+            borderColor: GAMER.border,
+            borderRadius: radius.lg,
+            padding: 14,
+            marginBottom: 14,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+            <Text style={{ fontSize: 13, marginRight: 6 }}>🧠</Text>
+            <PixelText size={7.5} color={GAMER.subtext}>
+              PROFESSOR BYTE · TODAY
+            </PixelText>
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.text, lineHeight: 19 }}>
+            {aiDailyMsg}
           </Text>
         </View>
       ) : null}

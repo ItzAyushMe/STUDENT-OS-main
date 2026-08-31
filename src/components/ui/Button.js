@@ -6,6 +6,7 @@ import { usePalette } from '../../context/ThemeContext';
 import { fonts, radius } from '../../config/theme';
 
 const SIZES = {
+  xs: { paddingVertical: 5, paddingHorizontal: 10, fontSize: 12 },
   sm: { paddingVertical: 8, paddingHorizontal: 14, fontSize: 13 },
   md: { paddingVertical: 13, paddingHorizontal: 18, fontSize: 15 },
   lg: { paddingVertical: 16, paddingHorizontal: 22, fontSize: 16 },

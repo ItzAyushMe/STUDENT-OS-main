@@ -112,6 +112,30 @@ export function FocusScreen({ navigation }) {
     return (
       <Screen mode="light" scroll={false}>
         <ReflectionModal focus={focus} rating={rating} setRating={setRating} note={note} setNote={setNote} />
+        {/* 20-min empathetic quote — small, dismissible, never preachy */}
+        {focus.quote ? (
+          <View
+            style={{
+              alignSelf: 'stretch',
+              backgroundColor: '#ECFEFF',
+              borderWidth: 1,
+              borderColor: '#A5F3FC',
+              borderRadius: radius.md,
+              padding: 12,
+              marginBottom: 12,
+              flexDirection: 'row',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={{ fontSize: 16, marginRight: 10 }}>💚</Text>
+            <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12.5, color: '#0E7490', lineHeight: 18 }}>
+              {focus.quote.text}
+            </Text>
+            <Pressable onPress={focus.dismissQuote} hitSlop={8} style={{ padding: 6 }}>
+              <Ionicons name="close" size={16} color="#0891B2" />
+            </Pressable>
+          </View>
+        ) : null}
         <View style={{ alignItems: 'center', flex: 1 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
             <Text style={{ fontSize: 20, marginRight: 8 }}>{isFocus ? '🎯' : '☕'}</Text>

@@ -63,11 +63,31 @@ export const STREAK_FREEZE_EARN_EVERY = 7; // earn +1 freeze every 7-day streak
 export const SESSION_TYPES = {
   study: { label: 'Study', icon: '📖', color: '#7C3AED' },
   revision: { label: 'Revision', icon: '🔁', color: '#0891B2' },
+  practice: { label: 'Timed Practice', icon: '⏱️', color: '#EC4899' },
   quiz: { label: 'Quiz', icon: '🧠', color: '#10B981' },
   mock: { label: 'Mock Test', icon: '📝', color: '#F59E0B' },
   gym: { label: 'Gym', icon: '💪', color: '#EF4444' },
   break: { label: 'Break', icon: '☕', color: '#64748B' },
 };
+
+// Track priorities for the scheduler: class syllabus ALWAYS wins,
+// olympiad second, competitive exam last (optional/leisure layer).
+export const TRACK_PRIORITY = { class: 1, olympiad: 2, exam: 3 };
+
+// Empathetic focus quotes — shown ~every 20 min of a focus session.
+// Supportive, never guilt-tripping. Rotated in order.
+export const FOCUS_QUOTES = [
+  "Pace yourself — progress over perfection. You're doing great.",
+  'One step at a time. You\u2019ve got this.',
+  'Hard work now, freedom later. Keep going.',
+  "It's okay to feel tired — that means you're trying. Rest when the session ends.",
+  'Every focused minute is XP you\u2019ll never lose. Stay with it.',
+  'Your future self is already saying thanks. 🙏',
+  'Small consistent steps beat big rare leaps. You\u2019re on track.',
+  'Breathe. You don\u2019t need to rush — you need to continue.',
+  'Consistency is your superpower, and it\u2019s charging right now.',
+  'You showed up today. That\u2019s already half the win.',
+];
 
 export const FOCUS_MODES = {
   classic: { label: 'Classic 25/5', focus: 25, break: 5, hint: 'The OG Pomodoro' },

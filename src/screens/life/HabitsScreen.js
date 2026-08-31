@@ -17,6 +17,8 @@ import { Input } from '../../components/ui/Input';
 import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { aiSuggestHabits, AIUnavailableError } from '../../lib/aiFeatures';
+import { confirmAlert } from '../../lib/alert';
 import { HABIT_CATEGORIES } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, groupBy } from '../../lib/utils';
@@ -36,7 +38,11 @@ export function HabitsScreen({ navigation }) {
   const [logs, setLogs] = useState([]);
   const [confetti, setConfetti] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning' });
+  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+  const [editHabit, setEditHabit] = useState(null); // habit being edited (null = add mode)
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiSuggests, setAiSuggests] = useState([]);
+  const [aiMsg, setAiMsg] = useState('');
 
   const today = todayStr();
   const week = useMemo(() => {
@@ -138,18 +144,98 @@ export function HabitsScreen({ navigation }) {
 
   const addHabit = async () => {
     if (!form.name.trim()) return;
+    const targetTime = /^\d{1,2}:\d{2}$/.test((form.target_time || '').trim()) ? form.target_time.trim() : null;
+    if (editHabit) {
+      // EDIT: keep history/logs untouched — only the habit definition changes
+      await db.update('habits', editHabit.id, {
+        name: form.name.trim(),
+        category: form.category,
+        icon: form.icon,
+        part: form.part,
+        target_time: targetTime,
+      });
+      setEditHabit(null);
+    } else {
+      await db.insert('habits', {
+        user_id: profile.id,
+        name: form.name.trim(),
+        category: form.category,
+        icon: form.icon,
+        target_time: targetTime,
+        part: form.part,
+        is_active: true,
+        created_at: nowIso(),
+      });
+    }
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setAddOpen(false);
+    await load();
+  };
+
+  // soft-delete: hide the habit, keep habit_logs history + streaks safe
+  const removeHabit = (habit) => {
+    confirmAlert(
+      'Remove this habit?',
+      `"${habit.name}" hat jayega, par iski purani streak history safe rahegi. Confirm?`,
+      async () => {
+        await db.update('habits', habit.id, { is_active: false });
+        setAddOpen(false);
+        setEditHabit(null);
+        await load();
+      },
+      'Remove',
+      true
+    );
+  };
+
+  const openEdit = (habit) => {
+    setEditHabit(habit);
+    setAiSuggests([]);
+    setAiMsg('');
+    setForm({
+      name: habit.name || '',
+      category: habit.category || 'academic',
+      icon: habit.icon || '🎯',
+      part: habit.part || 'morning',
+      target_time: habit.target_time || '',
+    });
+    setAddOpen(true);
+  };
+
+  const openAdd = () => {
+    setEditHabit(null);
+    setAiSuggests([]);
+    setAiMsg('');
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setAddOpen(true);
+  };
+
+  // AI-suggested habits — class-aware, complements existing habits
+  const suggestHabits = async () => {
+    setAiBusy(true);
+    setAiMsg('');
+    try {
+      const list = await aiSuggestHabits({ profile: profile || {}, existingHabits: habits || [] });
+      setAiSuggests(list);
+    } catch (e) {
+      setAiMsg(e instanceof AIUnavailableError ? e.message : 'AI suggestions nahi aaye — khud add kar lo!');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const addSuggested = async (s) => {
     await db.insert('habits', {
       user_id: profile.id,
-      name: form.name.trim(),
-      category: form.category,
-      icon: form.icon,
-      target_time: null,
-      part: form.part,
+      name: s.name,
+      category: s.category,
+      icon: s.icon,
+      target_time: s.target_time,
+      part: s.part,
       is_active: true,
       created_at: nowIso(),
     });
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning' });
-    setAddOpen(false);
+    setAiSuggests((prev) => prev.filter((x) => x.name !== s.name));
     await load();
   };
 
@@ -172,7 +258,7 @@ export function HabitsScreen({ navigation }) {
         subtitle={`${doneToday}/${habits.length} done today · ${freezes} 🧊 freeze${freezes === 1 ? '' : 's'} left`}
         onBack={() => navigation.goBack()}
         right={
-          <Pressable onPress={() => setAddOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
+          <Pressable onPress={openAdd} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
             <Ionicons name="add" size={19} color="#6D28D9" />
           </Pressable>
         }
@@ -213,6 +299,8 @@ export function HabitsScreen({ navigation }) {
                   freezes={freezes}
                   onToggle={() => toggleToday(h)}
                   onFreeze={() => useFreeze(h)}
+                  onEdit={() => openEdit(h)}
+                  onDelete={() => removeHabit(h)}
                 />
               );
             })}
@@ -232,9 +320,41 @@ export function HabitsScreen({ navigation }) {
         </Card>
       ) : null}
 
-      {/* Add habit modal */}
-      <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="New Habit" mode="light">
+      {/* Add/Edit habit modal */}
+      <ModalSheet visible={addOpen} onClose={() => { setAddOpen(false); setEditHabit(null); }} title={editHabit ? 'Edit Habit' : 'New Habit'} mode="light">
+        {/* AI habit suggestions (add mode only) */}
+        {!editHabit ? (
+          <Card mode="light" onPress={aiBusy ? undefined : suggestHabits} style={{ marginBottom: 12, backgroundColor: '#ECFEFF', borderColor: '#A5F3FC' }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: '#0891B2' }}>
+              {aiBusy ? 'Professor Byte soch raha hai… 🧠' : '✨ Suggest habits (AI)'}
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#475569', marginTop: 3 }}>
+              Based on your class{profile?.class_level ? ` (${profile.class_level})` : ''} & existing habits
+            </Text>
+          </Card>
+        ) : null}
+        {aiMsg ? (
+          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#DC2626', marginBottom: 10, lineHeight: 17 }}>{aiMsg}</Text>
+        ) : null}
+        {aiSuggests.map((s, i) => (
+          <View key={i} style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: radius.md, padding: 12, marginBottom: 8, flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={{ fontSize: 18, marginRight: 10 }}>{s.icon}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B' }}>{s.name}</Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 2 }}>{s.why}</Text>
+            </View>
+            <Button title="Add" size="xs" mode="light" onPress={() => addSuggested(s)} style={{ marginLeft: 8 }} />
+          </View>
+        ))}
         <Input label="Habit name" value={form.name} onChangeText={(v) => setForm({ ...form, name: v })} placeholder="e.g. Solve 5 DPPs daily" />
+        <Input
+          label="Target time (optional HH:MM)"
+          value={form.target_time}
+          onChangeText={(v) => setForm({ ...form, target_time: v })}
+          placeholder="06:30"
+          keyboardType="numeric"
+          style={{ marginTop: 4 }}
+        />
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Category</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
           {Object.entries(HABIT_CATEGORIES).map(([key, c]) => (
@@ -268,13 +388,24 @@ export function HabitsScreen({ navigation }) {
             </Pressable>
           ))}
         </View>
-        <Button title="Add Habit (+10 XP per day)" mode="light" onPress={addHabit} disabled={!form.name.trim()} style={{ marginTop: 6 }} />
+        <View style={{ flexDirection: 'row', marginTop: 6 }}>
+          <Button
+            title={editHabit ? 'Save Changes' : 'Add Habit (+10 XP per day)'}
+            mode="light"
+            onPress={addHabit}
+            disabled={!form.name.trim()}
+            style={{ flex: 1, marginRight: editHabit ? 8 : 0 }}
+          />
+          {editHabit ? (
+            <Button title="Remove" variant="secondary" mode="light" onPress={() => removeHabit(editHabit)} style={{ flex: 0.6 }} />
+          ) : null}
+        </View>
       </ModalSheet>
     </Screen>
   );
 }
 
-const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, onToggle, onFreeze }) {
+const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, onToggle, onFreeze, onEdit, onDelete }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
   const canFreeze = atRisk && streak >= 2 && freezes > 0 && !doneToday;
@@ -347,8 +478,11 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
         );
       })}
 
-      <View style={{ width: 34, alignItems: 'flex-end' }}>
+      <View style={{ width: 34, alignItems: 'flex-end', flexDirection: 'row' }}>
         {doneToday ? <Text style={{ fontSize: 13 }}>✨</Text> : null}
+        <Pressable onPress={onEdit} hitSlop={6} style={{ padding: 4 }}>
+          <Ionicons name="create-outline" size={15} color="#94A3B8" />
+        </Pressable>
       </View>
     </View>
   );

@@ -13,11 +13,11 @@ Built with **React Native + Expo** (one codebase → Android, iOS, Web) and **Su
 
 | Tab | What's inside |
 |---|---|
-| 🏠 **Home** (Gamer mode) | XP counter, level badge, streak 🔥, tier progress, today's main + side quests, habit status, quote of the day, “Start My Day” (+5 XP), daily challenge, quick actions |
-| 📚 **Study** (Light mode) | Syllabus map (subjects → chapters, ✅/🔄/🔒 + weightage ⭐), Smart Schedule (daily time-blocks, weekly grid, monthly calendar with mock/revision highlights), Deadline Sheet (mission board, danger zone, auto-planning from exam date), **Professor Byte** AI tutor, flashcards with spaced repetition, quiz arena (quick / standard / daily / boss battle), content locker with AI summaries |
-| ⏱️ **Focus** (Light mode) | Pomodoro 25/5 · 15/3 · 90/20 · custom, smooth circular ring, ambient sounds (rain/ocean/lofi/white noise), **Focus Shield** (soft nudge + 30s delay + distraction log), focus history & weekly bar chart, post-session reflection (1–5 + note) |
-| 💪 **Life** (Light mode) | Habit tracker (morning/afternoon/evening, weekly dots, per-habit streaks, 🧊 streak freeze), gym tracker (4 prebuilt plans, sets/reps/weight logging, PRs, weekly consistency), daily wisdom (morning quote, evening mood check-in, weekly AI reflection) |
-| 🏆 **Guild** (Gamer mode) | Friends (username requests + QR), weekly leaderboard (resets Monday, XP breakdown by study/habit/gym/social, 7 tiers), activity feed with cheers, **Daily Arena** (same 5 questions for everyone, global daily ranking), battles (same timed quiz vs a friend, winner bonus) |
+| 🏠 **Home** (Gamer mode) | XP counter, level badge, streak 🔥, tier progress, today's main + side quests, habit status, **AI status banner** (know instantly if Professor Byte needs a key), **personalized AI morning message** (class + today's plan + weak areas), quote of the day, “Start My Day” (+5 XP), daily challenge, quick actions |
+| 📚 **Study** (Light mode) | **Track-scoped Syllabus map** — 🏫 My Class (default, Class 6–12 + college, per-class NCERT-style datasets) / 🏅 My Olympiad (IOQM, IMO, NSO, NSEP, NSEC) / 🎯 My Exam (JEE, NEET, NTSE) — your class ALWAYS wins over the exam track. Smart Schedule (**priority: class → olympiad → exam**, school-exam aware with 2-week buffers, revision waves, mock days, **timed practice**, buffer days, AI catch-up plan), Deadline Sheet (mission board, danger zone, school-exam-aware auto-planning), **Professor Byte** AI tutor, flashcards with spaced repetition + AI deck generation, quiz arena (quick / standard / daily / boss battle — AI questions from YOUR syllabus), content locker with AI summaries |
+| ⏱️ **Focus** (Light mode) | Pomodoro 25/5 · 15/3 · 90/20 · custom, smooth circular ring, ambient sounds (rain/ocean/lofi/white noise), **Focus Shield** (triggers on app/tab switch, 30s “are you sure?” delay + distraction log), **empathetic quote every 20 minutes** of deep work, focus history & weekly bar chart, post-session reflection (1–5 + note) |
+| 💪 **Life** (Light mode) | Habit tracker (morning/afternoon/evening, weekly dots, per-habit streaks, 🧊 streak freeze, **edit + remove habits**, **AI habit suggestions** based on your class), gym tracker (4 prebuilt plans, sets/reps/weight logging, PRs, **responsive stacked layout on narrow phones**, weekly consistency), daily wisdom (morning quote, evening mood check-in, weekly AI reflection) |
+| 🏆 **Guild** (Gamer mode) | Friends (username requests + QR), weekly leaderboard (resets Monday, XP breakdown by study/habit/gym/social, 7 tiers), activity feed with cheers, **Daily Arena** (AI questions from YOUR class syllabus, global daily ranking), battles (**class-aware AI questions** vs a friend, winner bonus) |
 
 **XP engine** (all rules centralized in `src/config/constants.js`):
 
@@ -35,6 +35,23 @@ Built with **React Native + Expo** (one codebase → Android, iOS, Web) and **Su
 | Battle: fought / won | +25 / +60 |
 
 Levels: 100 XP each (configurable). Tiers: 🥉 Bronze 0–5k · 🥈 Silver 5–15k · 🥇 Gold 15–30k · 💎 Diamond 30–60k · 👑 Master 60–100k · 🌟 Legendary 100–150k · ⚡ Grandmaster 150k+. Streaks survive one missed day with a 🧊 freeze (max 3, earn 1 per 7-day streak).
+
+### 🧠 The AI is the engine (not a bolt-on chatbot)
+
+Every AI feature routes through one swappable service (`src/lib/aiService.js` → Gemini/Groq with auto-fallback + model fallback) and always knows **who you are**: class, board, exam, olympiad and prep level are injected into every prompt.
+
+| Where | What the AI does |
+|---|---|
+| Home | Personalized morning message referencing your real schedule + weak areas |
+| Scheduler | Class-aware planning (class → olympiad → exam priority) + AI catch-up advice on reschedule |
+| Quizzes / Arena / Battles | Questions generated from YOUR class syllabus chapters — never generic trivia |
+| Flashcards | Auto-generate decks from any topic |
+| Habits | Suggests tiny class-relevant habits that complement existing ones |
+| Syllabus | Generates/import per-track syllabus sets for any class 6–12 + college |
+| Wisdom | Weekly reflection with wins + next week's plan |
+| Tutor | Professor Byte: explains, solves, quizzes, motivates |
+
+School exams (mid-terms/finals) can be added in **Onboarding → step 3** or **Settings → My School Exams** — the scheduler then finishes your class syllabus ~2 weeks before each exam, with revision waves, mock tests, timed practice and buffer days.
 
 ---
 

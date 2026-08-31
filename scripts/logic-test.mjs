@@ -94,4 +94,81 @@ assert.ok(q.length <= 5 && q.every(x => x.subject === 'Physics'), 'bank quiz sub
 assert.ok(QUIZ_BANK.length >= 55, 'bank size ' + QUIZ_BANK.length);
 assert.ok(QUIZ_BANK.every(x => x.options[x.answer] != null && x.options.length >= 3), 'bank answers valid');
 
+// ---- FIX 2: class-scoped syllabus (class ALWAYS wins over exam) ----
+import { pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI } from './../src/data/syllabusData.js';
+
+let set = pickSyllabusSet({ class_level: 'Class 10', board: 'CBSE', competitive_exam: 'JEE Main', olympiad: 'IOQM' });
+assert.equal(set.class?.key, 'class10', 'Class 10 + JEE student gets the CLASS 10 syllabus (not Class 12 PCM!)');
+assert.equal(set.exam?.key, 'jee', 'JEE track available as separate layer');
+assert.equal(set.olympiad?.key, 'ioqm', 'IOQM track available as separate layer');
+assert.ok(set.class.rows.length >= 20, 'class 10 syllabus is substantial: ' + set.class.rows.length);
+
+set = pickSyllabusSet({ class_level: 'Class 6', competitive_exam: 'NEET' });
+assert.equal(set.class?.key, 'class6', 'Class 6 student gets Class 6 syllabus even with NEET picked');
+
+set = pickSyllabusSet({ class_level: 'Class 12', competitive_exam: 'JEE Advanced' });
+assert.equal(set.class?.key, 'class12', 'Class 12 student gets Class 12 syllabus');
+
+set = pickSyllabusSet({ class_level: 'Class 11', competitive_exam: 'NEET' });
+assert.equal(set.class?.key, 'class11_12_pcb', 'Class 11 NEET aspirant gets PCB variant');
+
+set = pickSyllabusSet({ class_level: 'Class 9', competitive_exam: 'None', olympiad: 'NSO (Science)' });
+assert.equal(set.class?.key, 'class9', 'Class 9 default class syllabus');
+assert.equal(set.olympiad?.key, 'nso', 'NSO olympiad track');
+assert.equal(set.exam, null, 'no exam track when exam is None');
+
+for (const cls of ['Class 6', 'Class 7', 'Class 8', 'Class 9', 'Class 10', 'Class 11', 'Class 12', 'College']) {
+  assert.ok(CLASS_SYLLABI[cls]?.rows.length >= 10, `${cls} syllabus exists with chapters`);
+}
+assert.ok(Object.keys(EXAM_SYLLABI).length >= 3, 'exam tracks exist');
+assert.ok(Object.keys(OLYMPIAD_SYLLABI).length >= 4, 'olympiad tracks exist');
+
+// ---- FIX 7: priority scheduler (class → olympiad → exam) ----
+const multiTrackSyllabus = [
+  { id: 'c1', subject: 'Science', chapter: 'Chemical Reactions', weightage: 4, estimated_hours: 6, status: 'locked', track: 'class' },
+  { id: 'c2', subject: 'Maths', chapter: 'Trigonometry', weightage: 5, estimated_hours: 10, status: 'locked', track: 'class' },
+  { id: 'o1', subject: 'Maths Olympiad', chapter: 'Number Theory', weightage: 5, estimated_hours: 12, status: 'locked', track: 'olympiad' },
+  { id: 'e1', subject: 'Physics (JEE)', chapter: 'Rotational Dynamics', weightage: 5, estimated_hours: 14, status: 'locked', track: 'exam' },
+];
+const schoolExamDate = new Date(Date.now() + 40 * 86400000).toISOString().slice(0, 10);
+const plan = generateSchedule({
+  syllabus: multiTrackSyllabus,
+  examDate: null,
+  schoolExams: [{ label: 'Mid-Term', date: schoolExamDate }],
+  dailyHours: 4,
+  preferredTime: 'Morning',
+  daysOff: [],
+  prepLevel: 'Intermediate',
+  weeks: 6,
+  userId: 'u2',
+});
+// class rows must ALL appear before any olympiad/exam row
+const order = plan.filter(r => r.session_type === 'study').map(r => r.track);
+const firstNonClass = order.findIndex(t => t !== 'class');
+if (firstNonClass >= 0) {
+  assert.ok(order.slice(firstNonClass).every(t => t !== 'class'), 'class rows all scheduled BEFORE olympiad/exam rows');
+}
+assert.ok(plan.some(r => r.track === 'class'), 'class rows scheduled');
+assert.ok(plan.coverage && typeof plan.coverage.classTotal === 'number', 'coverage summary attached');
+// timed practice + revision + school-exam revision wave
+assert.ok(plan.some(r => r.session_type === 'practice'), 'timed practice sessions present');
+assert.ok(plan.some(r => r.session_type === 'revision'), 'revision present');
+assert.ok(plan.some(r => r.session_type === 'mock'), 'mock days present (before school exam)');
+// nothing scheduled ON the school exam day except light revision
+const examDayRows = plan.filter(r => r.date === schoolExamDate);
+assert.ok(examDayRows.length > 0 && examDayRows.every(r => r.session_type === 'revision'), 'school exam day = light revision only');
+// class syllabus coverage before the exam (2-week buffer respected)
+const lastClassDate = plan.filter(r => r.track === 'class' && r.session_type === 'study').map(r => r.date).sort().pop();
+if (lastClassDate) {
+  const bufferMs = new Date(schoolExamDate).getTime() - 14 * 86400000 - new Date(lastClassDate).getTime();
+  assert.ok(bufferMs >= -86400000, 'class study wraps up ~2 weeks before the school exam');
+}
+
+// track-aware deadlines: class rows due before school exam minus buffer
+const dls2 = autoSetDeadlines(multiTrackSyllabus, null, 4, [{ label: 'Mid-Term', date: schoolExamDate }]);
+assert.ok(dls2.c1 && dls2.c2, 'class deadlines set from school exam');
+assert.ok(dls2.c1 <= schoolExamDate && dls2.c2 <= schoolExamDate, 'class deadlines before school exam');
+const deadlineBuffer = (new Date(schoolExamDate) - new Date(dls2.c2)) / 86400000;
+assert.ok(deadlineBuffer >= 10, `class deadline ~2 weeks before school exam (buffer: ${deadlineBuffer.toFixed(1)} days)`);
+
 console.log('ALL LOGIC TESTS PASSED ✅');

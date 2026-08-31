@@ -5,7 +5,7 @@
 // ============================================================
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { setRuntimeConfig, initRuntimeConfig, aiStatus } from '../lib/aiService';
+import { setRuntimeConfig, initRuntimeConfig, aiStatus, selfTestAI } from '../lib/aiService';
 import { AI_PROVIDER } from '../config/constants';
 
 const KEY = 'sos.settings';
@@ -23,6 +23,8 @@ const SettingsCtx = createContext(null);
 
 export function SettingsProvider({ children }) {
   const [settings, setSettings] = useState(DEFAULTS);
+  // AI health from the startup self-test: {ok, provider?, reason?} | null
+  const [aiHealth, setAiHealth] = useState(null);
   // always-current mirror of settings (side effects read from this,
   // never from the React state updater — keeps updates race-free)
   const ref = useRef(DEFAULTS);
@@ -39,12 +41,19 @@ export function SettingsProvider({ children }) {
           setSettings(next);
           // make sure the AI service sees stored keys immediately
           if (next.geminiKey || next.groqKey || next.aiProvider) {
-            setRuntimeConfig({
+            await setRuntimeConfig({
               provider: next.aiProvider || null,
               geminiKey: next.geminiKey || null,
               groqKey: next.groqKey || null,
             });
           }
+        }
+        // startup self-test — powers the "AI not connected" banner
+        try {
+          const health = await selfTestAI();
+          setAiHealth(health);
+        } catch {
+          /* ignore */
         }
       } catch {
         /* ignore */
@@ -74,9 +83,17 @@ export function SettingsProvider({ children }) {
       ...settings,
       effectiveProvider,
       aiStatus: aiStatus(),
+      aiHealth,
       update,
+      refreshAIHealth: async () => {
+        try {
+          setAiHealth(await selfTestAI());
+        } catch {
+          /* ignore */
+        }
+      },
     };
-  }, [settings, update]);
+  }, [settings, update, aiHealth]);
 
   return <SettingsCtx.Provider value={value}>{children}</SettingsCtx.Provider>;
 }

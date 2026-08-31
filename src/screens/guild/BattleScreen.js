@@ -12,6 +12,8 @@ import { GAMER, fonts, radius } from '../../config/theme';
 import { db, isRemote } from '../../lib/db';
 import { DEMO_RIVALS } from '../../lib/guildData';
 import { QUIZ_BANK } from '../../lib/quizBank';
+import { aiChallengeQuestions } from '../../lib/aiFeatures';
+import { aiStatus, isOnline } from '../../lib/aiService';
 import { PixelText } from '../../components/gamer/PixelText';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -31,6 +33,8 @@ export function BattleScreen({ navigation }) {
   const [friends, setFriends] = useState([]);
   const [battleId, setBattleId] = useState(null);
   const [questions, setQuestions] = useState([]);
+  const [qSource, setQSource] = useState('bank'); // 'ai' | 'bank'
+  const [prepping, setPrepping] = useState(false);
   const [qIndex, setQIndex] = useState(0);
   const [selected, setSelected] = useState(null);
   const [correct, setCorrect] = useState(0);
@@ -66,24 +70,56 @@ export function BattleScreen({ navigation }) {
     return () => clearTimeout(t);
   }, [phase, timeLeft, selected]);
 
-  const startBattle = (opp) => {
+  // Battle with class-aware AI questions (student's OWN syllabus),
+  // static bank as instant offline fallback.
+  const startBattle = async (opp) => {
     const id = uuid();
     setOpponent(opp);
     setBattleId(id);
-    // same set for both players — seeded by battle id
-    const set = seededShuffle(QUIZ_BANK, id).slice(0, BATTLE_COUNT);
-    setQuestions(set);
     // rival's score: deterministic from battle id + rival (as if they played the same set)
     const luck = hashString(`${id}-${opp.id}`) % 100;
     const skill = 55 + (hashString(opp.id) % 30); // 55-84% skill
     const rivalCorrect = Math.max(0, Math.min(BATTLE_COUNT, Math.round((skill / 100) * BATTLE_COUNT + (luck > 85 ? 1 : luck < 15 ? -1 : 0))));
     setRivalScore(rivalCorrect);
-    setPhase('play');
-    setQIndex(0);
-    setSelected(null);
-    setCorrect(0);
-    setTimeLeft(PER_Q_SECONDS);
-    setTotalTime(0);
+
+    const begin = (set, source) => {
+      setQuestions(set);
+      setQSource(source);
+      setPhase('play');
+      setQIndex(0);
+      setSelected(null);
+      setCorrect(0);
+      setTimeLeft(PER_Q_SECONDS);
+      setTotalTime(0);
+    };
+
+    // instant bank fallback first, then try AI (short prep phase)
+    try {
+      const status = aiStatus();
+      if (status.anyConfigured && (await isOnline())) {
+        setPrepping(true);
+        const syllabusRows = profile?.id
+          ? await db.list('syllabus', { eq: { user_id: profile.id } })
+          : [];
+        const qs = await aiChallengeQuestions({
+          profile: profile || {},
+          syllabusRows,
+          count: BATTLE_COUNT,
+          topic: `${opp?.display_name || 'rival'} challenge`,
+        });
+        setPrepping(false);
+        if (qs.length >= 3) {
+          begin(qs, 'ai');
+          return;
+        }
+      }
+    } catch {
+      /* offline → bank */
+    } finally {
+      setPrepping(false);
+    }
+    // same set for both players — seeded by battle id
+    begin(seededShuffle(QUIZ_BANK, id).slice(0, BATTLE_COUNT), 'bank');
   };
 
   const answer = (i) => {
@@ -146,6 +182,17 @@ export function BattleScreen({ navigation }) {
             <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.subtext, marginTop: 12, textAlign: 'center', lineHeight: 19 }}>
               Ek dost ko challenge karo — same questions, same timer.{'\n'}Winner gets +60 XP bonus. Loser gets gyaan 😄
             </Text>
+            {prepping ? (
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: GAMER.gold, marginTop: 12 }}>
+                Professor Byte questions laa raha hai… 🧠
+              </Text>
+            ) : (
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: GAMER.subtext, marginTop: 12, textAlign: 'center' }}>
+                {aiStatus().anyConfigured
+                  ? `⚔️ AI questions from YOUR syllabus (${profile?.class_level || 'your class'})`
+                  : '📚 Practice bank questions · add an API key for class-aware AI battles'}
+              </Text>
+            )}
           </Card>
           <PixelText size={9} color={GAMER.subtext} style={{ marginBottom: 10 }}>
             CHOOSE YOUR RIVAL

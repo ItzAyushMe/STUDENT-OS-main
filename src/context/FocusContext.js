@@ -10,6 +10,7 @@ import { useAuth } from './AuthContext';
 import { useGame } from './GameContext';
 import { useSettings } from './SettingsContext';
 import { db } from '../lib/db';
+import { FOCUS_QUOTES } from '../config/constants';
 import { playSfx } from '../lib/soundService';
 import { nowIso, uuid } from '../lib/utils';
 
@@ -24,8 +25,12 @@ export function FocusProvider({ children }) {
   const [session, setSession] = useState(null);
   const [shield, setShield] = useState(null); // { secondsLeft, reason }
   const [reflection, setReflection] = useState(null); // { rowId, minutes, mode, topic }
+  const [quote, setQuote] = useState(null); // empathetic 20-min quote { text, idx }
   const intervalRef = useRef(null);
   const sessionRef = useRef(null);
+  const attemptDistractionRef = useRef(() => {});
+  const quoteIdxRef = useRef(0);
+  const lastQuoteAtRef = useRef(null);
   sessionRef.current = session;
 
   const sfx = useCallback(
@@ -45,6 +50,17 @@ export function FocusProvider({ children }) {
     intervalRef.current = setInterval(async () => {
       const s = sessionRef.current;
       if (!s || s.pausedAt) return;
+      // empathetic quote every 20 minutes of focused work
+      if (s.phase === 'focus') {
+        const focusMs = Date.now() - new Date(s.phaseStartedAt).getTime();
+        const sinceQuote = lastQuoteAtRef.current ? Date.now() - lastQuoteAtRef.current : Infinity;
+        if (focusMs >= 20 * 60 * 1000 && sinceQuote >= 20 * 60 * 1000) {
+          lastQuoteAtRef.current = Date.now();
+          const idx = quoteIdxRef.current % FOCUS_QUOTES.length;
+          quoteIdxRef.current = idx + 1;
+          setQuote({ text: FOCUS_QUOTES[idx], idx });
+        }
+      }
       if (Date.now() >= new Date(s.endsAt).getTime()) {
         await completePhase(s.id);
       }
@@ -65,18 +81,34 @@ export function FocusProvider({ children }) {
   }, [shield]);
 
   // ------- background = distraction -------
+  // Native: AppState. Web: visibilitychange too (RNW's AppState can be spotty).
   useEffect(() => {
+    const onDistraction = (reason) => {
+      const s = sessionRef.current;
+      if (!s || s.pausedAt || s.phase !== 'focus') return;
+      attemptDistractionRef.current(reason);
+    };
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'background') {
-        attemptDistraction('left the app');
-      }
+      if (state === 'background') onDistraction('left the app');
     });
-    return () => sub.remove();
+    let docHandler = null;
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      docHandler = () => {
+        if (document.hidden) onDistraction('switched tabs');
+      };
+      document.addEventListener('visibilitychange', docHandler);
+    }
+    return () => {
+      sub.remove();
+      if (docHandler) document.removeEventListener('visibilitychange', docHandler);
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const start = useCallback(
     ({ mode = 'classic', focusMinutes = 25, breakMinutes = 5, topic = '', subject = '' }) => {
       const now = new Date();
+      lastQuoteAtRef.current = null;
+      setQuote(null);
       setSession({
         id: uuid(),
         mode,
@@ -221,6 +253,9 @@ export function FocusProvider({ children }) {
     setSession((cur) => (cur ? { ...cur, distractions: (cur.distractions || 0) + 1 } : cur));
     setShield({ secondsLeft: SHIELD_SECONDS, reason });
   }, []);
+  attemptDistractionRef.current = attemptDistraction;
+
+  const dismissQuote = useCallback(() => setQuote(null), []);
 
   const stayFocused = useCallback(() => setShield(null), []);
 
@@ -264,6 +299,7 @@ export function FocusProvider({ children }) {
       session,
       shield,
       reflection,
+      quote,
       start,
       pause,
       resume,
@@ -274,8 +310,9 @@ export function FocusProvider({ children }) {
       leaveAnyway,
       submitReflection,
       dismissReflection,
+      dismissQuote,
     }),
-    [session, shield, reflection, start, pause, resume, stopSession, skipPhase, attemptDistraction, stayFocused, leaveAnyway, submitReflection, dismissReflection]
+    [session, shield, reflection, quote, start, pause, resume, stopSession, skipPhase, attemptDistraction, stayFocused, leaveAnyway, submitReflection, dismissReflection, dismissQuote]
   );
 
   return <FocusCtx.Provider value={value}>{children}</FocusCtx.Provider>;

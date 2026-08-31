@@ -9,6 +9,10 @@ import { useGame } from '../../context/GameContext';
 import { useTheme } from '../../context/ThemeContext';
 import { GAMER, fonts, radius } from '../../config/theme';
 import { pickDailyArena } from '../../lib/quizBank';
+import { aiChallengeQuestions, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiStatus } from '../../lib/aiService';
+import { isOnline } from '../../lib/aiService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { demoArenaBoard } from '../../lib/guildData';
 import { db, isRemote } from '../../lib/db';
 import { PixelText } from '../../components/gamer/PixelText';
@@ -33,8 +37,52 @@ export function ArenaScreen({ navigation }) {
   const [totalTime, setTotalTime] = useState(0);
   const [confetti, setConfetti] = useState(0);
   const [board, setBoard] = useState(null);
+  // AI questions from the student's OWN class/syllabus (cached per day);
+  // static arena bank is the offline fallback.
+  const [questions, setQuestions] = useState(() => pickDailyArena(todayStr()));
+  const [qSource, setQSource] = useState('bank'); // 'ai' | 'bank'
+  const [qLoading, setQLoading] = useState(true);
 
-  const questions = pickDailyArena(todayStr());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const today = todayStr();
+        const cacheKey = `sos.arenaAI.${profile?.id || 'guest'}.${today}`;
+        const status = aiStatus();
+        if (!status.anyConfigured || !(await isOnline())) {
+          setQLoading(false);
+          return;
+        }
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (!cancelled && Array.isArray(parsed) && parsed.length >= 3) {
+            setQuestions(parsed);
+            setQSource('ai');
+          }
+          setQLoading(false);
+          return;
+        }
+        const syllabusRows = profile?.id
+          ? await db.list('syllabus', { eq: { user_id: profile.id } })
+          : [];
+        const qs = await aiChallengeQuestions({ profile: profile || {}, syllabusRows, count: 5 });
+        if (!cancelled && qs.length >= 3) {
+          setQuestions(qs);
+          setQSource('ai');
+          AsyncStorage.setItem(cacheKey, JSON.stringify(qs)).catch(() => {});
+        }
+      } catch (e) {
+        // offline / no key → static bank (already loaded)
+      } finally {
+        if (!cancelled) setQLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [profile?.id]);
 
   useEffect(() => {
     if (phase !== 'play' || selected != null) return;
@@ -150,8 +198,31 @@ export function ArenaScreen({ navigation }) {
               TODAY'S GAUNTLET
             </PixelText>
             <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.subtext, marginTop: 10, textAlign: 'center', lineHeight: 19 }}>
-              5 questions · 15 seconds each{'\n'}Sab players ke same questions — ek hi din, ek hi battlefield.
+              5 questions · 15 seconds each{'\n'}{qSource === 'ai' ? `From YOUR syllabus — ${profile?.class_level || 'your class'} level ⚡` : 'Same questions for everyone, one battlefield.'}
             </Text>
+            <View
+              style={{
+                marginTop: 10,
+                backgroundColor: qSource === 'ai' ? 'rgba(16,185,129,0.12)' : 'rgba(100,116,139,0.15)',
+                borderWidth: 1,
+                borderColor: qSource === 'ai' ? 'rgba(16,185,129,0.4)' : 'rgba(100,116,139,0.35)',
+                borderRadius: 999,
+                paddingVertical: 4,
+                paddingHorizontal: 12,
+                alignSelf: 'center',
+                flexDirection: 'row',
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ fontSize: 11, marginRight: 5 }}>{qLoading ? '⏳' : qSource === 'ai' ? '🧠' : '📚'}</Text>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: qSource === 'ai' ? '#34D399' : GAMER.subtext }}>
+                {qLoading
+                  ? 'Loading your challenge…'
+                  : qSource === 'ai'
+                  ? `AI · your class syllabus${profile?.class_level ? ` (${profile.class_level})` : ''}`
+                  : 'Practice bank · add an API key for class-aware AI questions'}
+              </Text>
+            </View>
           </Card>
           <Card mode="gamer" style={{ marginBottom: 16 }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: GAMER.gold, marginBottom: 6 }}>XP on the line</Text>
@@ -159,7 +230,7 @@ export function ArenaScreen({ navigation }) {
               ⚡ +10 XP per correct answer{'\n'}🏆 +20 XP for finishing{'\n'}📅 New set every day — rank resets daily
             </Text>
           </Card>
-          <Button title="ENTER THE ARENA 🚀" mode="gamer" pixel size="lg" onPress={start} />
+          <Button title={qLoading ? 'PREPARING…' : 'ENTER THE ARENA 🚀'} mode="gamer" pixel size="lg" onPress={start} disabled={qLoading} />
         </ScrollView>
       ) : null}
 

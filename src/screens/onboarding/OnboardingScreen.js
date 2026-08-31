@@ -30,6 +30,9 @@ export function OnboardingScreen() {
     competitive_exam: 'None',
     exam_date: '',
     olympiad: 'None',
+    olympiad_date: '',
+    school_exams: [],
+
     daily_study_hours: 3,
     preferred_time: STUDY_TIMES[0],
     prep_level: PREP_LEVELS[1],
@@ -64,7 +67,9 @@ export function OnboardingScreen() {
       try {
         const topics = await seedSyllabus(profile.id, {
           class_level: form.class_level,
+          board: form.board,
           competitive_exam: form.competitive_exam,
+          olympiad: form.olympiad,
         });
         const habits = await seedHabits(profile.id);
         setRevealStats({ topics: topics || 0, habits: habits || 0 });
@@ -84,9 +89,15 @@ export function OnboardingScreen() {
     setBusy(true);
     try {
       const { _group, ...payload } = form;
+      // clean school exams: keep only entries with a valid date
+      const schoolExams = (form.school_exams || [])
+        .map((e) => ({ label: (e.label || 'School exam').trim() || 'School exam', date: (e.date || '').trim() }))
+        .filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e.date));
       await updateProfile({
         ...payload,
         exam_date: form.exam_date || null,
+        olympiad_date: form.olympiad_date || null,
+        school_exams: schoolExams,
         days_off: form.days_off,
         onboarded: true,
       });
@@ -97,6 +108,13 @@ export function OnboardingScreen() {
 
   const next = () => setStep((s) => Math.min(6, s + 1));
   const skipAll = () => setStep(5);
+
+  const setSchoolExam = (i, patch) => {
+    setForm((f) => ({
+      ...f,
+      school_exams: (f.school_exams || []).map((e, j) => (j === i ? { ...e, ...patch } : e)),
+    }));
+  };
 
   const wrap = {
     flex: 1,
@@ -304,7 +322,69 @@ export function OnboardingScreen() {
                 <Chip key={x} label={x} selected={form.olympiad === x} onPress={() => set({ olympiad: x })} mode="gamer" />
               ))}
             </View>
-            <InfoText>Optional again. Extra quests unlock if you pick one!</InfoText>
+            {form.olympiad !== 'None' ? (
+              <View style={{ marginTop: 10 }}>
+                <Input
+                  mode="gamer"
+                  label="Olympiad date (YYYY-MM-DD)"
+                  value={form.olympiad_date}
+                  onChangeText={(v) => set({ olympiad_date: v })}
+                  placeholder="2026-11-15"
+                  hint="Optional — helps the scheduler plan around it."
+                />
+              </View>
+            ) : null}
+
+            <View style={{ marginTop: 18 }}>
+              <StepTitle emoji="📅" title="School exam dates? (optional)" />
+              <InfoText>
+                Mid-terms, finals… add them and StudentOS will finish your CLASS syllabus ~2 weeks before each one.
+              </InfoText>
+              {(form.school_exams || []).map((e, i) => (
+                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <View style={{ flex: 1.4, marginRight: 8 }}>
+                    <Input
+                      mode="gamer"
+                      value={e.label}
+                      onChangeText={(v) => setSchoolExam(i, { label: v })}
+                      placeholder="e.g. Mid-Term"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Input
+                      mode="gamer"
+                      value={e.date}
+                      onChangeText={(v) => setSchoolExam(i, { date: v })}
+                      placeholder="2026-09-20"
+                      keyboardType="numeric"
+                    />
+                  </View>
+                  <Pressable onPress={() => set({ school_exams: form.school_exams.filter((_, j) => j !== i) })} hitSlop={8} style={{ padding: 6, marginLeft: 4 }}>
+                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                  </Pressable>
+                </View>
+              ))}
+              <Pressable
+                onPress={() => set({ school_exams: [...(form.school_exams || []), { label: '', date: '' }] })}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  alignSelf: 'flex-start',
+                  paddingVertical: 8,
+                  paddingHorizontal: 12,
+                  borderRadius: 10,
+                  backgroundColor: pressed ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.2)',
+                  marginTop: 4,
+                })}
+              >
+                <Ionicons name="add" size={16} color="#EDE9FE" />
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#EDE9FE', marginLeft: 6 }}>
+                  Add school exam
+                </Text>
+              </Pressable>
+            </View>
           </>
         )}
 

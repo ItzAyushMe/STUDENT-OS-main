@@ -100,6 +100,36 @@ export async function isOnline() {
   }
 }
 
+// ---------- connectivity self-test (runs once on startup) ----------
+// Cheap ping so the app can show a real "AI not connected" banner
+// instead of features failing silently. Result is cached.
+let selfTestPromise = null;
+export function selfTestAI() {
+  if (!aiStatus().anyConfigured) {
+    return Promise.resolve({ ok: false, reason: 'no-key' });
+  }
+  if (!selfTestPromise) {
+    selfTestPromise = (async () => {
+      try {
+        const reply = await askAI({
+          prompt: 'Reply with exactly: OK',
+          system: 'You are a health check. Reply with exactly: OK',
+          temperature: 0,
+          noCache: true,
+        });
+        return { ok: true, provider: aiStatus().provider };
+      } catch (e) {
+        return { ok: false, reason: e instanceof AIUnavailableError ? e.message : 'unknown' };
+      }
+    })();
+    // allow re-testing later (e.g. after the user adds a key)
+    selfTestPromise.finally(() => {
+      setTimeout(() => { selfTestPromise = null; }, 60 * 1000);
+    }).catch(() => {});
+  }
+  return selfTestPromise;
+}
+
 // ---------- cache ----------
 const cache = new Map();
 function cacheKey(provider, prompt, system, json) {
