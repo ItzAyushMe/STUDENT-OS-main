@@ -18,9 +18,10 @@ import { db } from '../../lib/db';
 import { aiSummarizeContent, AIUnavailableError } from '../../lib/aiFeatures';
 import { aiStatus } from '../../lib/aiService';
 import { CONTENT_TYPES } from '../../config/constants';
-import { FREE_LIBRARY, LIB_KIND_ICON } from '../../data/contentLibrary';
+import { FREE_LIBRARY, LIB_KIND_ICON, CLASS10_LIBRARY } from '../../data/contentLibrary';
 import { fonts } from '../../config/theme';
 import { nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function ContentScreen({ navigation }) {
   const { profile } = useAuth();
@@ -40,6 +41,7 @@ export function ContentScreen({ navigation }) {
     setItems(rows);
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const detectType = (url) => {
@@ -58,7 +60,7 @@ export function ContentScreen({ navigation }) {
       user_id: profile.id,
       title: form.title.trim(),
       type,
-      url: form.kind === 'link' ? form.body.trim() : null,
+      url: form.kind === 'link' ? normalizeUrl(form.body.trim()) : null,
       text: form.kind === 'note' ? form.body.trim() : null,
       subject: form.subject.trim() || null,
       topic: null,
@@ -92,14 +94,21 @@ export function ContentScreen({ navigation }) {
     }
   };
 
+  // BUG 5: user-typed links like "youtube.com/..." fail without a scheme.
+  const normalizeUrl = (u) => {
+    const s = String(u || '').trim();
+    if (!s) return s;
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+  };
+
   const open = (item) => {
-    if (item.url) Linking.openURL(item.url).catch(() => {});
+    if (item.url) Linking.openURL(normalizeUrl(item.url)).catch(() => {});
   };
 
   if (!items) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Content Locker" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Content Locker" onBack={onBack} />
         <Loading mode="light" />
       </Screen>
     );
@@ -113,7 +122,7 @@ export function ContentScreen({ navigation }) {
       <ScreenHeader
         title="Content Locker"
         subtitle="Notes, links, YouTube — sab ek jagah"
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <Pressable onPress={() => setAddOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
             <Ionicons name="add" size={19} color="#6D28D9" />
@@ -128,7 +137,7 @@ export function ContentScreen({ navigation }) {
       </View>
 
       {tab === 'library' ? (
-        <FreeLibrary openSubject={openSubject} setOpenSubject={setOpenSubject} onOpen={(url) => Linking.openURL(url).catch(() => {})} />
+        <FreeLibrary openSubject={openSubject} setOpenSubject={setOpenSubject} onOpen={(url) => Linking.openURL(normalizeUrl(url)).catch(() => {})} />
       ) : (
       <>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 }}>
@@ -277,6 +286,41 @@ function FreeLibrary({ openSubject, setOpenSubject, onOpen }) {
             </View>
             <Ionicons name="open-outline" size={16} color="#CBD5E1" style={{ marginTop: 2 }} />
           </View>
+        </Card>
+      ))}
+
+      {/* Class 10 CBSE — community-vetted best free teachers (v1.0.2) */}
+      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginTop: 6, marginBottom: 8 }}>
+        🎓 Class 10 CBSE — best free teachers
+      </Text>
+      {CLASS10_LIBRARY.map((s) => (
+        <Card key={`c10-${s.subject}`} mode="light" style={{ marginBottom: 10, backgroundColor: '#F0FDFA', borderColor: '#CCFBF1' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <Text style={{ fontSize: 19, marginRight: 9 }}>{s.emoji}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: '#0F766E' }}>{s.subject}</Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#0D9488', marginTop: 1 }}>⭐ Main: {s.teacher}</Text>
+            </View>
+          </View>
+          {s.items.map((it, i) => (
+            <Pressable
+              key={i}
+              onPress={() => onOpen(it.url)}
+              style={({ pressed }) => ({
+                flexDirection: 'row', alignItems: 'center',
+                backgroundColor: pressed ? '#E6FFFA' : '#FFFFFF',
+                borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 9,
+                paddingHorizontal: 10, paddingVertical: 8, marginBottom: 6,
+              })}
+            >
+              <Text style={{ fontSize: 15, marginRight: 9 }}>{LIB_KIND_ICON[it.kind] || '🔗'}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#1E293B' }}>{it.title}</Text>
+                <Text style={{ fontFamily: fonts.body, fontSize: 10, color: '#64748B', marginTop: 1 }}>✅ FREE · {it.source}</Text>
+              </View>
+              <Ionicons name="open-outline" size={14} color="#CBD5E1" />
+            </Pressable>
+          ))}
         </Card>
       ))}
 

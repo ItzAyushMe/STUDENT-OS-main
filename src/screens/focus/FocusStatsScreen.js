@@ -11,6 +11,7 @@ import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, fmtDuration, mondayOf, groupBy } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function FocusStatsScreen({ navigation }) {
   const { profile } = useAuth();
@@ -28,12 +29,13 @@ export function FocusStatsScreen({ navigation }) {
     }
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'FocusMain');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   if (loading || !sessions) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Focus Stats" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Focus Stats" onBack={onBack} />
         <Loading mode="light" text="Crunching your focus numbers…" />
       </Screen>
     );
@@ -77,7 +79,7 @@ export function FocusStatsScreen({ navigation }) {
 
   return (
     <Screen mode="light">
-      <ScreenHeader title="Focus Stats" subtitle="Numbers don't lie — tu kar lega" onBack={() => navigation.goBack()} />
+      <ScreenHeader title="Focus Stats" subtitle="Numbers don't lie — tu kar lega" onBack={onBack} />
 
       {/* today + streak */}
       <View style={{ flexDirection: 'row', marginBottom: 12 }}>

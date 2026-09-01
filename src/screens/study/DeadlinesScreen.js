@@ -20,6 +20,7 @@ import { infoAlert } from '../../lib/alert';
 import { autoSetDeadlines } from '../../lib/scheduleGenerator';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, daysBetween, pct } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function DeadlinesScreen({ navigation }) {
   const { profile } = useAuth();
@@ -41,6 +42,7 @@ export function DeadlinesScreen({ navigation }) {
     }
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const subjects = useMemo(() => ['All', ...new Set(rows.map((r) => r.subject))], [rows]);
@@ -78,12 +80,15 @@ export function DeadlinesScreen({ navigation }) {
     }
     setBusy(true);
     try {
-      // class-track rows get deadlines ~2 weeks before the nearest school exam
+      // BUG 11: deterministic first — exam date + syllabus + daily hours.
+      // No AI needed to generate the sheet; AI only ever enhances advice.
       const deadlines = autoSetDeadlines(rows, profile.exam_date, profile.daily_study_hours, schoolExams);
       for (const [id, deadline] of Object.entries(deadlines)) {
         await db.update('syllabus', id, { deadline });
       }
       await load();
+    } catch (e) {
+      infoAlert('Auto-plan failed', e?.message || 'Deadlines set nahi ho paye. Dobara try karo.');
     } finally {
       setBusy(false);
     }
@@ -106,7 +111,7 @@ export function DeadlinesScreen({ navigation }) {
       <ScreenHeader
         title="Deadline Sheet"
         subtitle="Mission board — har topic, har deadline"
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <Pressable
             onPress={autoPlan}

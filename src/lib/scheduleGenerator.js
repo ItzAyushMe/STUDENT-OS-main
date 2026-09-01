@@ -91,8 +91,10 @@ function allSchoolExams(schoolExams = []) {
 
 // Student-configurable priorities (FIX B).
 // Shape on users.priorities:
-//   { order: ['class','exam','olympiad'], enabled: {class:true,...},
-//     timeSplit: { class: 60, exam: 30, olympiad: 10 } }
+//   { order: ['class','exam','olympiad', 'custom:xyz'], enabled: {class:true,...},
+//     timeSplit: { class: 60, exam: 30, olympiad: 10, 'custom:xyz': 0 },
+//     custom: { 'custom:xyz': { name: 'Physics Boost', subjects: ['Physics'] } } }
+const CORE_TRACKS = ['class', 'exam', 'olympiad'];
 const DEFAULT_PRIORITIES = {
   order: ['class', 'exam', 'olympiad'],
   enabled: { class: true, exam: true, olympiad: true },
@@ -100,12 +102,24 @@ const DEFAULT_PRIORITIES = {
 };
 
 export function normalizePriorities(p) {
+  const customs = p?.custom && typeof p.custom === 'object' ? p.custom : {};
+  const customIds = Object.keys(customs).filter((id) => id && id.startsWith('custom:'));
+
+  // base order: the three core tracks (always present, in the user's order)…
+  let order;
+  if (Array.isArray(p?.order) && CORE_TRACKS.every((t) => p.order.includes(t))) {
+    order = [...p.order];
+  } else {
+    order = [...DEFAULT_PRIORITIES.order];
+  }
+  // …plus any custom tracks the user added
+  for (const id of customIds) if (!order.includes(id)) order.push(id);
+
   const next = {
-    order: Array.isArray(p?.order) && ['class', 'exam', 'olympiad'].every((t) => p.order.includes(t))
-      ? [...p.order]
-      : [...DEFAULT_PRIORITIES.order],
+    order,
     enabled: { ...DEFAULT_PRIORITIES.enabled, ...(p?.enabled || {}) },
     timeSplit: { ...DEFAULT_PRIORITIES.timeSplit, ...(p?.timeSplit || {}) },
+    custom: customs,
   };
   // only keep enabled tracks in the scheduling order
   next.order = next.order.filter((t) => next.enabled[t] !== false);
@@ -129,6 +143,16 @@ export function normalizePriorities(p) {
     });
   }
   return next;
+}
+
+// Track a syllabus row belongs to. Custom tracks can claim subjects:
+// a row whose subject is listed in a custom track goes there first.
+export function trackOfRow(row, prio) {
+  const customs = prio?.custom || {};
+  for (const [id, meta] of Object.entries(customs)) {
+    if (Array.isArray(meta?.subjects) && meta.subjects.includes(row?.subject)) return id;
+  }
+  return rowTrack(row);
 }
 
 // ---------- deadlines: track-aware, school-exam aware ----------
@@ -229,10 +253,12 @@ export function generateSchedule(opts) {
       if (w !== 0) return w;
       return String(a.deadline || '9999').localeCompare(String(b.deadline || '9999'));
     });
-  const pendingByTrack = { class: [], olympiad: [], exam: [] };
+  const pendingByTrack = {};
+  for (const t of activeOrder) pendingByTrack[t] = [];
   for (const r of syllabus) {
     if (r.status === 'completed') continue;
-    pendingByTrack[rowTrack(r)].push(r);
+    const t = trackOfRow(r, prio);
+    (pendingByTrack[t] || pendingByTrack[rowTrack(r)] || (pendingByTrack[t] = [])).push(r);
   }
   // one queue per track; we pull from each in priority order each day
   const queues = {};
@@ -254,7 +280,12 @@ export function generateSchedule(opts) {
   const out = [];
   const studied = []; // {subject, chapter, date, track} for revision cycles
   let blockCount = 0;
-  const covered = { class: 0, olympiad: 0, exam: 0 };
+  // Small splits (5–15% of a day) are below the 30-min minimum block.
+  // Instead of inflating them, their budget accumulates day to day so the
+  // track still gets a viable block every few days — split stays honest.
+  const leftoverBudget = {};
+  for (const t of activeOrder) leftoverBudget[t] = 0;
+  const covered = {}; for (const t of activeOrder) covered[t] = 0;
 
   for (let d = 0; d < totalDays; d++) {
     const date = dateStr(dayjs(today).add(d, 'day'));
@@ -341,7 +372,7 @@ export function generateSchedule(opts) {
     //    time budget (timeSplit). Unused budget rolls to the next track.
     const budgets = trackBudget(isDayOff);
     for (const track of activeOrder) {
-      let budget = budgets[track] || 0;
+      let budget = (budgets[track] || 0) + (leftoverBudget[track] || 0);
       // school-exam guard: near a school exam the class track may exceed
       // its split — class work cannot be postponed past the exam
       const classUrgent =
@@ -350,6 +381,11 @@ export function generateSchedule(opts) {
           const diff = dayjs(e.start).diff(dayjs(date), 'day');
           return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS + 7;
         });
+      if (budget > 0 && budget < 30) {
+        // not enough for a viable block today — save it up for tomorrow
+        leftoverBudget[track] = isDayOff ? 0 : Math.min(90, budget);
+        continue;
+      }
       while (remaining >= 30 && (budget >= 30 || (classUrgent && remaining >= 30))) {
         const q = queues[track];
         const idx = trackStart[track];
@@ -372,6 +408,7 @@ export function generateSchedule(opts) {
         }
         if (!classUrgent && budget < 30) break;
       }
+      leftoverBudget[track] = isDayOff ? 0 : Math.min(90, Math.max(0, budget));
     }
 
     // 2) revision cycle every 3rd day (revisit last 2 days' topics)
@@ -401,12 +438,15 @@ export function generateSchedule(opts) {
   const coverage = {
     priorityOrder: activeOrder,
     timeSplit: prio.timeSplit,
-    classTotal: pendingByTrack.class.length,
+    classTotal: (pendingByTrack.class || []).length,
     classPlanned: covered.class || 0,
-    olympiadTotal: pendingByTrack.olympiad.length,
+    olympiadTotal: (pendingByTrack.olympiad || []).length,
     olympiadPlanned: covered.olympiad || 0,
-    examTotal: pendingByTrack.exam.length,
+    examTotal: (pendingByTrack.exam || []).length,
     examPlanned: covered.exam || 0,
+    custom: Object.entries(pendingByTrack)
+      .filter(([t]) => t.startsWith('custom:'))
+      .map(([t, rows]) => ({ id: t, name: prio.custom?.[t]?.name || t, total: rows.length, planned: covered[t] || 0 })),
     nextSchoolExam: nextSchool,
     classDoneBy: nextSchool ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')) : null,
   };

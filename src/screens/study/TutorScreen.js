@@ -16,6 +16,7 @@ import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Chip } from '../../components/ui/Chip';
 import { Loading } from '../../components/ui/EmptyState';
 import { LIGHT, GAMER, fonts, radius } from '../../config/theme';
+import { useHubBack } from '../../hooks/useHubBack';
 
 const QUICK = [
   { key: 'explain', label: '📖 Explain a topic', prompt: 'Explain ' },
@@ -28,6 +29,7 @@ const QUICK = [
 export function TutorScreen({ navigation, route }) {
   useTheme('light');
   const { profile } = useAuth();
+  const onBack = useHubBack(navigation, 'StudyHub');
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState(null);
   const [input, setInput] = useState('');
@@ -108,7 +110,7 @@ export function TutorScreen({ navigation, route }) {
   if (messages === null) {
     return (
       <View style={{ flex: 1, backgroundColor: LIGHT.bg, paddingTop: insets.top + 8 }}>
-        <ScreenHeader title="Professor Byte" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Professor Byte" onBack={onBack} />
         <Loading mode="light" />
       </View>
     );
@@ -124,7 +126,7 @@ export function TutorScreen({ navigation, route }) {
         <ScreenHeader
           title="Professor Byte 🤖"
           subtitle="Explain · Solve · Quiz · Summarize · Plan · Motivate"
-          onBack={() => navigation.goBack()}
+          onBack={onBack}
           right={
             <Pressable onPress={() => persist([])} hitSlop={8} style={{ padding: 6 }}>
               <Ionicons name="refresh-outline" size={20} color="#64748B" />

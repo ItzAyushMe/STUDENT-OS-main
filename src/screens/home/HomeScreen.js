@@ -1,7 +1,7 @@
 // HOME — Gamer mode base camp. XP, level, streak, today's quests,
 // habits status, quote of the day, quick actions.
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -11,7 +11,7 @@ import { useGame } from '../../context/GameContext';
 import { useSettings } from '../../context/SettingsContext';
 import { aiDailyMessage, AIUnavailableError } from '../../lib/aiFeatures';
 import { GAMER, fonts, radius } from '../../config/theme';
-import { QUOTES, SESSION_TYPES } from '../../config/constants';
+import { QUOTES, SESSION_TYPES, STUDY_ARCS, arcOf } from '../../config/constants';
 import { db } from '../../lib/db';
 import { todayStr, greeting, hashString, fmtDuration } from '../../lib/utils';
 import { levelProgress, nextTier, tierForXp } from '../../lib/xpService';
@@ -22,7 +22,7 @@ import { ProgressBar } from '../../components/ui/ProgressBar';
 import { useIsOnline } from '../../hooks/useIsOnline';
 
 export function HomeScreen({ navigation }) {
-  const { profile } = useAuth();
+  const { profile, updateProfile } = useAuth();
   const { awardXP, level, tier, totalXp, streak, freezes } = useGame();
   const settings = useSettings();
   const insets = useSafeAreaInsets();
@@ -32,6 +32,7 @@ export function HomeScreen({ navigation }) {
   const [dayStarted, setDayStarted] = useState(false);
   const [confetti, setConfetti] = useState(0);
   const [aiDailyMsg, setAiDailyMsg] = useState('');
+  const [arcOpen, setArcOpen] = useState(false);
 
   const aiConfigured = settings.aiStatus?.anyConfigured;
   const aiDown = settings.aiHealth && settings.aiHealth.ok === false;
@@ -95,8 +96,12 @@ export function HomeScreen({ navigation }) {
           habitsPending: Math.max(0, habitStats.total - habitStats.done),
         });
         if (!cancelled && msg) {
-          setAiDailyMsg(msg.trim().slice(0, 260));
-          AsyncStorage.setItem(cacheKey, msg.trim().slice(0, 260)).catch(() => {});
+          // FIX 1: keep the WHOLE message — the prompt already asks for 2-3
+          // lines. Only an extreme safety cap, cut at a word boundary + ellipsis.
+          const full = String(msg).trim();
+          const capped = full.length <= 700 ? full : `${full.slice(0, 700).slice(0, full.slice(0, 700).lastIndexOf(' '))}…`;
+          setAiDailyMsg(capped);
+          AsyncStorage.setItem(cacheKey, capped).catch(() => {});
         }
       } catch {
         /* AI offline — the static quote below still shows */
@@ -104,6 +109,37 @@ export function HomeScreen({ navigation }) {
     })();
     return () => { cancelled = true; };
   }, [profile?.id, aiConfigured, today, todayQuests.length, streak]);
+
+  // STUDY ARCS — one-time opt-in invite after onboarding
+  useEffect(() => {
+    if (!profile?.id || !profile?.onboarded || profile?.arc?.id) return;
+    (async () => {
+      try {
+        const asked = await AsyncStorage.getItem(`sos.arcPrompted.${profile.id}`);
+        if (!asked) setArcOpen(true);
+      } catch { /* ignore */ }
+    })();
+  }, [profile?.id, profile?.onboarded, profile?.arc?.id]);
+
+  const joinArc = async (arc) => {
+    setArcOpen(false);
+    try {
+      await AsyncStorage.setItem(`sos.arcPrompted.${profile.id}`, '1');
+    } catch { /* ignore */ }
+    try {
+      await updateProfile({ arc: { id: arc.id, start_date: todayStr() } });
+    } catch { /* ignore */ }
+  };
+
+  const skipArc = async () => {
+    setArcOpen(false);
+    try {
+      await AsyncStorage.setItem(`sos.arcPrompted.${profile.id}`, '1');
+    } catch { /* ignore */ }
+  };
+
+  const arc = arcOf(profile);
+  const arcDay = arc ? Math.max(1, Math.min(arc.days, Math.round((new Date(today) - new Date(arc.startDate)) / 86400000) + 1)) : 0;
 
   const quote = QUOTES[hashString(today) % QUOTES.length];
 
@@ -145,6 +181,37 @@ export function HomeScreen({ navigation }) {
       showsVerticalScrollIndicator={false}
     >
       <Confetti trigger={confetti} origin={{ x: '50%', y: '25%' }} />
+
+      {/* active study arc banner */}
+      {arc ? (
+        <Pressable
+          onPress={() => navigation.navigate('StudyTab', { screen: 'Schedule' })}
+          style={{
+            backgroundColor: `${arc.theme}22`,
+            borderWidth: 1,
+            borderColor: `${arc.theme}66`,
+            borderRadius: radius.lg,
+            padding: 13,
+            marginBottom: 14,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={{ fontSize: 20, marginRight: 9 }}>{arc.emoji}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: arc.theme }}>
+                {arc.label} — Day {arcDay}/{arc.days}
+              </Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2 }}>
+                Streak {streak}🔥 · no-zero days. Schedule arc mode mein chal raha hai.
+              </Text>
+            </View>
+            <Text style={{ fontSize: 16 }}>{arcDay >= arc.days ? '🏆' : '⚡'}</Text>
+          </View>
+          <View style={{ height: 5, backgroundColor: `${arc.theme}22`, borderRadius: 3, marginTop: 9, overflow: 'hidden' }}>
+            <View style={{ height: 5, width: `${Math.min(100, (arcDay / arc.days) * 100)}%`, backgroundColor: arc.theme }} />
+          </View>
+        </Pressable>
+      ) : null}
 
       {/* offline banner */}
       {!online ? (
@@ -455,6 +522,56 @@ export function HomeScreen({ navigation }) {
           onPress={() => navigation.navigate('StudyTab', { screen: 'Tutor' })}
         />
       </View>
+
+      {/* study arc opt-in (shown once, after onboarding) */}
+      <Modal visible={arcOpen} transparent animationType="fade" onRequestClose={skipArc}>
+        <Pressable style={{ flex: 1, backgroundColor: 'rgba(2,6,23,0.72)', padding: 22, justifyContent: 'center' }} onPress={skipArc}>
+          <Pressable
+            onPress={(e) => e.stopPropagation()}
+            style={{ backgroundColor: GAMER.surface, borderWidth: 1, borderColor: GAMER.border, borderRadius: radius.lg, padding: 20 }}
+          >
+            <Text style={{ fontSize: 30, textAlign: 'center' }}>⚡</Text>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 17, color: GAMER.text, textAlign: 'center', marginTop: 8 }}>
+              Take up a Study Arc?
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: GAMER.subtext, textAlign: 'center', marginTop: 6, lineHeight: 17 }}>
+              Ek challenge jo tumhare schedule ko tight kar deta hai — more hours, higher intensity, no-zero days.
+            </Text>
+            {STUDY_ARCS.map((a) => (
+              <Pressable
+                key={a.id}
+                onPress={() => joinArc(a)}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: pressed ? `${a.theme}30` : `${a.theme}18`,
+                  borderWidth: 1,
+                  borderColor: `${a.theme}66`,
+                  borderRadius: radius.md,
+                  padding: 13,
+                  marginTop: 12,
+                })}
+              >
+                <Text style={{ fontSize: 24, marginRight: 11 }}>{a.emoji}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: a.theme }}>
+                    {a.label} · {a.days} days
+                  </Text>
+                  <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2, lineHeight: 15 }}>
+                    {a.desc}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={17} color={a.theme} />
+              </Pressable>
+            ))}
+            <Pressable onPress={skipArc} hitSlop={8} style={{ alignSelf: 'center', marginTop: 16, padding: 6 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: GAMER.subtext }}>
+                Not now — maybe later
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }

@@ -15,6 +15,7 @@ import { db } from '../../lib/db';
 import { MathText } from '../../components/ui/MathText';
 import { fonts, radius } from '../../config/theme';
 import { subjectColor, nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function DeckScreen({ navigation, route }) {
   const { subject, topic } = route?.params || {};
@@ -44,6 +45,7 @@ export function DeckScreen({ navigation, route }) {
     setReviewed(0);
   }, [profile?.id, subject, topic]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   useEffect(() => {
@@ -97,7 +99,7 @@ export function DeckScreen({ navigation, route }) {
   if (!cards) {
     return (
       <Screen mode="light">
-        <ScreenHeader title={topic || 'Deck'} onBack={() => navigation.goBack()} />
+        <ScreenHeader title={topic || 'Deck'} onBack={onBack} />
       </Screen>
     );
   }
@@ -105,7 +107,7 @@ export function DeckScreen({ navigation, route }) {
   return (
     <Screen mode="light" scroll={false}>
       <Confetti trigger={confetti} origin={{ x: '50%', y: '30%' }} />
-      <ScreenHeader title={topic || 'Deck'} subtitle={`${subject} · spaced repetition`} onBack={() => navigation.goBack()} />
+      <ScreenHeader title={topic || 'Deck'} subtitle={`${subject} · spaced repetition`} onBack={onBack} />
 
       {done || !cards.length ? (
         <EmptyState

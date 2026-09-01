@@ -1,7 +1,7 @@
 // GYM / WORKOUT TRACKER — prebuilt plans (Home/Beginner/Intermediate/
 // Advanced), per-exercise logging (sets/reps/weight), personal
 // records, weekly consistency, +30 XP per workout.
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,9 +18,10 @@ import { db } from '../../lib/db';
 import { GYM_PLANS } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, fmtDate } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function GymScreen({ navigation }) {
-  const { profile } = useAuth();
+  const { profile, updateProfile } = useAuth();
   const { awardXP } = useGame();
   const { width } = useWindowDimensions();
   const narrow = width < 420; // 9:16 phones → stacked cards instead of the wide table
@@ -29,6 +30,27 @@ export function GymScreen({ navigation }) {
   const [entries, setEntries] = useState({}); // exercise name -> {sets, reps, weight}
   const [confetti, setConfetti] = useState(0);
   const [saving, setSaving] = useState(false);
+  // BUG 4: user-added custom exercises (persisted on the profile)
+  const [customExercises, setCustomExercises] = useState([]);
+  const [newEx, setNewEx] = useState('');
+  useEffect(() => {
+    if (Array.isArray(profile?.custom_exercises)) setCustomExercises(profile.custom_exercises);
+  }, [profile?.custom_exercises]);
+
+  const addCustomExercise = async () => {
+    const name = newEx.trim();
+    if (!name) return;
+    const next = [...customExercises.filter((e) => e.name !== name), { name, sets: 3, reps: '12' }];
+    setCustomExercises(next);
+    setNewEx('');
+    try { await updateProfile({ custom_exercises: next }); } catch { /* keep UI state anyway */ }
+  };
+
+  const removeCustomExercise = async (name) => {
+    const next = customExercises.filter((e) => e.name !== name);
+    setCustomExercises(next);
+    try { await updateProfile({ custom_exercises: next }); } catch { /* keep UI state anyway */ }
+  };
 
   const plan = GYM_PLANS[planKey];
 
@@ -38,6 +60,7 @@ export function GymScreen({ navigation }) {
     setLogs(rows);
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'LifeHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const setEntry = (name, patch) =>
@@ -102,7 +125,7 @@ export function GymScreen({ navigation }) {
   if (!logs) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Gym Tracker" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Gym Tracker" onBack={onBack} />
       </Screen>
     );
   }
@@ -110,7 +133,7 @@ export function GymScreen({ navigation }) {
   return (
     <Screen mode="light">
       <Confetti trigger={confetti} origin={{ x: '50%', y: '25%' }} />
-      <ScreenHeader title="Gym / Workout" subtitle="Body bhi ek quest hai 💪 (+30 XP per workout)" onBack={() => navigation.goBack()} />
+      <ScreenHeader title="Gym / Workout" subtitle="Body bhi ek quest hai 💪 (+30 XP per workout)" onBack={onBack} />
 
       {/* weekly consistency */}
       <Card mode="light" style={{ marginBottom: 14 }}>
@@ -178,6 +201,51 @@ export function GymScreen({ navigation }) {
             onSet={(patch) => setEntry(ex.name, patch)}
           />
         ))}
+      </Card>
+      {/* BUG 4: custom exercises — add your own, remove any time */}
+      <SectionTitle mode="light">➕ My exercises</SectionTitle>
+      <Card mode="light" style={{ marginBottom: 12 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <TextInput
+            value={newEx}
+            onChangeText={setNewEx}
+            placeholder="Exercise name (e.g. Bicep Curls)"
+            placeholderTextColor="#94A3B8"
+            onSubmitEditing={addCustomExercise}
+            style={{
+              flex: 1,
+              fontFamily: fonts.body,
+              fontSize: 13,
+              color: '#1E293B',
+              backgroundColor: '#F8FAFC',
+              borderWidth: 1,
+              borderColor: '#E2E8F0',
+              borderRadius: radius.md,
+              paddingHorizontal: 10,
+              paddingVertical: 8,
+            }}
+          />
+          <Button title="Add" size="sm" mode="light" onPress={addCustomExercise} disabled={!newEx.trim()} style={{ marginLeft: 8 }} />
+        </View>
+        {customExercises.length ? (
+          <View style={{ marginTop: 10 }}>
+            {customExercises.map((ex) => (
+              <ExerciseRow
+                key={ex.name}
+                ex={ex}
+                entry={entries[ex.name] || {}}
+                narrow={narrow}
+                onSet={(patch) => setEntry(ex.name, patch)}
+                removable
+                onRemove={() => removeCustomExercise(ex.name)}
+              />
+            ))}
+          </View>
+        ) : (
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginTop: 10 }}>
+            Apne exercises add karo — sets/reps/weight waise hi log hote hain jaise plans mein.
+          </Text>
+        )}
       </Card>
       <Button title="Finish Workout (+30 XP) 💪" mode="light" size="lg" onPress={finishWorkout} loading={saving} style={{ marginBottom: 18 }} />
 
@@ -265,7 +333,7 @@ function MiniInput({ value, onChangeText, placeholder, flex }) {
 }
 
 // One exercise: table-row on wide screens, stacked card on narrow phones.
-function ExerciseRow({ ex, entry, narrow, onSet }) {
+function ExerciseRow({ ex, entry, narrow, onSet, removable, onRemove }) {
   if (!narrow) {
     return (
       <View
@@ -279,9 +347,16 @@ function ExerciseRow({ ex, entry, narrow, onSet }) {
         }}
       >
         <View style={{ flex: 1.8, marginRight: 6 }}>
-          <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B' }}>
-            {ex.name}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', flexShrink: 1 }}>
+              {ex.name}
+            </Text>
+            {removable ? (
+              <Pressable onPress={onRemove} hitSlop={8} style={{ padding: 2, marginLeft: 4 }}>
+                <Ionicons name="close-circle" size={16} color="#DC2626" />
+              </Pressable>
+            ) : null}
+          </View>
           <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8' }}>
             target {ex.sets}×{ex.reps}
           </Text>
@@ -302,9 +377,16 @@ function ExerciseRow({ ex, entry, narrow, onSet }) {
         borderTopColor: '#F1F5F9',
       }}
     >
-      <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', flexShrink: 1 }}>
-        {ex.name}
-      </Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', flexShrink: 1 }}>
+          {ex.name}
+        </Text>
+        {removable ? (
+          <Pressable onPress={onRemove} hitSlop={8} style={{ padding: 2, marginLeft: 4 }}>
+            <Ionicons name="close-circle" size={16} color="#DC2626" />
+          </Pressable>
+        ) : null}
+      </View>
       <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 1, marginBottom: 8 }}>
         target {ex.sets}×{ex.reps}
       </Text>

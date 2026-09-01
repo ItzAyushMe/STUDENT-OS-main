@@ -27,6 +27,8 @@ create table if not exists public.users (
   olympiad_date date,
   school_exams jsonb default '[]',
   priorities jsonb default null, -- { order, enabled, timeSplit } for the scheduler
+  arc jsonb default null,        -- { id: winter|summer|hard75, start_date, day } study arc opt-in
+  custom_exercises jsonb default '[]', -- user-added gym exercises
   exam_date date,
   daily_study_hours numeric default 2,
   preferred_time text,
@@ -175,7 +177,9 @@ create table if not exists public.habit_logs (
   completed boolean default false,
   frozen boolean default false,
   completed_at timestamptz,
-  streak_count integer default 0
+  streak_count integer default 0,
+  -- app data layer stamps every inserted row with created_at (BUG #1 fix)
+  created_at timestamptz default now()
 );
 
 alter table public.habit_logs enable row level security;
@@ -456,3 +460,37 @@ create policy "workout_logs_own"
 -- ============================================================
 -- Done! 🎉
 -- ============================================================
+
+-- ============================================================
+-- MIGRATIONS (idempotent — safe to run on an EXISTING project)
+-- Re-running this whole file on an old database applies these too.
+-- ============================================================
+
+-- BUG #1 (v1.0.1): the app data layer (src/lib/db.js) stamps every
+-- inserted row with created_at. habit_logs was the only table missing
+-- the column, so every habit save failed with
+-- "Could not find the 'created_at' column of 'habit_logs'".
+alter table public.habit_logs
+  add column if not exists created_at timestamptz default now();
+
+-- Defensive: make sure every table the app writes to has created_at.
+alter table public.users        add column if not exists created_at timestamptz default now();
+alter table public.syllabus     add column if not exists created_at timestamptz default now();
+alter table public.schedule     add column if not exists created_at timestamptz default now();
+alter table public.focus_sessions add column if not exists created_at timestamptz default now();
+alter table public.habits       add column if not exists created_at timestamptz default now();
+alter table public.flashcards   add column if not exists created_at timestamptz default now();
+alter table public.quiz_results add column if not exists created_at timestamptz default now();
+alter table public.content      add column if not exists created_at timestamptz default now();
+alter table public.friends      add column if not exists created_at timestamptz default now();
+alter table public.leaderboard  add column if not exists created_at timestamptz default now();
+alter table public.deadlines    add column if not exists created_at timestamptz default now();
+alter table public.xp_events    add column if not exists created_at timestamptz default now();
+alter table public.mood_logs    add column if not exists created_at timestamptz default now();
+alter table public.workout_logs add column if not exists created_at timestamptz default now();
+
+-- v1.0.2: study arc (Winter Arc / Summer Arc / 75-Day Hard) opt-in
+alter table public.users add column if not exists arc jsonb;
+
+-- v1.0.2: custom priority tracks / custom gym exercises
+alter table public.users add column if not exists custom_exercises jsonb;

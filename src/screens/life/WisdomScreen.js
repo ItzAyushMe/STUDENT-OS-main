@@ -16,6 +16,7 @@ import { QUOTES, MOODS } from '../../config/constants';
 import { aiMoodReply, aiWeeklyReflection, AIUnavailableError } from '../../lib/aiFeatures';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, hashString, dateStr, dayjs, mondayOf, groupBy, nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function WisdomScreen({ navigation }) {
   const { profile } = useAuth();
@@ -44,6 +45,7 @@ export function WisdomScreen({ navigation }) {
     }
   }, [profile?.id, today]);
 
+  const onBack = useHubBack(navigation, 'LifeHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const saveMood = async () => {
@@ -116,7 +118,7 @@ export function WisdomScreen({ navigation }) {
   if (!logs) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Daily Wisdom" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Daily Wisdom" onBack={onBack} />
         <Loading mode="light" />
       </Screen>
     );
@@ -128,7 +130,7 @@ export function WisdomScreen({ navigation }) {
 
   return (
     <Screen mode="light">
-      <ScreenHeader title="Daily Wisdom" subtitle="Mind bhi padhega tabhi marks aayenge 🌤️" onBack={() => navigation.goBack()} />
+      <ScreenHeader title="Daily Wisdom" subtitle="Mind bhi padhega tabhi marks aayenge 🌤️" onBack={onBack} />
 
       {/* morning message */}
       <Card mode="light" style={{ marginBottom: 14, backgroundColor: '#FFFbeb', borderColor: '#FDE68A' }}>

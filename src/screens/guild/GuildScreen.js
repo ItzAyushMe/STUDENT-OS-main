@@ -96,7 +96,9 @@ export function GuildScreen({ navigation }) {
           .slice(0, 12)
           .forEach((e) => items.push({ id: e.id, text: `${nameOf[e.user_id] || 'A friend'} ${feedTextFor(e)}`, ts: e.created_at }));
       }
-      if (!items.length) items.push(...demoFeed(todayStr()).map((d) => ({ ...d, text: d.text, demo: true })));
+      // FIX 3: demo feed is a LOCAL-MODE thing only. In cloud mode an empty
+      // feed stays empty — no fake activity from bots.
+      if (!isRemote() && !items.length) items.push(...demoFeed(todayStr()).map((d) => ({ ...d, text: d.text, demo: true })));
       setFeed(items);
     } finally {
       setLoading(false);
@@ -178,6 +180,25 @@ export function GuildScreen({ navigation }) {
         </Pressable>
       </View>
 
+      {/* online / local mode indicator — obvious when bots are hidden (BUG 7) */}
+      <View style={{ flexDirection: 'row', marginBottom: 14 }}>
+        <View
+          style={{
+            flexDirection: 'row', alignItems: 'center',
+            backgroundColor: isRemote() ? 'rgba(16,185,129,0.12)' : GAMER.surface,
+            borderWidth: 1,
+            borderColor: isRemote() ? '#10B981' : GAMER.border,
+            borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5,
+            marginRight: 8,
+          }}
+        >
+          <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: isRemote() ? '#10B981' : '#64748B', marginRight: 6 }} />
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: isRemote() ? '#10B981' : GAMER.subtext }}>
+            {isRemote() ? 'ONLINE MODE · real players' : 'LOCAL MODE · demo rivals shown'}
+          </Text>
+        </View>
+      </View>
+
       {/* arena + battles entry */}
       <View style={{ flexDirection: 'row', marginBottom: 16 }}>
         <EntryCard
@@ -213,6 +234,19 @@ export function GuildScreen({ navigation }) {
       {/* ---------------- FEED ---------------- */}
       {tab === 'feed' && !loading ? (
         <View>
+          {!feed.length ? (
+            <Card mode="gamer" style={{ alignItems: 'center', paddingVertical: 26 }}>
+              <Text style={{ fontSize: 34, marginBottom: 8 }}>🤝</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: GAMER.text, textAlign: 'center' }}>
+                {isRemote() ? 'No activity yet' : 'Nothing here yet'}
+              </Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 12, color: GAMER.subtext, textAlign: 'center', marginTop: 6, lineHeight: 17 }}>
+                {isRemote()
+                  ? 'Invite your classmates — jab dost XP kamayenge, yahan dikhega. 👀'
+                  : 'Complete a quest and the feed wakes up.'}
+              </Text>
+            </Card>
+          ) : null}
           {feed.map((item) => (
             <Card key={item.id} mode="gamer" style={{ marginBottom: 10 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: GAMER.text, lineHeight: 19 }}>{item.text}</Text>

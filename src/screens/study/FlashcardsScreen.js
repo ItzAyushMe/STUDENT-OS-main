@@ -19,6 +19,7 @@ import { aiGenerateFlashcards, AIUnavailableError } from '../../lib/aiFeatures';
 import { aiStatus } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { groupBy, subjectColor, nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function FlashcardsScreen({ navigation, route }) {
   const { profile } = useAuth();
@@ -39,6 +40,7 @@ export function FlashcardsScreen({ navigation, route }) {
     setCards(rows);
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const addCard = async () => {
@@ -99,7 +101,7 @@ export function FlashcardsScreen({ navigation, route }) {
   if (!cards) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Flashcards" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Flashcards" onBack={onBack} />
         <Loading mode="light" />
       </Screen>
     );
@@ -130,7 +132,7 @@ export function FlashcardsScreen({ navigation, route }) {
       <ScreenHeader
         title="Flashcards"
         subtitle={totalDue ? `${totalDue} cards due for revision 🃏` : 'Decks ready — spaced repetition ON'}
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <View style={{ flexDirection: 'row' }}>
             <Pressable onPress={() => setAiOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7, marginRight: 8 }}>

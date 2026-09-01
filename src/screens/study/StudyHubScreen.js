@@ -20,6 +20,7 @@ const TOOLS = [
   { key: 'Flashcards', title: 'Flashcards', desc: 'Spaced repetition decks', icon: '🃏', tint: '#F59E0B' },
   { key: 'Quiz', title: 'Quiz Arena', desc: 'Quick, daily, boss battles', icon: '🧠', tint: '#EC4899' },
   { key: 'Content', title: 'Content Locker', desc: 'Notes, links & AI summaries', icon: '🗂️', tint: '#6366F1' },
+  { key: 'TestBuilder', title: 'AI Test Builder', desc: 'Tests (2 sets) · question bank · mind maps', icon: '📝', tint: '#0D9488' },
 ];
 
 export function StudyHubScreen({ navigation }) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { levelForXp, tierForXp, levelProgress, streakOnActivity, xpForCode } from './../src/lib/xpService.js';
-import { generateSchedule, autoSetDeadlines, autoRescheduleMissed } from './../src/lib/scheduleGenerator.js';
+import { generateSchedule, autoSetDeadlines, autoRescheduleMissed, normalizePriorities } from './../src/lib/scheduleGenerator.js';
 import { pickDailyArena, pickBankQuiz, QUIZ_BANK } from './../src/lib/quizBank.js';
 import { uuid, mondayOf, daysBetween, seededShuffle, hashString, todayStr } from './../src/lib/utils.js';
 import { XP_RULES, TIERS } from './../src/config/constants.js';
@@ -149,7 +149,9 @@ const studyMin = (t) => plan.filter(r => r.session_type === 'study' && r.track =
 assert.ok(plan.some(r => r.track === 'class'), 'class rows scheduled');
 // default split 60/30/10 -> class gets the most study minutes
 assert.ok(studyMin('class') >= studyMin('exam'), `class (${studyMin('class')}min) >= exam (${studyMin('exam')}min) with default 60/30/10 split`);
-assert.ok(studyMin('exam') >= studyMin('olympiad'), `exam (${studyMin('exam')}min) >= olympiad (${studyMin('olympiad')}min)`);
+// v1.0.2: small splits (10%) used to be starved to ZERO minutes — budget
+// accumulation now guarantees tiny tracks still get viable blocks.
+assert.ok(studyMin('olympiad') > 0, `small 10% track still surfaces (${studyMin('olympiad')}min > 0)`);
 assert.ok(plan.some(r => r.session_type === 'practice'), 'timed practice sessions present');
 assert.ok(plan.some(r => r.session_type === 'revision'), 'revision present');
 assert.ok(plan.some(r => r.session_type === 'mock'), 'mock days present (before school exam)');
@@ -209,5 +211,49 @@ assert.ok(dls2.c1 && dls2.c2, 'class deadlines set from school exam');
 assert.ok(dls2.c1 <= schoolStart && dls2.c2 <= schoolStart, 'class deadlines before school exam range');
 const deadlineBuffer = (new Date(schoolStart) - new Date(dls2.c2)) / 86400000;
 assert.ok(deadlineBuffer >= 10, `class deadline ~2 weeks before school exam (buffer: ${deadlineBuffer.toFixed(1)} days)`);
+
+// ---------- v1.0.2: custom priority tracks ----------
+const normCustom = normalizePriorities({
+  order: ['class', 'exam', 'olympiad'],
+  timeSplit: { class: 50, exam: 30, olympiad: 10, 'custom:pb': 10 },
+  custom: { 'custom:pb': { name: 'Science Boost', subjects: ['Science'] } },
+});
+assert.ok(normCustom.order.includes('custom:pb'), 'custom track kept in order');
+assert.ok(normCustom.custom['custom:pb'].name === 'Science Boost', 'custom meta preserved');
+const splitSum = normCustom.order.reduce((a, t) => a + normCustom.timeSplit[t], 0);
+assert.ok(Math.abs(splitSum - 100) <= 1, `custom split normalizes to 100 (got ${splitSum})`);
+
+// a custom track claiming Physics pulls those rows into its own track
+const plan4 = generateSchedule({
+  syllabus: multiTrackSyllabus,
+  examDate: null,
+  dailyHours: 3,
+  preferredTime: 'Morning',
+  daysOff: [],
+  prepLevel: 'Intermediate',
+  weeks: 4,
+  userId: 'u3',
+  priorities: normCustom,
+});
+assert.ok(
+  plan4.some((r) => r.track === 'custom:pb'),
+  'custom track receives its claimed subject sessions'
+);
+assert.ok(plan4.coverage.custom.some((c) => c.id === 'custom:pb' && c.total > 0), 'coverage reports custom track totals');
+
+// 0% split = skip: track present in settings but never scheduled
+const normZero = normalizePriorities({ order: ['class', 'exam', 'olympiad'], timeSplit: { class: 100, exam: 0, olympiad: 0 } });
+const plan5 = generateSchedule({
+  syllabus: multiTrackSyllabus,
+  examDate: null,
+  dailyHours: 3,
+  preferredTime: 'Morning',
+  daysOff: [],
+  prepLevel: 'Intermediate',
+  weeks: 4,
+  userId: 'u4',
+  priorities: normZero,
+});
+assert.ok(!plan5.some((r) => r.track === 'exam' || r.track === 'olympiad'), '0% tracks are skipped by the scheduler');
 
 console.log('ALL LOGIC TESTS PASSED ✅');

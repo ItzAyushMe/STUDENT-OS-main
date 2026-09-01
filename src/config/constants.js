@@ -10,7 +10,9 @@ export const APP_VERSION = '1.0.0';
 
 // ---------- AI ----------
 // 'gemini' | 'groq' — switch provider here, or at runtime in Settings.
-export const AI_PROVIDER = (process.env.EXPO_PUBLIC_AI_PROVIDER || 'gemini').toLowerCase();
+// Groq is the default: fastest responses on the free tier. If Groq fails,
+// the AI service automatically falls back to Gemini.
+export const AI_PROVIDER = (process.env.EXPO_PUBLIC_AI_PROVIDER || 'groq').toLowerCase();
 export const AI_MODELS = {
   gemini: 'gemini-2.0-flash',
   groq: 'llama-3.3-70b-versatile',
@@ -78,6 +80,44 @@ export const TRACK_PRIORITY = { class: 1, olympiad: 2, exam: 3 };
 // to force the real online app — guest login is hidden in Cloud Mode,
 // and without Supabase configured the auth screen says so clearly
 // instead of silently falling back to demo/local data.
+// ============================================================
+// STUDY ARCS — opt-in motivation challenges (after onboarding).
+// An arc tightens the schedule: more daily hours, higher intensity.
+//   arc = { id, start_date }  on users.arc (jsonb)
+// ============================================================
+export const STUDY_ARCS = [
+  {
+    id: 'winter', label: 'Winter Arc', emoji: '❄️', days: 90, hoursBoost: 1.25,
+    desc: '90 din ka intense run — November se February tak. Sob school, zero excuses.',
+    theme: '#38BDF8',
+  },
+  {
+    id: 'summer', label: 'Summer Arc', emoji: '☀️', days: 60, hoursBoost: 1.25,
+    desc: '60 din ka summer grind — vacations ko advantage banao.',
+    theme: '#F59E0B',
+  },
+  {
+    id: 'hard75', label: '75-Day Hard', emoji: '🔥', days: 75, hoursBoost: 1.5,
+    desc: 'The famous 75 Hard, student version. Roz padhai + gym + no excuses.',
+    theme: '#EF4444',
+  },
+];
+
+export function arcOf(profile) {
+  if (!profile?.arc?.id) return null;
+  const meta = STUDY_ARCS.find((a) => a.id === profile.arc.id);
+  if (!meta) return null;
+  return { ...meta, startDate: profile.arc.start_date };
+}
+
+// Effective daily study hours with an active arc applied (capped sanely).
+export function effectiveDailyHours(profile) {
+  const base = Number(profile?.daily_study_hours) || 2;
+  const arc = arcOf(profile);
+  if (!arc) return base;
+  return Math.min(14, Math.round(base * arc.hoursBoost * 10) / 10);
+}
+
 export const CLOUD_ONLY = ['1', 'true', 'yes'].includes(
   String(process.env.EXPO_PUBLIC_CLOUD_ONLY || '').toLowerCase()
 );
@@ -113,11 +153,12 @@ export const SUBJECT_COLORS = [
 // ============================================================
 // ONBOARDING OPTIONS
 // ============================================================
+// Class 6–8 and College were removed in v1.0.2 — StudentOS now targets
+// board-exam students (Class 9–12), where the scheduler matters most.
+// Existing Class 6–8 profiles keep working; the presets stay in syllabusData.
 export const CLASS_GROUPS = [
-  { id: 'middle', label: 'Middle School', hint: 'Class 6–8', classes: ['Class 6', 'Class 7', 'Class 8'], showBoard: false },
   { id: 'high', label: 'High School', hint: 'Class 9–10', classes: ['Class 9', 'Class 10'], showBoard: true },
   { id: 'senior', label: 'Senior Secondary', hint: 'Class 11–12', classes: ['Class 11', 'Class 12'], showBoard: true },
-  { id: 'college', label: 'College', hint: 'UG / PG / Diploma', classes: ['1st Year', '2nd Year', '3rd Year', '4th Year'], showBoard: false },
 ];
 
 export const BOARDS = ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'];
@@ -270,6 +311,7 @@ export const QUOTES = [
   { text: 'Sleep well, study well, play well. Balance hi asli game hai.', author: 'Professor Byte' },
   { text: 'Motivation gets you going, habit keeps you going.', author: 'Jim Ryun' },
   { text: 'Every accomplishment starts with the decision to try.', author: 'John F. Kennedy' },
+  { text: 'Nothing feels easy when you are lazy, everything feels easy when you are crazy.', author: 'StudentOS' },
 ];
 
 // ============================================================

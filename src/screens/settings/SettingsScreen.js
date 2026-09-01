@@ -10,18 +10,22 @@ import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { Input } from '../../components/ui/Input';
+import { ModalSheet } from '../../components/ui/ModalSheet';
+import { Chip } from '../../components/ui/Chip';
 import { SectionTitle } from '../../components/ui/EmptyState';
 import { fonts, radius } from '../../config/theme';
 import { askAI, AIUnavailableError } from '../../lib/aiService';
 import { infoAlert, confirmAlert } from '../../lib/alert';
-import { wipeLocalData } from '../../lib/db';
+import { db, wipeLocalData } from '../../lib/db';
 import { normalizePriorities } from '../../lib/scheduleGenerator';
 import { APP_NAME, APP_TAGLINE, APP_VERSION } from '../../config/constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function SettingsScreen({ navigation }) {
   const { profile, signOut, cloudMode, updateProfile } = useAuth();
+  const onBack = useHubBack(navigation, 'HomeMain');
   const settings = useSettings();
   const [geminiKey, setGeminiKey] = useState(settings.geminiKey || '');
   const [groqKey, setGroqKey] = useState(settings.groqKey || '');
@@ -45,6 +49,11 @@ export function SettingsScreen({ navigation }) {
     normalizePriorities(profile?.priorities || null)
   );
   const [lastError, setLastError] = useState(null);
+  const [addTrackOpen, setAddTrackOpen] = useState(false);
+  const [newTrackName, setNewTrackName] = useState('');
+  const [newTrackSubjects, setNewTrackSubjects] = useState([]); // subjects claimed by the custom track
+  const [syllabusSubjects, setSyllabusSubjects] = useState([]);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     try {
@@ -54,6 +63,98 @@ export function SettingsScreen({ navigation }) {
       /* ignore */
     }
   }, []);
+
+  // BUG 3: metadata for core AND custom priority tracks
+  const trackMeta = (t) => {
+    if (t === 'class') return { icon: '🏫', name: 'School / Class' };
+    if (t === 'exam') return { icon: '🎯', name: 'Competitive Exam' };
+    if (t === 'olympiad') return { icon: '🏅', name: 'Olympiad' };
+    return { icon: '⭐', name: priorities.custom?.[t]?.name || 'Custom track' };
+  };
+
+  const openAddTrack = async () => {
+    setNewTrackName('');
+    setNewTrackSubjects([]);
+    try {
+      const rows = await db.list('syllabus', { eq: { user_id: profile.id } });
+      setSyllabusSubjects([...new Set(rows.map((r) => r.subject).filter(Boolean))]);
+    } catch {
+      setSyllabusSubjects([]);
+    }
+    setAddTrackOpen(true);
+  };
+
+  const addCustomTrack = () => {
+    const name = newTrackName.trim();
+    if (!name) return;
+    const id = `custom:${Date.now().toString(36)}`;
+    setPriorities((p) =>
+      normalizePriorities({
+        ...p,
+        order: [...p.order, id],
+        timeSplit: { ...p.timeSplit, [id]: 10 },
+        custom: { ...(p.custom || {}), [id]: { name, subjects: newTrackSubjects } },
+      })
+    );
+    setAddTrackOpen(false);
+  };
+
+  const removeCustomTrack = (id, name) => {
+    confirmAlert(
+      `Remove "${name}"?`,
+      'Is track ka time split wapas baaki tracks ko mil jayega. Schedule pe asar tabhi hoga jab tum regenerate karoge.',
+      () => {
+        setPriorities((p) => {
+          const custom = { ...(p.custom || {}) };
+          delete custom[id];
+          const order = p.order.filter((t) => t !== id);
+          const timeSplit = { ...p.timeSplit };
+          delete timeSplit[id];
+          return normalizePriorities({ ...p, order, timeSplit, custom });
+        });
+      },
+      'Remove'
+    );
+  };
+
+  // NEW (v1.0.2): delete my account — wipes every row, signs out, clears local
+  const deleteAccount = () => {
+    confirmAlert(
+      'Delete your account?',
+      'Ye permanent hai: saare quests, XP, streaks, notes, friends — sab delete ho jayenge.',
+      () => {
+        confirmAlert(
+          'Last chance!',
+          'Everything will be gone. Ye undo nahi hota. Continue?',
+          async () => {
+            setDeleting(true);
+            try {
+              if (cloudMode && profile?.id) {
+                const tables = [
+                  'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
+                  'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
+                  'habits', 'focus_sessions', 'leaderboard', 'friends', 'users',
+                ];
+                for (const t of tables) {
+                  try { await db.removeWhere(t, { user_id: profile.id }); } catch { /* RLS/best-effort */ }
+                }
+                try { await db.removeWhere('friends', { friend_id: profile.id }); } catch { /* other side keeps a ghost entry */ }
+              }
+              await wipeLocalData();
+              try { await AsyncStorage.removeItem('sos.session'); } catch { /* ignore */ }
+              await signOut();
+            } finally {
+              setDeleting(false);
+            }
+          },
+          'Delete forever',
+          true
+        );
+      },
+      'Delete',
+      true
+    );
+  };
 
   const clearLastError = () => {
     try {
@@ -118,7 +219,7 @@ export function SettingsScreen({ navigation }) {
 
   return (
     <Screen mode="light">
-      <ScreenHeader title="Settings" subtitle="Apna game, apne rules" onBack={() => navigation.goBack()} />
+      <ScreenHeader title="Settings" subtitle="Apna game, apne rules" onBack={onBack} />
 
       {/* AI */}
       <SectionTitle mode="light">🤖 AI — Professor Byte</SectionTitle>
@@ -208,45 +309,45 @@ export function SettingsScreen({ navigation }) {
         ) : null}
       </Card>
 
-      {/* FIX B: student-configurable priority order + weekly time split */}
+      {/* FIX B + BUG 3: priority order + weekly time split.
+          All tracks ALWAYS visible — no hide button. 0% = skip.
+          Custom tracks can be added (claiming subjects) and removed. */}
       <SectionTitle mode="light">🎚️ Priority & Time Split</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
         <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginBottom: 10, lineHeight: 17 }}>
-          Kaunsa pehle? Order set karo (↑↓), time split do (%), ya kisi track ko off bhi kar sakte ho. Scheduler inhi
-          settings pe chalega.
+          Kaunsa pehle? Order set karo (↑↓) aur time split do (%). 0% = skip — scheduler uss track ko chhod dega.
+          {priorities.order.some((t) => t.startsWith('custom:')) ? ' Custom tracks apne subjects claim karte hain.' : ''}
         </Text>
         {priorities.order.map((track, i) => {
-          const meta = { class: { icon: '🏫', name: 'School / Class' }, exam: { icon: '🎯', name: 'Competitive Exam' }, olympiad: { icon: '🏅', name: 'Olympiad' } }[track];
-          const enabled = priorities.enabled[track] !== false;
+          const meta = trackMeta(track);
+          const isCustom = track.startsWith('custom:');
+          const claimed = isCustom && priorities.custom?.[track]?.subjects?.length
+            ? ` · subjects: ${priorities.custom[track].subjects.join(', ')}`
+            : '';
           const pct = priorities.timeSplit[track] || 0;
+          const barColor = track === 'class' ? '#7C3AED' : track === 'olympiad' ? '#F59E0B' : track === 'exam' ? '#EF4444' : '#0D9488';
           return (
             <View key={track} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
               <Text style={{ fontSize: 13, color: '#94A3B8', fontFamily: fonts.bodySemiBold, width: 18 }}>{i + 1}.</Text>
               <Text style={{ fontSize: 17, marginRight: 8 }}>{meta.icon}</Text>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: enabled ? '#1E293B' : '#94A3B8', textDecorationLine: enabled ? 'none' : 'line-through' }}>
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: pct === 0 ? '#94A3B8' : '#1E293B' }}>
                   {meta.name}
+                  {pct === 0 ? ' (skipped)' : ''}
                 </Text>
+                {claimed ? (
+                  <Text style={{ fontFamily: fonts.body, fontSize: 10, color: '#94A3B8', marginTop: 1 }} numberOfLines={1}>
+                    {claimed.trim()}
+                  </Text>
+                ) : null}
                 <View style={{ height: 5, backgroundColor: '#F1F5F9', borderRadius: 3, marginTop: 5, overflow: 'hidden' }}>
-                  <View style={{ height: 5, width: `${Math.min(100, pct)}%`, backgroundColor: track === 'class' ? '#7C3AED' : track === 'olympiad' ? '#F59E0B' : '#EF4444' }} />
+                  <View style={{ height: 5, width: `${Math.min(100, pct)}%`, backgroundColor: barColor }} />
                 </View>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <StepBtn icon="remove" disabled={pct <= 0} onPress={() => setPriorities((p) => ({ ...p, timeSplit: { ...p.timeSplit, [track]: Math.max(0, pct - 5) } }))} />
                 <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#334155', width: 38, textAlign: 'center' }}>{pct}%</Text>
                 <StepBtn icon="add" disabled={pct >= 100} onPress={() => setPriorities((p) => ({ ...p, timeSplit: { ...p.timeSplit, [track]: Math.min(100, pct + 5) } }))} />
-                <Pressable
-                  onPress={() =>
-                    setPriorities((p) => {
-                      const enabled = { ...p.enabled, [track]: p.enabled[track] === false };
-                      return normalizePriorities({ ...p, enabled });
-                    })
-                  }
-                  hitSlop={6}
-                  style={{ padding: 6, marginLeft: 2 }}
-                >
-                  <Ionicons name={enabled ? 'eye' : 'eye-off'} size={17} color={enabled ? '#6D28D9' : '#94A3B8'} />
-                </Pressable>
               </View>
               <View style={{ marginLeft: 4 }}>
                 <Pressable
@@ -284,22 +385,67 @@ export function SettingsScreen({ navigation }) {
                   <Ionicons name="chevron-down" size={15} color={i === priorities.order.length - 1 ? '#E2E8F0' : '#6D28D9'} />
                 </Pressable>
               </View>
+              {isCustom ? (
+                <Pressable onPress={() => removeCustomTrack(track, meta.name)} hitSlop={6} style={{ padding: 4, marginLeft: 2 }}>
+                  <Ionicons name="close-circle" size={17} color="#DC2626" />
+                </Pressable>
+              ) : null}
             </View>
           );
         })}
+        <Pressable onPress={openAddTrack} hitSlop={6} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, marginBottom: 4, alignSelf: 'flex-start' }}>
+          <Ionicons name="add-circle" size={17} color="#6D28D9" style={{ marginRight: 5 }} />
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#6D28D9' }}>Add custom track</Text>
+        </Pressable>
         <Button
           title="Save Priorities"
           size="sm"
           mode="light"
-          onPress={() => {
+          onPress={async () => {
             const norm = normalizePriorities(priorities);
             setPriorities(norm);
-            updateProfile({ priorities: norm });
-            setTestResult('Priorities saved ✅ — regenerate your schedule to apply');
+            await updateProfile({ priorities: norm });
+            setTestResult('Priorities saved ✅');
+            // BUG 10: apply immediately — offer to regenerate the schedule
+            confirmAlert(
+              'Regenerate schedule?',
+              'Naye priorities schedule pe turant apply ho jayenge. Abhi regenerate karein?',
+              () => navigation.navigate('StudyTab', { screen: 'Schedule', params: { autoRegen: true } }),
+              'Regenerate'
+            );
           }}
           style={{ marginTop: 6 }}
         />
       </Card>
+
+      {/* add custom track sheet */}
+      <ModalSheet visible={addTrackOpen} onClose={() => setAddTrackOpen(false)} title="➕ Add custom track">
+        <Input label="Track name (e.g. Physics Boost, Backlog, Revision)" value={newTrackName} onChangeText={setNewTrackName} placeholder="Physics Boost" />
+        {syllabusSubjects.length ? (
+          <>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#334155', marginTop: 12, marginBottom: 6 }}>
+              Ye track kaunse subjects claim kare? (optional)
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+              {syllabusSubjects.map((s) => (
+                <Chip
+                  key={s}
+                  label={s}
+                  mode="light"
+                  selected={newTrackSubjects.includes(s)}
+                  onPress={() =>
+                    setNewTrackSubjects((sel) => (sel.includes(s) ? sel.filter((x) => x !== s) : [...sel, s]))
+                  }
+                />
+              ))}
+            </View>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
+              Claimed subjects is track ke budget mein aayenge — baaki sab apne original track mein.
+            </Text>
+          </>
+        ) : null}
+        <Button title="Add track" mode="light" onPress={addCustomTrack} disabled={!newTrackName.trim()} style={{ marginTop: 16 }} />
+      </ModalSheet>
 
       {/* Profile basics */}
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
@@ -502,6 +648,18 @@ export function SettingsScreen({ navigation }) {
             }
           />
         </View>
+        <Button
+          title={deleting ? 'Deleting…' : 'Delete my account'}
+          variant="danger"
+          size="sm"
+          mode="light"
+          disabled={deleting}
+          onPress={deleteAccount}
+          style={{ marginTop: 10 }}
+        />
+        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 6, lineHeight: 15, textAlign: 'center' }}>
+          Double-confirm ke saath sab mita deta hai (cloud rows + local data). Login ID ko poora khatam karne ke liye Supabase dashboard se auth user bhi delete karo — on delete cascade sab clean kar dega.
+        </Text>
       </Card>
 
       <Card mode="light" style={{ marginBottom: 20, backgroundColor: '#F8FAFC' }}>

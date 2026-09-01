@@ -22,6 +22,7 @@ import { MathText } from '../../components/ui/MathText';
 import { aiStatus, isOnline } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, fmtClock, nowIso, seededShuffle } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 const MODES = {
   quick: { label: 'Quick Quiz', count: 5, icon: '⚡', hint: '5 questions, warm-up' },
@@ -48,6 +49,7 @@ export function QuizScreen({ navigation, route }) {
   const [confetti, setConfetti] = useState(0);
   const [loading, setLoading] = useState(false);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(
     useCallback(() => {
       if (!profile?.id) return;
@@ -245,7 +247,7 @@ export function QuizScreen({ navigation, route }) {
   if (phase === 'setup') {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Quiz Arena" subtitle="Gyaan ka battleground 🧠" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Quiz Arena" subtitle="Gyaan ka battleground 🧠" onBack={onBack} />
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
           {Object.entries(MODES).map(([key, m]) => (
             <ModeCard key={key} mKey={key} mode={m} selected={mode === key} onPress={() => setMode(key)} />
@@ -366,7 +368,7 @@ export function QuizScreen({ navigation, route }) {
   return (
     <Screen mode="light">
       <Confetti trigger={confetti} origin={{ x: '50%', y: '22%' }} />
-      <ScreenHeader title="Quiz Results" subtitle={MODES[mode].label} onBack={() => navigation.goBack()} />
+      <ScreenHeader title="Quiz Results" subtitle={MODES[mode].label} onBack={onBack} />
       <Card mode="light" style={{ alignItems: 'center', marginBottom: 14 }}>
         <Text style={{ fontSize: 44 }}>{r.accuracy >= 90 ? '🏆' : r.accuracy >= 70 ? '🔥' : r.accuracy >= 50 ? '🙂' : '🌱'}</Text>
         <Text style={{ fontFamily: fonts.bodyBold, fontSize: 40, color: r.accuracy >= 70 ? '#059669' : '#D97706', marginTop: 8 }}>

@@ -110,7 +110,8 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
     name: String(h.name).slice(0, 60),
     icon: String(h.icon || '✨').slice(0, 4),
     category: ['health', 'study', 'mind', 'life'].includes(h.category) ? h.category : 'life',
-    part: ['morning', 'day', 'evening', 'night'].includes(h.part) ? h.part : 'day',
+    // map AI-proposed parts onto the app's real parts (morning/afternoon/evening)
+    part: { morning: 'morning', day: 'afternoon', afternoon: 'afternoon', evening: 'evening', night: 'evening' }[h.part] || 'afternoon',
     target_time: /^\d{2}:\d{2}$/.test(String(h.target_time || '')) ? h.target_time : null,
     why: String(h.why || '').slice(0, 120),
   }));
@@ -279,6 +280,86 @@ export async function aiMoodReply({ mood, note = '' }) {
     prompt: `A student just logged evening mood ${mood}/5${note ? ` and wrote: "${esc(note)}"` : ''}. Reply in 2-3 warm lines: acknowledge the feeling, one tiny helpful suggestion (or celebration if mood is high). Never preachy.`,
     system: AI_PERSONA,
     temperature: 0.8,
+    noCache: true,
+  });
+}
+
+// ============================================================
+// AI TEST BUILDER (v1.0.2) — full tests (2 sets), question banks
+// and per-chapter mind maps, with a strict JSON contract.
+// ============================================================
+export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = {}, totalMarks = 80, totalQuestions = 30, difficultyPct = 100, timeMinutes = 180 }) {
+  const ctx = buildProfileContext(profile);
+  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
+  const parts = [
+    `MCQ: ${breakdown.mcq || 0} (1 mark each)`,
+    `Very Short Answer (VSAQ): ${breakdown.vsaq || 0} (2 marks each)`,
+    `Short Answer (SAQ): ${breakdown.saq || 0} (3 marks each)`,
+    `Long Answer (LAQ): ${breakdown.laq || 0} (5 marks each)`,
+  ].filter((p) => !p.match(/: 0 /)).join(', ');
+  return askAIJSON({
+    prompt: `Generate a complete school test as JSON for this student.
+Student: ${esc(ctx)}.
+Chapters to cover: ${esc(chList)}.
+Test: ${totalMarks} marks, ${totalQuestions} questions, ${timeMinutes} minutes.
+Question breakdown: ${parts || 'MCQs and short answers'}.
+Difficulty: ${difficultyPct}% of the student's exam level (100% = board/exam level, 150% = competitive level, 200% = olympiad level).
+Create TWO full sets (Set A and Set B) with DIFFERENT questions of the same pattern, like real exam papers.
+Questions must be syllabus-accurate, in simple English, no markdown anywhere.
+Math notation: plain text only (a/b, sqrt(x), x^2) — never LaTeX.`,
+    system: `${AI_PERSONA}\nYou are a strict examiner. Output ONLY the JSON object.`,
+    schemaHint: `{
+  "sets": [
+    { "set": "A", "sections": [
+      { "type": "mcq", "label": "Section A — MCQ (1 mark each)",
+        "questions": [ { "q": "text", "options": ["a","b","c","d"], "answer": "b", "marks": 1 } ] },
+      { "type": "vsaq", "label": "Section B — VSAQ (2 marks each)",
+        "questions": [ { "q": "text", "answer": "model answer", "marks": 2 } ] }
+    ] }
+  ],
+  "tips": "one line of exam tips"
+}`,
+    temperature: 0.5,
+    noCache: true,
+  });
+}
+
+export async function aiGenerateQuestionBank({ profile = {}, chapters = [], breakdown = {}, totalQuestions = 25, difficultyPct = 100 }) {
+  const ctx = buildProfileContext(profile);
+  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
+  return askAIJSON({
+    prompt: `Generate a practice QUESTION BANK as JSON for this student.
+Student: ${esc(ctx)}.
+Chapters: ${esc(chList)}.
+Total questions: ${totalQuestions}. Mix: MCQ ${breakdown.mcq || 0}, VSAQ ${breakdown.vsaq || 0}, SAQ ${breakdown.saq || 0}, LAQ ${breakdown.laq || 0}.
+Difficulty: ${difficultyPct}% of their exam level. No time limit, no marks total — just practice questions with answers.
+Simple English, no markdown. Math in plain text only.`,
+    system: `${AI_PERSONA}\nYou are a question-bank generator. Output ONLY the JSON object.`,
+    schemaHint: `{
+  "questions": [ { "type": "mcq", "q": "text", "options": ["a","b","c","d"], "answer": "b", "why": "one-line reason" },
+                 { "type": "saq", "q": "text", "answer": "model answer" } ],
+  "weakSpots": "one line on what to revise"
+}`,
+    temperature: 0.5,
+    noCache: true,
+  });
+}
+
+export async function aiGenerateMindMap({ profile = {}, chapters = [] }) {
+  const ctx = buildProfileContext(profile);
+  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
+  return askAIJSON({
+    prompt: `Create a one-page revision MIND MAP as JSON for each of these chapters: ${esc(chList)}.
+Student: ${esc(ctx)}.
+For each chapter: a central idea with 4-6 main branches, each branch with 2-4 leaf points. Short phrases only (3-7 words), the kind a topper writes on one page. No markdown anywhere.`,
+    system: `${AI_PERSONA}\nYou are a revision-notes expert. Output ONLY the JSON object.`,
+    schemaHint: `{
+  "chapters": [
+    { "chapter": "chapter name", "root": { "label": "central idea",
+      "children": [ { "label": "branch", "children": [ { "label": "leaf" } ] } ] } }
+  ]
+}`,
+    temperature: 0.4,
     noCache: true,
   });
 }

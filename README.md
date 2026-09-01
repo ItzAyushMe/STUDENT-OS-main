@@ -126,6 +126,30 @@ Without keys, AI features (tutor chat, AI quizzes/decks/summaries/reflections) s
 
 ---
 
+## 📦 v1.0.2 — Community Fix Pack
+
+Eleven reported bugs + the big feature requests, all in:
+
+| # | Fix |
+|---|---|
+| 1 | **`created_at` schema crash** — `habit_logs` was missing the column the data layer stamps on every insert. `schema.sql` now creates it + an idempotent MIGRATIONS section at the bottom fixes **existing** projects (just re-run the file in the SQL editor). |
+| 2 | **Syllabus had only Science/Maths** — every class (6–12) now has English, Hindi, Computer Science/AI and full SST (History, Political Science, Geography, Economics) with real NCERT chapters. |
+| 3 | **Priorities rework** — hide/eye toggle removed (all tracks always visible, **0% = skip**), custom tracks can be added (optionally claiming subjects so those chapters get their own budget) and removed with a confirm. Saving now offers to regenerate the schedule immediately. |
+| 4 | **Gym custom exercises** — add your own (persisted on the profile), remove with ✕, sets/reps/weight logging works for them too. |
+| 5 | **Locker links didn't open** — URLs are normalized (`https://` prepended when missing) on open *and* on save. |
+| 6/10/11 | **Smart Schedule & Deadline Sheet** — deterministic engine always generates (never AI-dependent); AI only advises. Groq is the primary provider with automatic Gemini fallback, retry-with-backoff, strict JSON contracts, and visible loading/error+retry states. The Schedule screen shows the live priority order so it's obvious the setting applied. |
+| 7 | **No demo bots online** — demo feed now also gated to Local Mode (leaderboard/friends already were), an "ONLINE MODE" indicator sits at the top of the Guild, and cloud mode with no friends shows an honest "invite your classmates" empty state. |
+| 8 | **Groq primary + no Markdown** — `llama-3.3-70b-versatile` is the default and the persona bans markdown; a `stripMarkdown` safety net cleans any that slips through. |
+| 9 | **Half-complete screens** — all load paths end in data, an empty state, or an error+retry card; nothing hangs. |
+| — | **AI Test Builder** (Study hub): 2-set printable tests, question banks and per-chapter mind maps with a difficulty dial (0–200%), chapter picker and MCQ/VSAQ/SAQ/LAQ breakdown. Web builds export via Print → Save as PDF. |
+| — | **Study Arcs** — after onboarding you can opt into Winter Arc (90d), Summer Arc (60d) or 75-Day Hard; the schedule's daily hours get boosted and a themed progress banner tracks your run. |
+| — | **Onboarding trimmed** to Class 9–12 (board-exam focus). Existing Class 6–8 profiles keep working. |
+| — | **Delete account** in Settings (double confirm, wipes all rows + local data). |
+| — | **Free Library: Class 10 CBSE teacher pack** — the community's favourite free teachers per subject (Alakh Pandey, Prashant Kirad, Shobhit Nirwan, Digraj Singh Rajput, Sunlike Study, Dear Sir, Hindi Adhyapak, Magnet Brains, PW notes). |
+| — | **Back button** always lands on the section hub (Life/Study/Focus), never jumps to Home. |
+
+New quote in the pool: *"Nothing feels easy when you are lazy, everything feels easy when you are crazy."*
+
 ## 🌐 Going Online (Production Setup) — v1.0
 
 The app is already cloud-ready — going online is **configuration, not code**. Two modes, switched automatically by whether Supabase is configured:
@@ -142,7 +166,7 @@ Demo rivals are gated behind Local Mode (`isRemote()` in `src/screens/guild/Guil
 
 ### Steps
 
-1. **Create the database**: supabase.com → New project (region: Mumbai/Singapore) → **SQL Editor** → paste the whole `supabase/schema.sql` → Run. This creates all tables with Row-Level Security. *(Skipping this is the #1 cause of "backend doesn't work".)*
+1. **Create the database**: supabase.com → New project (region: Mumbai/Singapore) → **SQL Editor** → paste the whole `supabase/schema.sql` → Run. Already have a project? Re-run the file — the MIGRATIONS section at the bottom is idempotent and patches older databases (adds `habit_logs.created_at`, `users.arc`, `users.custom_exercises`). This creates all tables with Row-Level Security. *(Skipping this is the #1 cause of "backend doesn't work".)*
 2. **Flip to Cloud Mode**: `cp .env.example .env`, then from Supabase → Settings → API paste:
    ```
    EXPO_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT-ref.supabase.co

@@ -202,3 +202,68 @@ export const LIB_KIND_ICON = {
   pyq: '📊',
   link: '🔗',
 };
+
+// ============================================================
+// CLASS 10 CBSE — curated "best free teachers" library (v1.0.2).
+// The community-vetted teacher list: main teacher + backup per
+// subject, all free. Channel links are stable; chapter-level
+// material uses YouTube search so links never rot.
+// ============================================================
+const CH = {
+  dearSir: 'https://www.youtube.com/@DearSir',
+  hindiAdhyapak: 'https://www.youtube.com/@HindiAdhyapak',
+  pw: 'https://www.youtube.com/@PhysicsWallah',
+  expHub: 'https://www.youtube.com/@ExpHub',
+  shobhit: 'https://www.youtube.com/@ShobhitNirwan',
+  digraj: 'https://www.youtube.com/@digrajsinghrajput214',
+  sunlike: 'https://www.youtube.com/@SunlikeStudy',
+  magnet: 'https://www.youtube.com/@MagnetBrainsEducation',
+  pwSite: 'https://www.pw.live',
+};
+
+export const CLASS10_LIBRARY = [
+  {
+    subject: 'Science', emoji: '🔬', teacher: 'Alakh Pandey (Physics Wallah)',
+    items: [
+      { title: 'Physics Wallah — Alakh Pandey (main)', kind: 'video', url: CH.pw, source: 'YouTube channel' },
+      { title: 'Prashant Kirad — ExpHub (backup + motivation)', kind: 'video', url: CH.expHub, source: 'YouTube channel' },
+      { title: 'Shobhit Nirwan — one-shot revision + notes', kind: 'video', url: yt('Shobhit Nirwan class 10 science one shot'), source: 'YouTube search' },
+      { title: 'PW — free notes & NCERT solutions hub', kind: 'notes', url: CH.pwSite, source: 'PW (official)' },
+      { title: 'Chapter one-shots (search any chapter)', kind: 'video', url: yt('class 10 science one shot chapter'), source: 'YouTube search' },
+    ],
+  },
+  {
+    subject: 'Maths', emoji: '📐', teacher: 'Ritik Sir (PW) + Shobhit Nirwan',
+    items: [
+      { title: 'Shobhit Nirwan — Maths one-shots + important questions', kind: 'video', url: yt('Shobhit Nirwan class 10 maths'), source: 'YouTube search' },
+      { title: 'Ritik Sir (PW) — Maths concept lectures', kind: 'video', url: yt('Ritik Sir class 10 maths Physics Wallah'), source: 'YouTube search' },
+      { title: 'Magnet Brains — full course (backup)', kind: 'video', url: CH.magnet, source: 'YouTube channel' },
+      { title: 'Chapter-wise PYQ practice', kind: 'pyq', url: yt('class 10 maths previous year questions chapter wise'), source: 'YouTube search' },
+    ],
+  },
+  {
+    subject: 'Social Science (SST)', emoji: '🌏', teacher: 'Digraj Singh Rajput',
+    items: [
+      { title: 'Digraj Singh Rajput — SST + famous mind maps (main)', kind: 'video', url: CH.digraj, source: 'YouTube channel' },
+      { title: 'Sunlike Study — SST revision (backup)', kind: 'video', url: CH.sunlike, source: 'YouTube channel' },
+      { title: 'Magnet Brains — SST full course (detailed backup)', kind: 'video', url: yt('Magnet Brains class 10 social science'), source: 'YouTube search' },
+      { title: 'SST mind maps + last-minute revision', kind: 'notes', url: yt('Digraj Singh Rajput SST mind map class 10'), source: 'YouTube search' },
+    ],
+  },
+  {
+    subject: 'English', emoji: '📖', teacher: 'Dear Sir',
+    items: [
+      { title: 'Dear Sir — English grammar + literature (main)', kind: 'video', url: CH.dearSir, source: 'YouTube channel' },
+      { title: 'English grammar full course (backup)', kind: 'video', url: yt('class 10 english grammar full course'), source: 'YouTube search' },
+      { title: 'Writing skills — letters, analysis, formats', kind: 'notes', url: yt('class 10 english writing skills format'), source: 'YouTube search' },
+    ],
+  },
+  {
+    subject: 'Hindi', emoji: '🪔', teacher: 'Hindi Adhyapak',
+    items: [
+      { title: 'Hindi Adhyapak — Hindi A/B, गद्य-काव्य (main)', kind: 'video', url: CH.hindiAdhyapak, source: 'YouTube channel' },
+      { title: 'Magnet Brains — Hindi full course (backup)', kind: 'video', url: yt('Magnet Brains class 10 hindi'), source: 'YouTube search' },
+      { title: 'हिंदी व्याकरण — सम्पूर्ण revision', kind: 'video', url: yt('class 10 hindi vyakaran full course'), source: 'YouTube search' },
+    ],
+  },
+];

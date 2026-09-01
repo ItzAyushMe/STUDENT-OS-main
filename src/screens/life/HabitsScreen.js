@@ -22,6 +22,7 @@ import { confirmAlert } from '../../lib/alert';
 import { HABIT_CATEGORIES } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, groupBy } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 const PARTS = [
   { key: 'morning', label: '🌅 Morning' },
@@ -61,6 +62,7 @@ export function HabitsScreen({ navigation }) {
     setLogs(ls);
   }, [profile?.id, today]);
 
+  const onBack = useHubBack(navigation, 'LifeHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const logMap = useMemo(() => {
@@ -242,7 +244,7 @@ export function HabitsScreen({ navigation }) {
   if (!habits) {
     return (
       <Screen mode="light">
-        <ScreenHeader title="Habits" onBack={() => navigation.goBack()} />
+        <ScreenHeader title="Habits" onBack={onBack} />
         <Loading mode="light" />
       </Screen>
     );
@@ -256,7 +258,7 @@ export function HabitsScreen({ navigation }) {
       <ScreenHeader
         title="Habits"
         subtitle={`${doneToday}/${habits.length} done today · ${freezes} 🧊 freeze${freezes === 1 ? '' : 's'} left`}
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <Pressable onPress={openAdd} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
             <Ionicons name="add" size={19} color="#6D28D9" />

@@ -24,6 +24,7 @@ import { TRACKS, pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI 
 import { SUBJECT_COLORS } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { pct, subjectColor, nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 const STATUS_ICON = { completed: '✅', in_progress: '🔄', locked: '🔒' };
 
@@ -70,6 +71,7 @@ export function SyllabusScreen({ navigation }) {
     }
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const trackRows = useMemo(() => rows.filter((r) => rowTrack(r) === activeTrack), [rows, activeTrack]);
@@ -197,7 +199,7 @@ export function SyllabusScreen({ navigation }) {
       <ScreenHeader
         title="Syllabus Map"
         subtitle="Trophy count: chapters conquered"
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <View style={{ flexDirection: 'row' }}>
             <HeaderBtn icon="download-outline" onPress={() => setPresetOpen(true)} />

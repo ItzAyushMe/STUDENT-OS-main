@@ -15,10 +15,12 @@ import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
 import { fonts, radius } from '../../config/theme';
 import { subjectColor, nowIso, todayStr } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
 export function TopicDetailScreen({ navigation, route }) {
   const { rowId, subject, chapter } = route?.params || {};
   const { profile } = useAuth();
+  const onBack = useHubBack(navigation, 'StudyHub');
   const { awardXP } = useGame();
   const [row, setRow] = useState(null);
   const [confetti, setConfetti] = useState(0);
@@ -36,7 +38,7 @@ export function TopicDetailScreen({ navigation, route }) {
     load();
   }, [load]);
 
-  if (!row) return <Screen mode="light"><ScreenHeader title="Topic" onBack={() => navigation.goBack()} /></Screen>;
+  if (!row) return <Screen mode="light"><ScreenHeader title="Topic" onBack={onBack} /></Screen>;
 
   const color = subjectColor(row.subject);
 
@@ -69,7 +71,7 @@ export function TopicDetailScreen({ navigation, route }) {
   return (
     <Screen mode="light">
       <Confetti trigger={confetti} origin={{ x: '50%', y: '30%' }} />
-      <ScreenHeader title={row.chapter} subtitle={`${row.subject} · ${row.estimated_hours || 4} hrs est.`} onBack={() => navigation.goBack()} />
+      <ScreenHeader title={row.chapter} subtitle={`${row.subject} · ${row.estimated_hours || 4} hrs est.`} onBack={onBack} />
 
       {/* status + weightage */}
       <View style={{ flexDirection: 'row', marginBottom: 14 }}>

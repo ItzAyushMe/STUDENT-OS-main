@@ -258,6 +258,23 @@ function humanizeError(provider, errMsg) {
   return `${provider}: ${m.slice(0, 140)}`;
 }
 
+// ---------- markdown stripping (belt & suspenders) ----------
+// Even with the persona rule, LLMs sometimes emit **bold** / - bullets.
+// Every NON-JSON answer is cleaned so the UI never shows raw markdown.
+export function stripMarkdown(text) {
+  if (typeof text !== 'string') return text;
+  let t = text;
+  t = t.replace(/```[a-z]*\n?/gi, ''); // code fences
+  t = t.replace(/^#{1,6}\s+/gm, ''); // headings
+  t = t.replace(/(?! )\*\*([^*]+?)\*\*(?! )/g, '$1'); // **bold**
+  t = t.replace(/(^|\s)\*([^*\n]+?)\*(?=\s|$|[.,!?])/g, '$1$2'); // *italic*
+  t = t.replace(/(^|\s)_([^_\n]+?)_(?=\s|$|[.,!?])/g, '$1$2'); // _italic_
+  t = t.replace(/^\s*[-*•]\s+/gm, '• '); // dash/star bullets -> •
+  t = t.replace(/\|/g, '·'); // table pipes
+  t = t.replace(/\n{3,}/g, '\n\n'); // collapse gaps
+  return t.trim();
+}
+
 // ---------- public API ----------
 export async function askAI({ prompt, system = '', json = false, temperature, noCache = false }) {
   const online = await isOnline();
@@ -280,8 +297,9 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
       const value = await (provider === 'gemini'
         ? callGemini({ prompt, system, json, temperature, key })
         : callGroq({ prompt, system, json, temperature, key }));
-      cache.set(ck, { ts: Date.now(), value });
-      return value;
+      const clean = json ? value : stripMarkdown(value);
+      cache.set(ck, { ts: Date.now(), value: clean });
+      return clean;
     } catch (e) {
       failures.push(`${provider}: ${e?.message || 'failed'}`);
       console.warn(`[aiService] ${provider} failed:`, e?.message);
@@ -351,6 +369,12 @@ export const AI_PERSONA = `You are Professor Byte, the friendly AI mentor inside
 Style: warm, encouraging, game-like. Light Hinglish flavor is welcome (words like "Shaabaash!", "Shuru karo", "Accha", "yaar") but keep it easy to understand — the base language is simple English.
 Never condescending, never scold. Keep answers practical and short-ish unless depth is requested.
 You believe in small daily wins, spaced repetition, revision cycles and healthy routines.
+
+FORMATTING (very important — the app renders plain text, not Markdown):
+- NEVER use Markdown: no **bold**, no *italics*, no ## headings, no - dash bullets, no | tables, no \`\`\` code fences.
+- Write plain sentences. For emphasis use plain words.
+- If a short list genuinely helps, use a single '•' on its own line — nothing else.
+- Keep everything plain and readable on a phone.
 
 MATH NOTATION (very important — the app renders plain text, not LaTeX):
 - NEVER write LaTeX: no \\frac, no \\sqrt{...}, no \\lfloor, no \\begin{...}, no $...$ wrappers.

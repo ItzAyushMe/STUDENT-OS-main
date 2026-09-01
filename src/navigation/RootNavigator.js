@@ -28,6 +28,7 @@ import { FlashcardsScreen } from '../screens/study/FlashcardsScreen';
 import { DeckScreen } from '../screens/study/DeckScreen';
 import { QuizScreen } from '../screens/study/QuizScreen';
 import { ContentScreen } from '../screens/study/ContentScreen';
+import { TestBuilderScreen } from '../screens/study/TestBuilderScreen';
 import { TopicDetailScreen } from '../screens/study/TopicDetailScreen';
 import { FocusScreen } from '../screens/focus/FocusScreen';
 import { FocusStatsScreen } from '../screens/focus/FocusStatsScreen';
@@ -71,6 +72,7 @@ function StudyStackNav() {
       <StudyStack.Screen name="Deck" component={DeckScreen} />
       <StudyStack.Screen name="Quiz" component={QuizScreen} />
       <StudyStack.Screen name="Content" component={ContentScreen} />
+      <StudyStack.Screen name="TestBuilder" component={TestBuilderScreen} />
     </StudyStack.Navigator>
   );
 }

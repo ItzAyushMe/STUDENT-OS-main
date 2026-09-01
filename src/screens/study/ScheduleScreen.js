@@ -20,11 +20,12 @@ import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines } from '../../lib/scheduleGenerator';
 import { aiReschedule } from '../../lib/aiFeatures';
-import { SESSION_TYPES, TRACK_PRIORITY } from '../../config/constants';
+import { SESSION_TYPES, TRACK_PRIORITY, arcOf, effectiveDailyHours } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { dayjs, todayStr, dateStr, subjectColor, fmtDuration, mondayOf, nowIso } from '../../lib/utils';
+import { useHubBack } from '../../hooks/useHubBack';
 
-export function ScheduleScreen({ navigation }) {
+export function ScheduleScreen({ navigation, route }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
   const [view, setView] = useState('daily');
@@ -40,15 +41,31 @@ export function ScheduleScreen({ navigation }) {
   const [aiPlanMsg, setAiPlanMsg] = useState('');
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
   const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
+  const [genError, setGenError] = useState('');
 
   // human-readable priority line for the generate modal (reads the
   // student's own priority settings — FIX B)
   const prioritySummary = () => {
     const p = profile.priorities || {};
     const order = Array.isArray(p.order) && p.order.length ? p.order : ['class', 'exam', 'olympiad'];
-    const names = { class: '🏫 Class', exam: `🎯 ${profile.competitive_exam || 'Exam'}`, olympiad: '🏅 Olympiad' };
-    return order.map((t) => names[t] || t).join(' → ');
+    const names = {
+      class: '🏫 Class',
+      exam: `🎯 ${profile.competitive_exam || 'Exam'}`,
+      olympiad: '🏅 Olympiad',
+    };
+    return order
+      .map((t) => names[t] || `⭐ ${p.custom?.[t]?.name || 'Custom'}`)
+      .filter((x) => x)
+      .join(' → ');
   };
+
+  // BUG 10: always-visible priority order — instantly obvious the setting took
+  const activePrio = useMemo(() => {
+    const p = profile?.priorities;
+    const order = Array.isArray(p?.order) && p.order.length ? p.order : ['class', 'exam', 'olympiad'];
+    const icons = { class: '🏫', exam: '🎯', olympiad: '🏅' };
+    return order.filter((t) => p?.enabled?.[t] !== false);
+  }, [profile?.priorities]);
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -68,7 +85,17 @@ export function ScheduleScreen({ navigation }) {
     }
   }, [profile?.id]);
 
+  const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // BUG 10: navigated here after saving priorities (Settings → regenerate) —
+  // open the regen dialog (Replace all / Keep completed) once, automatically.
+  useEffect(() => {
+    if (route.params?.autoRegen) {
+      setRegenChoiceOpen(true);
+      navigation.setParams({ autoRegen: undefined });
+    }
+  }, [route.params?.autoRegen]);
 
   const missed = useMemo(
     () => sessions.filter((s) => s.status === 'pending' && s.date < todayStr()),
@@ -104,6 +131,7 @@ export function ScheduleScreen({ navigation }) {
   // top of old data. Two modes: fresh start, or keep-completed history.
   const generate = async (mode = 'keep-completed') => {
     setGenBusy(true);
+    setGenError('');
     try {
       const syllabus = await db.list('syllabus', { eq: { user_id: profile.id } });
       if (mode === 'fresh') {
@@ -120,7 +148,8 @@ export function ScheduleScreen({ navigation }) {
         olympiadDate: profile.olympiad_date || null,
         schoolExams: Array.isArray(profile.school_exams) ? profile.school_exams : [],
         priorities: profile.priorities || null,
-        dailyHours: profile.daily_study_hours,
+        // STUDY ARC active? -> boosted daily hours (v1.0.2)
+        dailyHours: effectiveDailyHours(profile),
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
@@ -142,6 +171,9 @@ export function ScheduleScreen({ navigation }) {
       }
       await load();
       setGenOpen(false);
+      setRegenChoiceOpen(false);
+    } catch (e) {
+      setGenError(e?.message || 'Schedule generate nahi ho paya. Dobara try karo.');
     } finally {
       setGenBusy(false);
     }
@@ -180,7 +212,7 @@ export function ScheduleScreen({ navigation }) {
       <ScreenHeader
         title="Smart Schedule"
         subtitle={profile.exam_date ? `Exam: ${profile.exam_date}` : 'No exam set — self-paced mode'}
-        onBack={() => navigation.goBack()}
+        onBack={onBack}
         right={
           <View style={{ flexDirection: 'row' }}>
             <HeaderBtn icon="sparkles-outline" onPress={() => setGenOpen(true)} />
@@ -200,6 +232,52 @@ export function ScheduleScreen({ navigation }) {
         mode="light"
         style={{ marginBottom: 14 }}
       />
+
+      {/* BUG 10: live priority order — proof the setting is applied */}
+      <View
+        style={{
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          backgroundColor: '#F8FAFC',
+          borderWidth: 1,
+          borderColor: '#E2E8F0',
+          borderRadius: radius.md,
+          paddingHorizontal: 10,
+          paddingVertical: 7,
+          marginBottom: 12,
+        }}
+      >
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#64748B', marginRight: 7 }}>
+          PRIORITY:
+        </Text>
+        {activePrio.map((t, i) => {
+          const icons = { class: '🏫 Class', exam: '🎯 Exam', olympiad: '🏅 Olympiad' };
+          const pct = profile?.priorities?.timeSplit?.[t];
+          const label = icons[t] || `⭐ ${profile?.priorities?.custom?.[t]?.name || 'Custom'}`;
+          return (
+            <View key={t} style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {i > 0 ? <Text style={{ fontSize: 10, color: '#CBD5E1', marginHorizontal: 4 }}>→</Text> : null}
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#334155' }}>
+                {label}
+                {typeof pct === 'number' ? ` ${pct}%` : ''}
+              </Text>
+            </View>
+          );
+        })}
+        {arcOf(profile) ? (
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: arcOf(profile).theme, marginLeft: 8 }}>
+            {arcOf(profile).emoji} {arcOf(profile).label} — {effectiveDailyHours(profile)}h/day
+          </Text>
+        ) : null}
+      </View>
+
+      {genError ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#B91C1C' }}>{genError}</Text>
+          <Button title="Retry" size="sm" mode="light" onPress={() => setRegenChoiceOpen(true)} style={{ marginTop: 8 }} />
+        </Card>
+      ) : null}
 
       {missed.length > 0 ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
