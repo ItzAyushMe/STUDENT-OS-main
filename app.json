@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "StudentOS",
+    "slug": "studentos",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "studentos",
+    "backgroundColor": "#0D1117",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.studentos.app"
+    },
+    "android": {
+      "package": "com.studentos.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0D1117",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    }
+  }
+}
