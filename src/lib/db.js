@@ -148,6 +148,7 @@ export const db = {
     if (isRemote()) {
       let q = supabase.from(table).select('*');
       for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
+      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val); // L-8 (audit): was silently ignored in cloud mode
       for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
       for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
       for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);

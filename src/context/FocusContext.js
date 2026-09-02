@@ -26,6 +26,10 @@ export function FocusProvider({ children }) {
   const [shield, setShield] = useState(null); // { secondsLeft, reason }
   const [reflection, setReflection] = useState(null); // { rowId, minutes, mode, topic }
   const [quote, setQuote] = useState(null); // empathetic 20-min quote { text, idx }
+  // M-2 (audit): the 1s tick could call completePhase again while the
+  // previous call was still awaiting its DB insert → duplicate session rows
+  // and double reflection prompts. This synchronous guard closes that window.
+  const completingRef = useRef(false);
   const intervalRef = useRef(null);
   const sessionRef = useRef(null);
   const attemptDistractionRef = useRef(() => {});
@@ -62,7 +66,13 @@ export function FocusProvider({ children }) {
         }
       }
       if (Date.now() >= new Date(s.endsAt).getTime()) {
-        await completePhase(s.id);
+        if (completingRef.current) return;
+        completingRef.current = true;
+        try {
+          await completePhase(s.id);
+        } finally {
+          completingRef.current = false;
+        }
       }
     }, 1000);
     return () => {
@@ -173,8 +183,8 @@ export function FocusProvider({ children }) {
       const now = new Date();
 
       if (s.phase === 'focus') {
-        sfx('complete');
-        const row = await recordSession(s, s.focusMinutes);
+        // M-2: flip the session to break FIRST (synchronously) so a second
+        // tick can never re-enter this branch while the insert is in flight.
         setSession({
           ...s,
           phase: 'break',
@@ -182,6 +192,8 @@ export function FocusProvider({ children }) {
           phaseStartedAt: now.toISOString(),
           endsAt: new Date(now.getTime() + s.breakMinutes * 60000).toISOString(),
         });
+        sfx('complete');
+        const row = await recordSession(s, s.focusMinutes);
         if (row) setReflection({ rowId: row.id, minutes: s.focusMinutes, mode: s.mode, topic: s.topic });
         pushNotice(`Shaabaash! ${s.focusMinutes} min done — break time ☕`);
       } else {
@@ -226,8 +238,11 @@ export function FocusProvider({ children }) {
     async (opts = {}) => {
       const s = sessionRef.current;
       if (!s) return;
-      if (s.phase === 'focus' && !s.pausedAt) {
-        const focusedMin = Math.floor((Date.now() - new Date(s.phaseStartedAt).getTime()) / 60000);
+      if (s.phase === 'focus') {
+        // L-1 (audit): a paused session used to award 0 XP on stop. Compute
+        // the actual focused time: phase start → pause (if paused), else → now.
+        const endMs = s.pausedAt ? new Date(s.pausedAt).getTime() : Math.min(Date.now(), new Date(s.endsAt).getTime());
+        const focusedMin = Math.floor((endMs - new Date(s.phaseStartedAt).getTime()) / 60000);
         if (focusedMin >= 1) {
           const row = await recordSession(s, focusedMin);
           if (row) {

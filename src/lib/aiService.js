@@ -32,7 +32,9 @@ const RUNTIME_KEY = 'sos.ai.runtime';
 
 // Fallback chains — the first entry is the default model.
 // llama-3.3-70b-specdec was DECOMMISSIONED by Groq and is removed.
-const GEMINI_MODELS = [AI_MODELS.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+// L-10 (audit): gemini-1.5-flash is retired — pruned. Prefer the
+// -latest alias first so future model swaps need no code change.
+const GEMINI_MODELS = ['gemini-flash-latest', AI_MODELS.gemini, 'gemini-2.5-flash'];
 const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'openai/gpt-oss-20b'];
 
 // ---------- runtime config (Settings screen overrides env) ----------

@@ -123,9 +123,11 @@ function MainTabs() {
     <View style={{ flex: 1 }}>
       <Tab.Navigator
         screenListeners={({ route }) => ({
-          // Focus Shield: softly intercept tab switches during a focus session
+          // Focus Shield: softly intercept tab switches — FOCUS phase only.
+          // M-3 (audit): this used to block navigation during breaks too,
+          // with zero feedback, trapping the user on the Focus tab.
           tabPress: (e) => {
-            if (route.name !== 'FocusTab' && focus.session && !focus.session.pausedAt) {
+            if (route.name !== 'FocusTab' && focus.session?.phase === 'focus' && !focus.session.pausedAt) {
               e.preventDefault();
               focus.attemptDistraction(`switched to ${route.name.replace('Tab', '')}`);
             }

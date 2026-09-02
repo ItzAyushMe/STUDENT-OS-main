@@ -18,6 +18,11 @@ export function uuid() {
 }
 
 // ---------- dates ----------
+// M-5 (audit): "today" filters used the UTC date of ISO timestamps, so for
+// IST users anything done between 00:00 and 05:30 carried the previous date.
+// localDateOf(v) = the LOCAL calendar date (YYYY-MM-DD) of any ISO/Date value.
+export const localDateOf = (v) => (v ? dayjs(v).format('YYYY-MM-DD') : '');
+
 export const todayStr = () => dayjs().format('YYYY-MM-DD');
 export const dateStr = (d) => dayjs(d).format('YYYY-MM-DD');
 export const nowIso = () => new Date().toISOString();

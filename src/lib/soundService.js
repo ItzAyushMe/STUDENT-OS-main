@@ -142,7 +142,9 @@ export function playSfx(name) {
         sfxNativePlayers[name] = p;
       }
       p.volume = 0.9;
-      p.seekTo(0).catch?.(() => {});
+      // M-4 (audit): expo-audio's seekTo returns void — calling .catch on it
+      // threw a TypeError that silently skipped the play() below.
+      try { p.seekTo?.(0); } catch { /* ignore */ }
       setTimeout(() => {
         try {
           p.play();

@@ -331,7 +331,9 @@ export function generateSchedule(opts) {
 
     // School exam DAY itself — light revision only, no new topics
     if (schoolExamToday) {
-      const exam = exams.find((e) => e.date === date);
+      // M-7 (audit): normalized school exams have start/end ranges, not .date —
+      // matching by date never hit, so the label was always generic.
+      const exam = exams.find((e) => date >= e.start && date <= e.end);
       push('School Exam', `${exam?.label || 'Exam'} — quick recall + formula scan`, 'revision', Math.min(45, remaining));
       continue;
     }

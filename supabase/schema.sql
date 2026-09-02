@@ -72,7 +72,7 @@ create table if not exists public.syllabus (
   chapter text not null,
   topic text,
   subtopic text,
-  track text default 'class' check (track in ('class','olympiad','exam')),
+  track text default 'class' check (track in ('class','olympiad','exam') or track like 'custom:%'), -- custom priority tracks (v1.0.2)
   weightage integer default 3 check (weightage between 1 and 5),
   estimated_hours numeric default 4,
   status text default 'locked' check (status in ('locked','in_progress','completed')),
@@ -102,7 +102,7 @@ create table if not exists public.schedule (
   subject text,
   topic text,
   session_type text default 'study' check (session_type in ('study','revision','practice','quiz','mock','gym','break')),
-  track text default 'class' check (track in ('class','olympiad','exam')),
+  track text default 'class' check (track in ('class','olympiad','exam') or track like 'custom:%'), -- custom priority tracks (v1.0.2)
   status text default 'pending' check (status in ('pending','completed','skipped')),
   duration_minutes integer default 45,
   priority text default 'normal',
@@ -494,3 +494,13 @@ alter table public.users add column if not exists arc jsonb;
 
 -- v1.0.2: custom priority tracks / custom gym exercises
 alter table public.users add column if not exists custom_exercises jsonb;
+
+-- v1.0.2 audit HIGH-2: allow custom priority tracks (track like 'custom:%')
+-- in schedule/syllabus. Without this, generating a schedule with a custom
+-- track fails on the CHECK constraint in Cloud Mode.
+alter table public.schedule drop constraint if exists schedule_track_check;
+alter table public.schedule add constraint schedule_track_check
+  check (track in ('class','olympiad','exam') or track like 'custom:%');
+alter table public.syllabus drop constraint if exists syllabus_track_check;
+alter table public.syllabus add constraint syllabus_track_check
+  check (track in ('class','olympiad','exam') or track like 'custom:%');

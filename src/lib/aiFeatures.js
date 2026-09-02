@@ -109,7 +109,9 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
   const clean = habits.filter((h) => h?.name).map((h) => ({
     name: String(h.name).slice(0, 60),
     icon: String(h.icon || '✨').slice(0, 4),
-    category: ['health', 'study', 'mind', 'life'].includes(h.category) ? h.category : 'life',
+    // HIGH-3 (audit): the AI returns health|study|mind|life but the app's
+    // categories (and the DB CHECK constraint) are academic|health|mental|productivity.
+    category: { health: 'health', study: 'academic', mind: 'mental', life: 'productivity', academic: 'academic', mental: 'mental', productivity: 'productivity' }[h.category] || 'productivity',
     // map AI-proposed parts onto the app's real parts (morning/afternoon/evening)
     part: { morning: 'morning', day: 'afternoon', afternoon: 'afternoon', evening: 'evening', night: 'evening' }[h.part] || 'afternoon',
     target_time: /^\d{2}:\d{2}$/.test(String(h.target_time || '')) ? h.target_time : null,
@@ -117,6 +119,25 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
   }));
   if (!clean.length) throw new AIUnavailableError('AI habit suggestions nahi aaye.');
   return clean;
+}
+
+
+// LOW-9 (audit): never blindly trust Number(q.answer). Models sometimes
+// reply 1-based indices or the option text. Resolve by matching the
+// answer text against the options first, then fall back to the number.
+function resolveAnswerIndex(q) {
+  const options = Array.isArray(q.options) ? q.options.map(String) : [];
+  const at = String(q.answer_text ?? q.answerText ?? '').trim();
+  if (at) {
+    const i = options.findIndex(
+      (o) => o.trim().toLowerCase() === at.toLowerCase() || o.trim().toLowerCase().startsWith(at.toLowerCase())
+    );
+    if (i >= 0) return i;
+  }
+  const n = Number(q.answer);
+  if (Number.isInteger(n) && n >= 0 && n < options.length) return n;
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) return n - 1; // 1-based reply
+  return 0;
 }
 
 // ---------- quiz generation ----------
@@ -130,7 +151,7 @@ Subject: ${esc(subject) || 'General'}${topic ? ` · Topic: ${esc(topic)}` : ''}.
 Difficulty: ${difficulty}. Mix conceptual + application questions.
 ${chapterHint}
 ${classGuard(profileContext)}
-Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"explanation":"one line why","topic":"subtopic name","difficulty":1}]}. "answer" is the 0-based index of the correct option. Options must be plausible and unambiguous.`,
+Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"answer_text":"exact text of the correct option","explanation":"one line why","topic":"subtopic name","difficulty":1}]}. "answer" is the 0-based index of the correct option. Options must be plausible and unambiguous.`,
     system: AI_PERSONA,
     schemaHint: '{"questions":[{q, options[4], answer, explanation, topic, difficulty}]}',
     temperature: 0.5,
@@ -144,7 +165,7 @@ Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"ex
       difficulty: q.difficulty || 2,
       q: String(q.q),
       options: q.options.map(String),
-      answer: Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0)),
+      answer: resolveAnswerIndex(q),
       explanation: String(q.explanation || ''),
       source: 'ai',
     }));
@@ -185,7 +206,7 @@ ${classGuard(ctx)}
 ${chapters.length ? `From the student's OWN syllabus chapters: ${chapters.map(esc).join('; ')}.` : ''}
 ${topic ? `Focus topic: ${esc(topic)}.` : ''}
 Difficulty should suit their prep level. Mix quick-recall + application.
-Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"explanation":"one line","topic":"chapter name","difficulty":2}]}`,
+Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"answer_text":"exact text of the correct option","explanation":"one line","topic":"chapter name","difficulty":2}]}`,
     system: AI_PERSONA,
     schemaHint: '{"questions":[{q, options[4], answer, explanation, topic, difficulty}]}',
     temperature: 0.6,
@@ -200,7 +221,7 @@ Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"ex
       difficulty: q.difficulty || 2,
       q: String(q.q),
       options: q.options.map(String),
-      answer: Math.max(0, Math.min(q.options.length - 1, Number(q.answer) || 0)),
+      answer: resolveAnswerIndex(q),
       explanation: String(q.explanation || ''),
       source: 'ai',
     }));

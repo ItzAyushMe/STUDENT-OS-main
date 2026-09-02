@@ -60,7 +60,9 @@ export async function syncMyWeeklyLeaderboard(profile) {
   try {
     const events = await db.list('xp_events', {
       eq: { user_id: profile.id },
-      gte: { created_at: `${weekStart}T00:00:00` },
+      // M-5 (audit): widen the window a day back so Monday 00:00–05:30 IST
+      // events (UTC Sunday) still land inside the local week.
+      gte: { created_at: `${dayjs(weekStart).subtract(1, 'day').format('YYYY-MM-DD')}T00:00:00` },
     });
     const sum = (cat) => events.filter((e) => e.category === cat).reduce((a, e) => a + (e.amount || 0), 0);
     const total = events.reduce((a, e) => a + (e.amount || 0), 0);

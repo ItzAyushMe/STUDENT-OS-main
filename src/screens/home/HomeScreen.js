@@ -80,7 +80,7 @@ export function HomeScreen({ navigation }) {
         for (const r of recent) {
           if (!r.subject) continue;
           const total = Number(r.total_questions) || 0;
-          const right = Number(r.score) || 0;
+          const right = Number(r.correct_answers ?? r.score) || 0; // M-1 (audit): column is correct_answers
           const wrong = Math.max(0, total - right);
           if (wrong > 0) wrongBySubject[r.subject] = (wrongBySubject[r.subject] || 0) + wrong;
         }

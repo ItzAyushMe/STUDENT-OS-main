@@ -10,7 +10,7 @@ import { Card } from '../../components/ui/Card';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { fonts, radius } from '../../config/theme';
-import { todayStr, dateStr, dayjs, fmtDuration, mondayOf, groupBy } from '../../lib/utils';
+import { todayStr, dateStr, dayjs, fmtDuration, mondayOf, groupBy, localDateOf } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
 
 export function FocusStatsScreen({ navigation }) {
@@ -42,7 +42,8 @@ export function FocusStatsScreen({ navigation }) {
   }
 
   const today = todayStr();
-  const byDate = groupBy(sessions, (s) => String(s.start_time || '').slice(0, 10));
+  // M-5 (audit): group by LOCAL date, not the UTC slice of the ISO stamp
+  const byDate = groupBy(sessions, (s) => localDateOf(s.start_time));
 
   const todays = byDate[today] || [];
   const todayMin = todays.reduce((a, s) => a + (s.duration_minutes || 0), 0);

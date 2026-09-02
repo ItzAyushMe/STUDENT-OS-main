@@ -34,6 +34,7 @@ export function GuildScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [weekRows, setWeekRows] = useState([]);
   const [friends, setFriends] = useState([]);
+  const [incoming, setIncoming] = useState([]); // HIGH-5: requests TO me (friend_id = me, pending)
   const [feed, setFeed] = useState([]);
   const [addOpen, setAddOpen] = useState(false);
   const [addUsername, setAddUsername] = useState('');
@@ -79,6 +80,19 @@ export function GuildScreen({ navigation }) {
 
       // ----- friends -----
       const fr = await db.list('friends', { eq: { user_id: profile.id } });
+      // HIGH-5 (audit): incoming requests were never fetched, so nobody
+      // could ever ACCEPT a friend request — the whole social flow dead-ended.
+      let inc = [];
+      if (isRemote()) {
+        try {
+          inc = await db.list('friends', { eq: { friend_id: profile.id, status: 'pending' } });
+        } catch { /* RLS should allow this via friends_participants */ }
+      }
+      const incUserIds = inc.map((r) => r.user_id);
+      const incUsers = incUserIds.length ? await db.list('users', { in: { id: incUserIds } }) : [];
+      const incNameOf = {};
+      incUsers.forEach((u) => (incNameOf[u.id] = { name: u.display_name || u.username || 'Player', username: u.username || 'player' }));
+      setIncoming(inc.map((r) => ({ ...r, from: incNameOf[r.user_id] || { name: 'Player', username: 'player' } })));
       const demoFriends = fr.length || isRemote() || CLOUD_ONLY ? [] : DEMO_RIVALS.slice(0, 3).map((r) => ({ id: `demo-${r.id}`, friend: r, status: 'accepted', demo: true }));
       setFriends([...fr.map((f) => ({ ...f, friend: { id: f.friend_id, display_name: f.friend_name || 'Player', username: f.friend_name || 'player' } })), ...demoFriends]);
 
@@ -87,7 +101,7 @@ export function GuildScreen({ navigation }) {
       if (isRemote()) {
         const events = await db.list('xp_events', { gte: { created_at: `${weekStart}T00:00:00` }, order: { col: 'created_at', asc: false }, limit: 40 });
         // feed from friends' events (RLS allows reading friends' xp_events)
-        const friendIds = new Set(fr.map((f) => f.friend_id));
+        const friendIds = new Set(fr.filter((f) => f.status === 'accepted').map((f) => f.friend_id));
         const users = fr.length ? await db.list('users', { in: { id: [...friendIds] } }) : [];
         const nameOf = {};
         users.forEach((u) => (nameOf[u.id] = u.display_name || u.username));
@@ -106,6 +120,28 @@ export function GuildScreen({ navigation }) {
   }, [profile?.id, profile]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // HIGH-5: accept / decline incoming requests
+  const respondRequest = async (row, accept) => {
+    try {
+      if (accept) {
+        await db.update('friends', row.id, { status: 'accepted' });
+        // mirror the friendship so it appears in MY list too
+        await db.insert('friends', {
+          user_id: profile.id,
+          friend_id: row.user_id,
+          friend_name: row.from?.name || 'Player',
+          status: 'accepted',
+          created_at: nowIso(),
+        });
+      } else {
+        await db.remove('friends', row.id);
+      }
+      await load();
+    } catch (e) {
+      setAddMsg(e?.message || 'Request update nahi ho paya.');
+    }
+  };
 
   const addFriend = async () => {
     const uname = addUsername.trim().replace(/^@/, '');
@@ -303,6 +339,46 @@ export function GuildScreen({ navigation }) {
               ))}
             </View>
           </Card>
+
+          {/* HIGH-5: incoming friend requests — accept/decline */}
+          {incoming.length ? (
+            <>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: GAMER.secondary, marginBottom: 8 }}>
+                📨 Incoming requests ({incoming.length})
+              </Text>
+              {incoming.map((r) => (
+                <Card key={r.id} mode="gamer" style={{ marginBottom: 10, borderColor: 'rgba(124,58,237,0.5)' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: 'rgba(124,58,237,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                      <Text style={{ fontSize: 20 }}>🎮</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: GAMER.text }}>
+                        {r.from?.name || 'Player'}
+                      </Text>
+                      <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginTop: 2 }}>
+                        @{r.from?.username || 'player'} wants to be your rival
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => respondRequest(r, false)}
+                      hitSlop={6}
+                      style={{ padding: 7, marginRight: 4, backgroundColor: 'rgba(239,68,68,0.12)', borderRadius: 10 }}
+                    >
+                      <Ionicons name="close" size={16} color="#EF4444" />
+                    </Pressable>
+                    <Pressable
+                      onPress={() => respondRequest(r, true)}
+                      hitSlop={6}
+                      style={{ padding: 7, backgroundColor: 'rgba(16,185,129,0.15)', borderRadius: 10 }}
+                    >
+                      <Ionicons name="checkmark" size={17} color="#10B981" />
+                    </Pressable>
+                  </View>
+                </Card>
+              ))}
+            </>
+          ) : null}
 
           {friends.map((f, i) => (
             <Card key={f.id || i} mode="gamer" style={{ marginBottom: 10 }}>

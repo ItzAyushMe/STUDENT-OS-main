@@ -311,7 +311,7 @@ export function ScheduleScreen({ navigation, route }) {
           </Text>
           <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
             {coverage.classDoneBy && coverage.nextSchoolExam
-              ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.date}) 📅`
+              ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.start}) 📅`
               : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
           </Text>
         </Card>

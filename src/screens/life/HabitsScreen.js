@@ -294,6 +294,7 @@ export function HabitsScreen({ navigation }) {
                   key={h.id}
                   habit={h}
                   week={week}
+                frozenYesterday={Boolean(logMap[`${habit.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`]?.frozen)}
                   today={today}
                   logMap={logMap}
                   streak={streak}
@@ -407,7 +408,7 @@ export function HabitsScreen({ navigation }) {
   );
 }
 
-const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, onToggle, onFreeze, onEdit, onDelete }) {
+const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, frozenYesterday, onToggle, onFreeze, onEdit, onDelete }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
   const canFreeze = atRisk && streak >= 2 && freezes > 0 && !doneToday;
@@ -452,6 +453,13 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8' }}>
             {streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet'}
           </Text>
+          {/* L-6 (audit): on Mondays the frozen Sunday cell isn't in this
+              week's grid — show the freeze on the row instead. */}
+          {frozenYesterday ? (
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10.5, color: '#0891B2', marginLeft: 7 }}>
+              🧊 applied yesterday
+            </Text>
+          ) : null}
           {canFreeze ? (
             <Pressable onPress={onFreeze} style={{ marginLeft: 8, backgroundColor: '#ECFEFF', borderWidth: 1, borderColor: '#A5F3FC', borderRadius: 6, paddingVertical: 2, paddingHorizontal: 6 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 10, color: '#0891B2' }}>🧊 save streak</Text>

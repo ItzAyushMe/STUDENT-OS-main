@@ -19,7 +19,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Confetti } from '../../components/gamer/Confetti';
 import { ProgressBar } from '../../components/ui/ProgressBar';
-import { todayStr, fmtClock, nowIso } from '../../lib/utils';
+import { todayStr, fmtClock, nowIso, localDateOf, dayjs } from '../../lib/utils';
 
 const PER_Q_SECONDS = 15;
 
@@ -144,7 +144,10 @@ export function ArenaScreen({ navigation }) {
     let rows = [];
     if (isRemote()) {
       try {
-        const results = await db.list('quiz_results', { eq: { mode: 'arena' }, gte: { created_at: `${todayStr()}T00:00:00` } });
+        // M-5 (audit): widen the UTC window by a day, then filter by local date
+        const dayBefore = dayjs(todayStr()).subtract(1, 'day').format('YYYY-MM-DD');
+        const results = (await db.list('quiz_results', { eq: { mode: 'arena' }, gte: { created_at: `${dayBefore}T00:00:00` } }))
+          .filter((r) => localDateOf(r.created_at) === todayStr());
         const mine = results.filter((r) => r.user_id === profile.id);
         if (mine.length) {
           myEntry = { ...myEntry, correct: Math.max(correct, ...mine.map((m) => m.correct_answers)), time: Math.min(...mine.map((m) => m.time_taken || 999)) };

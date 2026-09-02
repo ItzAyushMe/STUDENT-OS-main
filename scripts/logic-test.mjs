@@ -256,4 +256,30 @@ const plan5 = generateSchedule({
 });
 assert.ok(!plan5.some((r) => r.track === 'exam' || r.track === 'olympiad'), '0% tracks are skipped by the scheduler');
 
+// ---------- audit 11.4: regression tests ----------
+// HIGH-1: two back-to-back awards must BOTH land (the stale-profile race
+// used to keep only the last delta).
+{
+  const { awardXPToProfile } = await import('./../src/lib/xpService.js');
+  let prof = { id: 'u9', total_xp: 0, level: 1, current_streak: 0, longest_streak: 0, streak_freezes: 2, last_active_date: null };
+  const inserts = [];
+  const deps = {
+    profile: prof, // stale snapshot (as captured in a closure)
+    getProfile: () => prof, // the fix: always-fresh accessor
+    updateProfile: async (patch) => { prof = { ...prof, ...patch }; },
+    insert: async (row) => { inserts.push(row); },
+  };
+  const r1 = await awardXPToProfile(deps, 'ARENA_COMPLETE');  // +20
+  const r2 = await awardXPToProfile(deps, 'ARENA_CORRECT', { amount: 50 }); // +50
+  assert.strictEqual(prof.total_xp, 70, `back-to-back awards both land (total ${prof.total_xp} == 70)`);
+  assert.strictEqual(inserts.length, 2, 'two xp_events rows written');
+  assert.ok(r2.total === 70 && r2.total > r1.total, 'second award sees the first one\'s total');
+}
+
+// HIGH-2: every scheduled session has a track the DB CHECK accepts
+{
+  const validTrack = (t) => ['class', 'olympiad', 'exam'].includes(t) || /^custom:/.test(t);
+  assert.ok(plan4.every((r) => validTrack(r.track)), 'all session tracks pass the (relaxed) CHECK constraint');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');

@@ -17,6 +17,7 @@ import { fonts, radius } from '../../config/theme';
 import { askAI, AIUnavailableError } from '../../lib/aiService';
 import { infoAlert, confirmAlert } from '../../lib/alert';
 import { db, wipeLocalData } from '../../lib/db';
+import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { normalizePriorities } from '../../lib/scheduleGenerator';
 import { APP_NAME, APP_TAGLINE, APP_VERSION } from '../../config/constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -117,19 +118,38 @@ export function SettingsScreen({ navigation }) {
     );
   };
 
-  // NEW (v1.0.2): delete my account — wipes every row, signs out, clears local
+  // v1.0.2 + audit M-8: delete my account — wipes every row, signs out,
+  // clears local data, and (if the delete-user Edge Function is deployed)
+  // removes the Supabase login itself so the email can't sign back in.
   const deleteAccount = () => {
     confirmAlert(
       'Delete your account?',
-      'Ye permanent hai: saare quests, XP, streaks, notes, friends — sab delete ho jayenge.',
+      'Saara data mit jayega: quests, XP, streaks, notes, friends — sab kuch. Ye undo nahi hota.',
       () => {
         confirmAlert(
           'Last chance!',
-          'Everything will be gone. Ye undo nahi hota. Continue?',
+          'Data erase ho jayega. Note: agar delete-user function deploy nahi hua hai to tumhara login (email/Google) auth provider pe reh jayega — sign in karke fresh start kar sakte ho. Continue?',
           async () => {
             setDeleting(true);
             try {
               if (cloudMode && profile?.id) {
+                // M-8 proper fix: best-effort call to the Edge Function that
+                // deletes the auth user server-side (service-role). Cascades
+                // wipe every table via ON DELETE CASCADE.
+                try {
+                  const { data: authData } = await supabase.auth.getSession();
+                  const token = authData?.session?.access_token;
+                  if (token) {
+                    await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`,
+                      },
+                      body: JSON.stringify({ user_id: profile.id }),
+                    });
+                  }
+                } catch { /* function not deployed — rows are wiped below anyway */ }
                 const tables = [
                   'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
                   'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
@@ -594,7 +614,22 @@ export function SettingsScreen({ navigation }) {
           />
         </View>
         {settings.dailyReminder ? (
-          <Input label="Time (HH:MM)" value={reminderTime} onChangeText={setReminderTime} placeholder="20:00" style={{ marginTop: 10 }} />
+          <Input
+            label="Time (HH:MM)"
+            value={reminderTime}
+            onChangeText={setReminderTime}
+            placeholder="20:00"
+            style={{ marginTop: 10 }}
+            onBlur={async () => {
+              // L-2 (audit): editing the time used to do nothing until the
+              // toggle was flipped — reschedule immediately on blur.
+              if (!/^\d{1,2}:\d{2}$/.test(reminderTime)) return;
+              try {
+                if (Platform.OS !== 'web') await scheduleReminder(reminderTime);
+                settings.update({ dailyReminder: reminderTime });
+              } catch { /* keep the old schedule */ }
+            }}
+          />
         ) : null}
       </Card>
 

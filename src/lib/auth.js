@@ -38,6 +38,23 @@ function parseQueryParams(url) {
   return out;
 }
 
+
+// L-4 (audit): unescape() is a legacy global that isn't guaranteed on every
+// JS engine. UTF-8-safe base64 without it. (Still just obfuscation — local
+// mode only, the secret never leaves the device.)
+const utf8ToBase64 = (str) => {
+  try {
+    if (typeof TextEncoder !== 'undefined' && typeof btoa === 'function') {
+      const bytes = new TextEncoder().encode(str);
+      let binary = '';
+      bytes.forEach((b) => { binary += String.fromCharCode(b); });
+      return btoa(binary);
+    }
+  } catch { /* fall through */ }
+  return btoa(encodeURIComponent(str)); // last resort (ascii-safe)
+};
+const localSecret = (password, email) => utf8ToBase64(`sos::${password}::${email}`);
+
 export const authService = {
   isRemote: () => isSupabaseConfigured,
 
@@ -79,7 +96,7 @@ export const authService = {
       email,
       username: username || email.split('@')[0],
       // Local mode only — obfuscated, never leaves the device.
-      secret: btoa(unescape(encodeURIComponent(`sos::${password}::${email}`))),
+      secret: localSecret(password, email),
     };
     await writeJson(LOCAL_USERS_KEY, users);
     const session = { userId: id, email, mode: 'local' };
@@ -100,7 +117,7 @@ export const authService = {
     const users = (await readJson(LOCAL_USERS_KEY)) || {};
     const u = users[email];
     if (!u) throw new Error('No account found with this email. Sign up first!');
-    const secret = btoa(unescape(encodeURIComponent(`sos::${password}::${email}`)));
+    const secret = localSecret(password, email);
     if (secret !== u.secret) throw new Error('Galat password. Try again!');
     const session = { userId: u.id, email, mode: 'local' };
     await writeJson(SESSION_KEY, session);

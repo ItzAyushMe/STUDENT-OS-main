@@ -20,7 +20,7 @@ import { aiStatus } from '../../lib/aiService';
 import { CONTENT_TYPES } from '../../config/constants';
 import { FREE_LIBRARY, LIB_KIND_ICON, CLASS10_LIBRARY } from '../../data/contentLibrary';
 import { fonts } from '../../config/theme';
-import { nowIso } from '../../lib/utils';
+import { nowIso, localDateOf } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
 
 export function ContentScreen({ navigation }) {
@@ -198,7 +198,7 @@ export function ContentScreen({ navigation }) {
                     </View>
                   ) : null}
                   <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 6 }}>
-                    {String(item.created_at || '').slice(0, 10)}
+                    {localDateOf(item.created_at)}
                   </Text>
                 </View>
                 {item.text && !item.ai_summary ? (

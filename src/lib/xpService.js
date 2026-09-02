@@ -87,9 +87,13 @@ export function streakOnActivity(profile, today = todayStr()) {
 }
 
 // ---- orchestration used by GameContext ----
-// deps: { profile, updateProfile, insert(row) }
+// deps: { profile, updateProfile, insert(row), getProfile? }
+// getProfile() (optional) returns the freshest profile — used by GameContext
+// to avoid the stale-closure race where two rapid awards both computed from
+// the same pre-award total_xp (audit HIGH-1).
 export async function awardXPToProfile(deps, code, opts = {}) {
-  const { profile, updateProfile, insert } = deps;
+  const { profile: maybeStale, updateProfile, insert, getProfile } = deps;
+  const profile = (typeof getProfile === 'function' ? getProfile() : null) || maybeStale;
   if (!profile?.id) return null;
 
   const rule = xpForCode(code, opts.amount);

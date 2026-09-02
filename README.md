@@ -150,6 +150,22 @@ Eleven reported bugs + the big feature requests, all in:
 
 New quote in the pool: *"Nothing feels easy when you are lazy, everything feels easy when you are crazy."*
 
+## 🔍 v1.0.3 — Full-Code Audit Fix Pack
+
+A line-by-line audit (15.3k lines) found 6 HIGH, 8 MEDIUM and 10 LOW issues — all fixed:
+
+**HIGH**
+1. **XP race condition** — back-to-back awards (quiz finish, arena, battle wins) overwrote each other; only the last delta landed. Awards are now serialized through a queue and read an always-fresh profile ref; `updateProfile` applies patches on the latest state (the stale re-read block is gone). Regression test added.
+2. **Custom tracks crashed Cloud schedules** — `schedule.track` / `syllabus.track` CHECK constraints now accept `custom:%`. *Re-run `schema.sql` (idempotent).*
+3. **AI habit suggestions failed in Cloud** — AI categories (health/study/mind/life) are mapped to the app's real categories (academic/health/mental/productivity) before insert.
+4. **First login could fail forever on username collision** — profile creation retries with a random suffix; a failed profile load no longer signs you out (session is kept).
+5. **Friend requests could never be accepted** — incoming requests (friend_id = me) are now fetched with an Accept/Decline UI; the feed only counts accepted friends. The social loop finally closes.
+6. **`.env` is gitignored** — real keys can never be committed by accident.
+
+**MEDIUM**: weak-areas now reads `correct_answers`; focus-phase completion can't double-fire (sync guard + state set before await); tab bar works during Pomodoro breaks; native SFX play again (`seekTo` returns void); timezone-correct "today/this week" filters (`localDateOf` — no more 00:00–05:30 IST skew); Google OAuth redirect no longer creates ghost profiles (onAuthStateChange + redirect-aware); coverage banner shows real exam dates; account deletion is honest about the login staying (plus an optional **Edge Function**, `supabase/functions/delete-user`, that removes the auth user server-side — deploy with `supabase functions deploy delete-user`).
+
+**LOW**: paused-session XP on stop; reminder time reschedules on blur; `.env.example` matches the Groq default; UTF-8-safe local password encoding (no `unescape`); toast timers cleared on unmount; "🧊 applied yesterday" badge on Mondays; `neq` filter works in cloud mode; quiz answers resolved by matching option text (immune to off-by-one model replies); retired Gemini models pruned from the fallback chain.
+
 ## 🌐 Going Online (Production Setup) — v1.0
 
 The app is already cloud-ready — going online is **configuration, not code**. Two modes, switched automatically by whether Supabase is configured:
@@ -174,9 +190,10 @@ Demo rivals are gated behind Local Mode (`isRemote()` in `src/screens/guild/Guil
    ```
    Add your AI keys too (`EXPO_PUBLIC_GEMINI_API_KEY` / `EXPO_PUBLIC_GROQ_API_KEY`).
 3. **Enable Google sign-in**: Supabase → Authentication → Providers → Google → Enable; create OAuth credentials in Google Cloud Console (Web application) with the redirect URI Supabase shows (`https://YOUR-PROJECT-ref.supabase.co/auth/v1/callback`); paste Client ID/Secret into the Supabase provider screen. Add your app URLs under Authentication → URL Configuration (web: `http://localhost:8081` + your deployed URL; mobile: `studentos://auth-callback`).
-4. **(Optional) pure online release**: set `EXPO_PUBLIC_CLOUD_ONLY=1` in `.env` — guest login is hidden, demo rivals never render, and without a backend the auth screen shows clear setup instructions instead of falling back to local data.
-5. **Restart**: `npx expo start -c` (env vars load at startup only).
-6. **Verify**: sign in with Google → complete onboarding → add a habit → see the row appear in Supabase's Table Editor. Guild shows real/empty friends state, no demo rivals.
+4. **(Optional) real account deletion**: `supabase functions deploy delete-user` — deploys the included Edge Function so "Delete my account" also removes the login itself (service-role, self-delete only). Without it, deletion wipes all data but the login stays.
+5. **(Optional) pure online release**: set `EXPO_PUBLIC_CLOUD_ONLY=1` in `.env` — guest login is hidden, demo rivals never render, and without a backend the auth screen shows clear setup instructions instead of falling back to local data.
+6. **Restart**: `npx expo start -c` (env vars load at startup only).
+7. **Verify**: sign in with Google → complete onboarding → add a habit → see the row appear in Supabase's Table Editor. Guild shows real/empty friends state, no demo rivals.
 
 ### Build & release
 

@@ -6,6 +6,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { authService } from '../lib/auth';
 import { db, isRemote } from '../lib/db';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { nowIso, uuid } from '../lib/utils';
 import { STREAK_FREEZE_START } from '../config/constants';
 
@@ -42,8 +43,21 @@ async function defaultProfile(session, extra = {}) {
   };
   const existing = await db.list('users', { eq: { id: session.userId } });
   if (existing && existing.length) return existing[0];
-  const created = await db.insert('users', base);
-  return created;
+  // HIGH-4 (audit): users.username is UNIQUE. Two people whose emails start
+  // with the same prefix would otherwise fail profile creation forever
+  // (unique violation -> load() -> signed out on every reload). Retry with
+  // a random suffix on collision.
+  try {
+    return await db.insert('users', base);
+  } catch (e) {
+    if (/duplicate key|unique/i.test(String(e?.message || ''))) {
+      return await db.insert('users', {
+        ...base,
+        username: `${base.username}-${Math.floor(Math.random() * 900 + 100)}`,
+      });
+    }
+    throw e;
+  }
 }
 
 export function AuthProvider({ children }) {
@@ -51,23 +65,36 @@ export function AuthProvider({ children }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const booted = useRef(false);
+  // HIGH-1 (audit): back-to-back updateProfile/awardXP calls used to read a
+  // STALE profile from a React closure, so the second XP award overwrote the
+  // first (users.total_xp kept only the last delta). This ref is always the
+  // freshest profile — synchronously updated — so awards can never interleave
+  // on top of stale data.
+  const profileRef = useRef(null);
+  const setProfileSafe = useCallback((p) => {
+    profileRef.current = p;
+    setProfile(p);
+  }, []);
 
   const load = useCallback(async () => {
     try {
       const s = await authService.getSession();
       if (!s) {
         setSession(null);
-        setProfile(null);
+        setProfileSafe(null);
         return;
       }
       const p = await defaultProfile(s);
       setSession(s);
-      setProfile(p);
+      setProfileSafe(p);
     } catch (e) {
-      setSession(null);
-      setProfile(null);
+      // HIGH-4 (audit): a failed profile load used to sign the user out
+      // forever (e.g. username collision on first login). Keep the session —
+      // the auth is valid; the profile can be retried.
+      console.warn('[auth] profile load failed:', e?.message);
+      setSession((cur) => cur);
     }
-  }, []);
+  }, [setProfileSafe]);
 
   useEffect(() => {
     if (booted.current) return;
@@ -75,20 +102,43 @@ export function AuthProvider({ children }) {
     load().finally(() => setLoading(false));
   }, [load]);
 
+  // MEDIUM-6 (audit): after the Google OAuth redirect returns, the tokens in
+  // the URL can still be resolving when the initial load() ran — the app
+  // would show the Auth screen even though login succeeded. Re-evaluate
+  // whenever a session appears.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return undefined;
+    const { data } = supabase.auth.onAuthStateChange((_event, sess) => {
+      if (sess?.user && !profileRef.current) load();
+    });
+    return () => data.subscription.unsubscribe();
+  }, [load]);
+
   const applyAuth = useCallback(
     async (result) => {
       const s = result.session || result;
       const p = await defaultProfile(s, result.username ? { username: result.username } : {});
       setSession(s);
-      setProfile(p);
+      setProfileSafe(p);
       return p;
     },
-    []
+    [setProfileSafe]
   );
 
   const signUp = useCallback((creds) => authService.signUp(creds).then(applyAuth), [applyAuth]);
   const signIn = useCallback((creds) => authService.signIn(creds).then(applyAuth), [applyAuth]);
-  const signInWithGoogle = useCallback(() => authService.signInWithGoogle().then(applyAuth), [applyAuth]);
+
+  // MEDIUM-6 (audit): on web, Google sign-in redirects the whole page — the
+  // service resolves { redirecting: true } with no session. Do NOT call
+  // applyAuth for redirects (it would create a ghost profile with an
+  // undefined user id before the page unloads).
+  const signInWithGoogle = useCallback(
+    () =>
+      authService.signInWithGoogle().then((r) =>
+        r && r.redirecting ? r : applyAuth(r)
+      ),
+    [applyAuth]
+  );
 
   const continueAsGuest = useCallback(
     () => authService.continueAsGuest().then(applyAuth),
@@ -98,28 +148,30 @@ export function AuthProvider({ children }) {
   const signOut = useCallback(async () => {
     await authService.signOut();
     setSession(null);
-    setProfile(null);
-  }, []);
+    setProfileSafe(null);
+  }, [setProfileSafe]);
 
+  // HIGH-1 (audit): patches are applied on profileRef (always freshest) —
+  // never on a stale closure snapshot. The optimistic state is set
+  // synchronously BEFORE any await, so the next awardXP in the same tick
+  // sees the updated totals. The old "re-read authoritative row" block is
+  // GONE on purpose: it re-introduced the stale-overwrite race (a re-read
+  // landing between two awards would clobber the first one). Authoritative
+  // re-syncs happen in load()/reloadProfile only.
   const updateProfile = useCallback(
     async (patch) => {
-      setProfile((prev) => (prev ? { ...prev, ...patch } : prev));
-      if (profile?.id) {
-        try {
-          await db.update('users', profile.id, patch);
-        } catch (e) {
-          // keep optimistic state; local mode never throws here in practice
-        }
-      }
-      // re-read authoritative row
+      const base = profileRef.current;
+      if (!base?.id) return;
+      const next = { ...base, ...patch };
+      profileRef.current = next; // synchronous — the next award sees this
+      setProfile(next);
       try {
-        const rows = await db.list('users', { eq: { id: profile.id } });
-        if (rows && rows[0]) setProfile(rows[0]);
-      } catch {
-        /* ignore */
+        await db.update('users', base.id, patch);
+      } catch (e) {
+        // keep optimistic state; local mode never throws here in practice
       }
     },
-    [profile?.id]
+    []
   );
 
   const value = useMemo(

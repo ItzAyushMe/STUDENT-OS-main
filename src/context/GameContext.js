@@ -3,7 +3,7 @@
 // awardXP(code) -> xp_events row + profile update (xp, level,
 // tier, streak) + floating XP toast + LEVEL UP celebration.
 // ============================================================
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { useSettings } from './SettingsContext';
 import { db } from '../lib/db';
@@ -15,6 +15,9 @@ const GameCtx = createContext(null);
 
 export function GameProvider({ children }) {
   const { profile, updateProfile } = useAuth();
+  // HIGH-1: always-fresh profile accessor for the award chain
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
   const settings = useSettings();
   const [toasts, setToasts] = useState([]);
   const [celebration, setCelebration] = useState(null);
@@ -38,8 +41,13 @@ export function GameProvider({ children }) {
   );
 
   // ---- the single entry point for earning XP ----
+  // HIGH-1 (audit): awards are SERIALIZED through a promise queue. Quiz/Arena/
+  // Battle finishes fire two awards back-to-back; running them concurrently
+  // made the second one read a stale profile and overwrite the first's XP.
+  const awardQueueRef = useRef(Promise.resolve());
   const awardXP = useCallback(
-    async (code, opts = {}) => {
+    (code, opts = {}) => {
+      const run = async () => {
       if (!profile?.id) return null;
       try {
         const result = await awardXPToProfile(
@@ -47,6 +55,7 @@ export function GameProvider({ children }) {
             profile,
             updateProfile,
             insert: (row) => db.insert('xp_events', row),
+            getProfile: () => profileRef.current,
           },
           code,
           opts
@@ -70,9 +79,16 @@ export function GameProvider({ children }) {
         console.warn('[GameContext] awardXP failed', e?.message);
         return null;
       }
+      };
+      const p = awardQueueRef.current.then(run, run);
+      awardQueueRef.current = p.catch(() => {});
+      return p;
     },
     [profile, updateProfile, pushToast, pushNotice, settings.soundEffects]
   );
+
+  // LOW-5 (audit): clear pending toast timers on unmount
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const dismissCelebration = useCallback(() => setCelebration(null), []);
 
