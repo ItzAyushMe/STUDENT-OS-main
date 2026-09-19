@@ -153,7 +153,7 @@ export function ContentScreen({ navigation }) {
         {types.map((t) => (
           <Chip
             key={t}
-            label={t === 'All' ? 'All' : `${CONTENT_TYPES[t].icon} ${CONTENT_TYPES[t].label}`}
+            label={t === 'All' ? 'All' : `${(CONTENT_TYPES[t] || CONTENT_TYPES.note).icon} ${(CONTENT_TYPES[t] || CONTENT_TYPES.note).label}`}
             small
             selected={filter === t}
             onPress={() => setFilter(t)}

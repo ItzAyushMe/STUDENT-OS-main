@@ -387,4 +387,38 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(!files.includes('index.js'), 'Edge Function does NOT have duplicate index.js');
 }
 
+// ---------- v1.0.6 Round2: duplicate habits idempotency ----------
+{
+  const src = read('src/lib/starterData.js');
+  // seedHabits should be idempotent by name, not just any existing
+  assert.ok(src.includes('existingNames') && src.includes('toLowerCase'), 'seedHabits is idempotent by name (existingNames set)');
+  const habitFnIdx = src.indexOf('export async function seedHabits');
+  const habitSlice = src.slice(habitFnIdx, habitFnIdx + 800);
+  assert.ok(!habitSlice.includes('if (existing && existing.length) return 0;'), 'seedHabits does NOT have simple early-exit that allows race duplicates');
+  // simulate idempotency logic
+  const existing = [{ name: 'Morning Exercise' }, { name: 'Read 30 mins' }];
+  const presets = [{ name: 'Morning Exercise' }, { name: 'Read 30 mins' }, { name: 'Meditate' }];
+  const existingNames = new Set(existing.map(r => (r.name||'').trim().toLowerCase()));
+  const fresh = presets.filter(h => !existingNames.has((h.name||'').trim().toLowerCase()));
+  assert.equal(fresh.length, 1, 'seedHabits idempotency: only missing names inserted');
+  assert.equal(fresh[0].name, 'Meditate');
+}
+
+// ---------- v1.0.6 Round2: mind map blank guard ----------
+{
+  const src = read('src/lib/aiFeatures.js');
+  assert.ok(src.includes('normalizeMindMapResponse'), 'aiFeatures has mind map normalizer');
+  assert.ok(src.includes('mind_maps') || src.includes('mindMaps') || src.includes('branches'), 'normalizer handles alternate shapes');
+  const src2 = read('src/screens/study/TestBuilderScreen.js');
+  assert.ok(src2.includes('if (!node) return null'), 'MapNode guards null node (mind map blank fix)');
+  assert.ok(src2.includes('sec.label && String(sec.label).trim()'), 'Section header empty guard exists');
+}
+
+// ---------- v1.0.6 Round2: Onboarding double-seed guard ----------
+{
+  const src = read('src/screens/onboarding/OnboardingScreen.js');
+  assert.ok(src.includes('seededRef'), 'Onboarding has seededRef guard against double seeding');
+  assert.ok(src.includes('if (seededRef.current) return;'), 'Onboarding checks seededRef before seeding');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');

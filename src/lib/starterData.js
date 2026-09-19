@@ -13,9 +13,10 @@ import { HABIT_PRESETS } from '../config/constants';
 import { pickSyllabusSet } from '../data/syllabusData';
 
 export async function seedHabits(userId) {
-  const existing = await db.list('habits', { eq: { user_id: userId }, limit: 1 });
-  if (existing && existing.length) return 0;
-  const rows = HABIT_PRESETS.map((h) => ({
+  // v1.0.6 Y Round3: make idempotent by name — prevents duplicates if onboarding re-enters or setTimeout fires twice
+  const existing = await db.list('habits', { eq: { user_id: userId } });
+  const existingNames = new Set(existing.map((r) => (r.name || '').trim().toLowerCase()));
+  const rows = HABIT_PRESETS.filter((h) => !existingNames.has((h.name || '').trim().toLowerCase())).map((h) => ({
     user_id: userId,
     name: h.name,
     category: h.category,
@@ -25,6 +26,7 @@ export async function seedHabits(userId) {
     is_active: true,
     created_at: nowIso(),
   }));
+  if (!rows.length) return 0;
   await db.insertMany('habits', rows);
   return rows.length;
 }

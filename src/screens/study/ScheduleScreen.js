@@ -179,7 +179,12 @@ export function ScheduleScreen({ navigation, route }) {
         userId: profile.id,
       });
       setCoverage(rows.coverage || null);
-      if (rows.length) await db.insertMany('schedule', rows);
+      // v1.0.6 Y Round2: chunk insert — 383 sessions for 248-day exam would fail wholesale in one batch
+      if (rows.length) {
+        for (let i = 0; i < rows.length; i += 100) {
+          await db.insertMany('schedule', rows.slice(i, i + 100));
+        }
+      }
       if (syllabus.length) {
         const deadlines = autoSetDeadlines(
           syllabus,
@@ -287,11 +292,11 @@ export function ScheduleScreen({ navigation, route }) {
             </View>
           );
         })}
-        {arcOf(profile) ? (
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: arcOf(profile).theme, marginLeft: 8 }}>
-            {arcOf(profile).emoji} {arcOf(profile).label} — {effectiveDailyHours(profile)}h/day
+        {(() => { const arc = arcOf(profile); return arc ? (
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: arc.theme, marginLeft: 8 }}>
+            {arc.emoji} {arc.label} — {effectiveDailyHours(profile)}h/day
           </Text>
-        ) : null}
+        ) : null; })()}
       </View>
 
       {genError ? (
@@ -334,7 +339,7 @@ export function ScheduleScreen({ navigation, route }) {
             </Text>
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
               {coverage.classDoneBy && coverage.nextSchoolExam
-                ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.start}) 📅`
+                ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label || coverage.nextSchoolExam.start || 'School Exam'}" (${coverage.nextSchoolExam.start || ''}) 📅`
                 : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
             </Text>
             {coverage.totalRequiredHours ? (
@@ -522,7 +527,7 @@ function DailyView({ selected, setSelected, sessions, onComplete, onSkip, onGene
 const TRACK_BADGE = { class: { icon: '🏫', label: 'Class' }, olympiad: { icon: '🏅', label: 'Olympiad' }, exam: { icon: '🎯', label: 'Exam' } };
 
 const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
-  const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study;
+  const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study || { icon: '📚', label: 'Study', color: '#6D28D9' };
   const color = type.color;
   const completed = s.status === 'completed';
   const skipped = s.status === 'skipped';
