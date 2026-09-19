@@ -157,15 +157,25 @@ function normalizeQuestionShape(q, subject, topic, difficultyDefault) {
   else if (q.a && q.b) options = [q.a, q.b, q.c, q.d].filter(Boolean);
 
   options = options.map((o) => String(o).trim()).filter(Boolean);
+  // v1.0.6 Y Round2: don't default typeless to MCQ
+  const declaredType = String(q.type || '').toLowerCase();
+  const hasOptions = options.length >= 2;
+  let isMCQ = declaredType.includes('mcq') || (!declaredType && hasOptions);
   // For non-MCQ types, options may be empty — allow but ensure at least 2 for MCQ
-  const isMCQ = (q.type || 'mcq').toLowerCase().includes('mcq') || options.length >= 2;
+  // Never discard valid text — downgrade to written
+  if (isMCQ && options.length < 2) {
+    isMCQ = false;
+  }
   if (isMCQ) {
-    if (options.length < 2) return null;
     while (options.length < 4) options.push(`Option ${options.length + 1}`);
     options = options.slice(0, 4);
   }
 
   const answerIdx = isMCQ ? resolveAnswerIndex({ ...q, options }) : 0;
+  let finalType = declaredType || (isMCQ ? 'mcq' : 'saq');
+  if (!['mcq','vsaq','saq','laq'].some(t => finalType.includes(t))) {
+    finalType = isMCQ ? 'mcq' : 'saq';
+  }
 
   return {
     subject: q.subject || subject || 'AI Quiz',
@@ -177,7 +187,7 @@ function normalizeQuestionShape(q, subject, topic, difficultyDefault) {
     answer_text: options[answerIdx] || q.answer_text || q.answer || '',
     explanation: String(q.explanation || q.why || q.reason || '').slice(0, 400),
     marks: q.marks || 1,
-    type: q.type || (isMCQ ? 'mcq' : 'saq'),
+    type: finalType,
     source: 'ai',
   };
 }
@@ -388,9 +398,15 @@ function normalizeTestQuestion(q) {
   else if (q.a && q.b) options = [q.a, q.b, q.c, q.d].filter(Boolean);
 
   options = options.map((o) => String(o).trim()).filter(Boolean);
-  const isMCQ = (q.type || 'mcq').toLowerCase().includes('mcq') || options.length >= 2;
+  // v1.0.6 Y Round2: don't default typeless questions to MCQ — decide from evidence
+  const declaredType = String(q.type || '').toLowerCase();
+  const hasOptions = options.length >= 2;
+  let isMCQ = declaredType.includes('mcq') || (!declaredType && hasOptions);
 
-  if (isMCQ && options.length < 2) return null;
+  // v1.0.6 Y Round2: never discard a question that has valid text — downgrade to written instead
+  if (isMCQ && options.length < 2) {
+    isMCQ = false;
+  }
   if (isMCQ) {
     while (options.length < 4) options.push(`Option ${options.length + 1}`);
     options = options.slice(0, 4);
@@ -398,6 +414,12 @@ function normalizeTestQuestion(q) {
 
   const answerIdx = isMCQ ? resolveAnswerIndex({ ...q, options }) : 0;
   const answerText = isMCQ ? options[answerIdx] : (q.answer || q.answer_text || '');
+
+  // preserve declared type if present, else infer
+  let finalType = declaredType || (isMCQ ? 'mcq' : 'saq');
+  if (!['mcq','vsaq','saq','laq'].some(t => finalType.includes(t))) {
+    finalType = isMCQ ? 'mcq' : 'saq';
+  }
 
   return {
     q: String(qText).slice(0, 600),
@@ -407,7 +429,7 @@ function normalizeTestQuestion(q) {
     explanation: String(q.explanation || q.why || '').slice(0, 400),
     why: String(q.why || q.explanation || '').slice(0, 400),
     marks: q.marks || 1,
-    type: q.type || (isMCQ ? 'mcq' : 'saq'),
+    type: finalType,
     topic: q.topic || '',
   };
 }
@@ -438,10 +460,10 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer.`,
       schemaHint: `{
   "sets": [
     { "set": "A", "sections": [
-      { "type": "mcq", "label": "Section A — MCQ (1 mark each)",
-        "questions": [ { "q": "text", "options": ["a","b","c","d"], "answer": "b", "marks": 1 } ] },
-      { "type": "vsaq", "label": "Section B — VSAQ (2 marks each)",
-        "questions": [ { "q": "text", "answer": "model answer", "marks": 2 } ] }
+      { "type": "mcq", "label": "Section A — MCQ (1 mark each)", "questions": [ { "type": "mcq", "q": "text", "options": ["a","b","c","d"], "answer": "b", "marks": 1 } ] },
+      { "type": "vsaq", "label": "Section B — VSAQ (2 marks each)", "questions": [ { "type": "vsaq", "q": "text", "answer": "model answer", "marks": 2 } ] },
+      { "type": "saq", "label": "Section C — SAQ (3 marks each)", "questions": [ { "type": "saq", "q": "text", "answer": "model answer", "marks": 3 } ] },
+      { "type": "laq", "label": "Section D — LAQ (5 marks each)", "questions": [ { "type": "laq", "q": "text", "answer": "model answer", "marks": 5 } ] }
     ] }
   ],
   "tips": "one line of exam tips"
@@ -450,18 +472,27 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer.`,
       noCache: true,
     });
 
-    // Normalize sets
+    // Normalize sets — v1.0.6 Y Round2: filter empty sections, never render bare 'Section'
     if (Array.isArray(data?.sets)) {
-      data.sets = data.sets.map((set) => ({
-        set: set.set || 'A',
-        sections: Array.isArray(set.sections)
-          ? set.sections.map((sec) => ({
-              type: sec.type || 'mcq',
-              label: sec.label || sec.type || 'Section',
-              questions: Array.isArray(sec.questions) ? sec.questions.map(normalizeTestQuestion).filter(Boolean) : [],
-            }))
-          : [],
-      }));
+      const labelForType = (type, idx) => {
+        const t = String(type || '').toLowerCase();
+        if (t.includes('mcq')) return `Section ${String.fromCharCode(65+idx)} — MCQ`;
+        if (t.includes('vsaq')) return `Section ${String.fromCharCode(65+idx)} — VSAQ`;
+        if (t.includes('saq')) return `Section ${String.fromCharCode(65+idx)} — SAQ`;
+        if (t.includes('laq')) return `Section ${String.fromCharCode(65+idx)} — LAQ`;
+        return `Section ${String.fromCharCode(65+idx)} — ${type || 'Questions'}`;
+      };
+      data.sets = data.sets.map((set) => {
+        const rawSections = Array.isArray(set.sections) ? set.sections : [];
+        const normalized = rawSections.map((sec, idx) => {
+          const type = sec.type || sec.label || 'mcq';
+          // never fallback to literal 'Section' alone
+          const label = sec.label && sec.label.trim() !== 'Section' ? sec.label : (sec.type ? labelForType(sec.type, idx) : labelForType(type, idx));
+          const questions = Array.isArray(sec.questions) ? sec.questions.map(normalizeTestQuestion).filter(Boolean) : [];
+          return { type, label, questions };
+        }).filter(s => s.questions && s.questions.length > 0); // v1.0.6 Y Round2: do not render empty sections
+        return { set: set.set || 'A', sections: normalized };
+      });
       // Count total questions
       const total = data.sets.reduce((a, s) => a + s.sections.reduce((aa, sec) => aa + (sec.questions?.length || 0), 0), 0);
       data._totalQuestions = total;
@@ -536,10 +567,45 @@ IMPORTANT: Return EXACTLY ${reqCount} questions, no fewer.`,
   return result.data;
 }
 
+function normalizeMindMapResponse(data, fallbackChapters) {
+  if (!data) return { chapters: [] };
+  let chapters = data.chapters || data.maps || data.mindMaps || data.mind_maps || [];
+  if (!Array.isArray(chapters)) chapters = [];
+  const clean = chapters.map((c, idx) => {
+    const chapterName = c.chapter || c.title || c.name || fallbackChapters[idx]?.chapter || `Chapter ${idx+1}`;
+    let root = c.root || c.map || c.mindmap || c.central || null;
+    // Alternate shapes: if root is string, wrap; if c has branches directly, build root
+    if (!root) {
+      if (Array.isArray(c.branches)) {
+        root = { label: c.central || chapterName, children: c.branches.map(b => typeof b === 'string' ? { label: b } : { label: b.label || b.name || 'Branch', children: (b.points || b.children || []).map(p => typeof p === 'string' ? { label: p } : { label: p.label || String(p) }) }) };
+      } else if (Array.isArray(c.points)) {
+        root = { label: chapterName, children: c.points.map(p => typeof p === 'string' ? { label: p } : { label: p.label || String(p) }) };
+      } else if (typeof c === 'object' && c.label) {
+        root = c;
+      }
+    }
+    if (typeof root === 'string') root = { label: root, children: [] };
+    if (!root || !root.label) return null;
+    // ensure children are objects with label
+    const normalizeNode = (n) => {
+      if (typeof n === 'string') return { label: n, children: [] };
+      if (!n || typeof n !== 'object') return null;
+      const label = n.label || n.name || n.text || n.title || '';
+      if (!label) return null;
+      const children = Array.isArray(n.children) ? n.children.map(normalizeNode).filter(Boolean) : Array.isArray(n.points) ? n.points.map(normalizeNode).filter(Boolean) : [];
+      return { label: String(label).slice(0, 120), children };
+    };
+    const normRoot = normalizeNode(root);
+    if (!normRoot) return null;
+    return { chapter: String(chapterName).slice(0, 120), root: normRoot };
+  }).filter(Boolean);
+  return { chapters: clean };
+}
+
 export async function aiGenerateMindMap({ profile = {}, chapters = [] }) {
   const ctx = buildProfileContext(profile);
   const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
-  return askAIJSON({
+  const raw = await askAIJSON({
     prompt: `Create a one-page revision MIND MAP as JSON for each of these chapters: ${esc(chList)}.
 Student: ${esc(ctx)}.
 For each chapter: a central idea with 4-6 main branches, each branch with 2-4 leaf points. Short phrases only (3-7 words), the kind a topper writes on one page. No markdown anywhere.`,
@@ -553,4 +619,10 @@ For each chapter: a central idea with 4-6 main branches, each branch with 2-4 le
     temperature: 0.4,
     noCache: true,
   });
+  const normalized = normalizeMindMapResponse(raw, chapters);
+  if (!normalized.chapters.length) {
+    // if AI returned empty, throw readable error so UI shows reason, not generic
+    throw new Error(raw?.chapters ? 'Mind map shape samajh nahi aaya — dobara try karo' : 'Mind map nahi bana — dobara try karo');
+  }
+  return normalized;
 }

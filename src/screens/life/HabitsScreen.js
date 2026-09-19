@@ -446,7 +446,7 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
       </Pressable>
 
       <View style={{ flex: 1.6 }}>
-        <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
+        <Text numberOfLines={2} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
           {habit.name}
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>

@@ -180,7 +180,7 @@ export function TestBuilderScreen({ navigation }) {
         <h1>StudentOS — ${escapeHtml(profile?.class_level || '')} Test · Set ${escapeHtml(s.set)}</h1>
         <div class="meta">Time: ${escapeHtml(timeMinutes || '—')} min · Max marks: ${escapeHtml(totalMarks || '—')} · Difficulty: ${difficulty}%</div>
         ${(s.sections || []).map((sec) => `
-          <h3>${escapeHtml(sec.label || sec.type)}</h3>
+          <h3>${escapeHtml((sec.label && String(sec.label).trim()) ? sec.label : (sec.type || 'Section'))}</h3>
           ${(sec.questions || []).map((q, i) => qHtml(q, i + 1)).join('')}`).join('')}
         <div class="ans"><b>Answer Key — Set ${escapeHtml(s.set)}</b>
           ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(getAnswerDisplay(q) ?? '—')}</div>`).join('')}
@@ -383,7 +383,7 @@ export function TestBuilderScreen({ navigation }) {
           {(result.data.sets.find((s) => s.set === setTab)?.sections || []).map((sec, si) => (
             <View key={si} style={{ marginBottom: 12 }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#6D28D9', marginBottom: 6 }}>
-                {sec.label || sec.type}
+                {(sec.label && String(sec.label).trim()) ? sec.label : (sec.type ? String(sec.type).toUpperCase() : 'Section')}
               </Text>
               {(sec.questions || []).map((q, qi) => (
                 <View key={qi} style={{ marginBottom: 8 }}>
@@ -480,12 +480,15 @@ export function TestBuilderScreen({ navigation }) {
 }
 
 function MapNode({ node, depth }) {
+  if (!node) return null;
+  const label = node.label || node.name || node.text || '';
+  if (!label) return null;
   const palette = ['#7C3AED', '#0891B2', '#F59E0B', '#10B981', '#EF4444', '#6366F1'];
   const color = palette[depth % palette.length];
   return (
     <View style={{ marginLeft: depth ? 14 : 0, borderLeftWidth: depth ? 1.5 : 0, borderLeftColor: '#E2E8F0', paddingLeft: depth ? 10 : 0, marginTop: 4 }}>
       <Text style={{ fontFamily: fonts.bodyMedium, fontSize: depth === 0 ? 13 : 12, color: depth === 0 ? color : '#334155' }}>
-        {depth === 0 ? '⭐ ' : '• '}{node.label}
+        {depth === 0 ? '⭐ ' : '• '}{label}
       </Text>
       {(node.children || []).map((c, i) => (
         <MapNode key={i} node={c} depth={depth + 1} />

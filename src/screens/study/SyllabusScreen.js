@@ -192,7 +192,7 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
-  const trackMeta = TRACKS[activeTrack];
+  const trackMeta = TRACKS[activeTrack] || TRACKS.class;
   const trackDone = trackRows.filter((r) => r.status === 'completed').length;
 
   return (
@@ -212,7 +212,7 @@ export function SyllabusScreen({ navigation }) {
       {/* Track switcher — CLASS is the default map */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 10 }}>
         {availableTracks.map((t) => {
-          const meta = TRACKS[t];
+          const meta = TRACKS[t] || TRACKS.class;
           const active = activeTrack === t;
           const count = rows.filter((r) => rowTrack(r) === t).length;
           return (
@@ -269,10 +269,10 @@ export function SyllabusScreen({ navigation }) {
             title={`${trackMeta.label} khali hai`}
             subtitle={
               set[activeTrack]
-                ? `${set[activeTrack].label} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
+                ? `${(set[activeTrack].label || trackMeta.label)} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
                 : 'Apna khud ka chapter add karo, ya AI se generate karao.'
             }
-            actionLabel={set[activeTrack] ? `Import ${set[activeTrack].label.split('·')[0].trim()}` : 'Add chapter'}
+            actionLabel={set[activeTrack] ? `Import ${(set[activeTrack].label || trackMeta.label).split('·')[0].trim()}` : 'Add chapter'}
             onAction={() => (set[activeTrack] ? importMyTrack() : setAddOpen(true))}
           />
         </Card>
@@ -474,7 +474,7 @@ function ChapterRow({ row, onOpen, onDelete }) {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text
-            numberOfLines={1}
+            numberOfLines={2}
             style={{
               fontFamily: fonts.bodyMedium,
               fontSize: 14,

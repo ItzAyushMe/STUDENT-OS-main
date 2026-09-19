@@ -88,7 +88,7 @@ export function QuizScreen({ navigation, route }) {
 
   // ---------- question generation (AI first, offline fallback) ----------
   const buildQuestions = async () => {
-    const cfg = MODES[mode];
+    const cfg = MODES[mode] || MODES.quick;
     let qs = [];
     if (mode === 'daily') {
       // AI first (class-aware), static arena bank as offline fallback
@@ -231,7 +231,8 @@ export function QuizScreen({ navigation, route }) {
     } else {
       const base = mode === 'boss' ? 40 : 20;
       xp = base;
-      await awardXP('QUIZ_COMPLETE', { amount: base, label: MODES[mode].label });
+      const modeMeta = MODES[mode] || MODES.quick;
+      await awardXP('QUIZ_COMPLETE', { amount: base, label: modeMeta.label });
       if (accuracy >= 90) {
         xp += 50;
         await awardXP('QUIZ_EXCELLENT');
@@ -292,7 +293,7 @@ export function QuizScreen({ navigation, route }) {
         </Card>
 
         <Button
-          title={`Start ${MODES[mode].label} 🚀`}
+          title={`Start ${(MODES[mode] || MODES.quick).label} 🚀`}
           mode="light"
           size="lg"
           loading={loading}
@@ -306,9 +307,10 @@ export function QuizScreen({ navigation, route }) {
   // ---------------- PLAYING ----------------
   if (phase === 'playing') {
     const q = questions[qIndex];
+    const modeLabel = (MODES[mode] || MODES.quick).label;
     return (
       <Screen mode="light">
-        <ScreenHeader title={`${MODES[mode].label}`} subtitle={`Q${qIndex + 1} of ${questions.length} · ${fmtClock(elapsed)}`} onBack={() => setPhase('setup')} />
+        <ScreenHeader title={`${modeLabel}`} subtitle={`Q${qIndex + 1} of ${questions.length} · ${fmtClock(elapsed)}`} onBack={() => setPhase('setup')} />
         <ProgressBar progress={(qIndex + (selected != null ? 1 : 0)) / questions.length} mode="light" color="#6D28D9" style={{ marginBottom: 18 }} />
         <Card mode="light" style={{ marginBottom: 18, padding: 18 }}>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#6D28D9', letterSpacing: 1, marginBottom: 10 }}>
@@ -389,7 +391,7 @@ export function QuizScreen({ navigation, route }) {
   return (
     <Screen mode="light">
       <Confetti trigger={confetti} origin={{ x: '50%', y: '22%' }} />
-      <ScreenHeader title="Quiz Results" subtitle={MODES[mode].label} onBack={onBack} />
+      <ScreenHeader title="Quiz Results" subtitle={(MODES[mode] || MODES.quick).label} onBack={onBack} />
       <Card mode="light" style={{ alignItems: 'center', marginBottom: 14 }}>
         <Text style={{ fontSize: 44 }}>{r.accuracy >= 90 ? '🏆' : r.accuracy >= 70 ? '🔥' : r.accuracy >= 50 ? '🙂' : '🌱'}</Text>
         <Text style={{ fontFamily: fonts.bodyBold, fontSize: 40, color: r.accuracy >= 70 ? '#059669' : '#D97706', marginTop: 8 }}>

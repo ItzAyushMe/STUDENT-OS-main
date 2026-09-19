@@ -43,6 +43,7 @@ export function OnboardingScreen() {
   const [busy, setBusy] = useState(false);
   const [buildMsg, setBuildMsg] = useState(0);
   const spin = useRef(new Animated.Value(0)).current;
+  const seededRef = useRef(false);
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
 
   // "Building your quest…" spinner
@@ -64,6 +65,8 @@ export function OnboardingScreen() {
       setBuildMsg(i);
     }, 700);
     const done = setTimeout(async () => {
+      if (seededRef.current) return;
+      seededRef.current = true;
       try {
         const topics = await seedSyllabus(profile.id, {
           class_level: form.class_level,
