@@ -152,19 +152,32 @@ async function geminiRequest(model, { prompt, system, json, temperature, key }) 
   if (system) {
     body.systemInstruction = { parts: [{ text: system }] };
   }
-  const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+  // v1.0.6 Y Round1: AI timeout — 45s per request
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+    }
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+    if (!text) throw new Error('Gemini returned an empty response.');
+    return text;
+  } catch (e) {
+    if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
+      throw new Error('Gemini timeout — AI ne 45s se zyada time liya, dobara try karo');
+    }
+    throw e;
+  } finally {
+    clearTimeout(to);
   }
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-  if (!text) throw new Error('Gemini returned an empty response.');
-  return text;
 }
 
 async function groqRequest(model, { prompt, system, json, temperature, key }) {
@@ -179,19 +192,31 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
     max_tokens: 8192,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
   };
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Groq ${res.status}: ${detail.slice(0, 160)}`);
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Groq ${res.status}: ${detail.slice(0, 160)}`);
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content || '';
+    if (!text) throw new Error('Groq returned an empty response.');
+    return text;
+  } catch (e) {
+    if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
+      throw new Error('Groq timeout — AI ne 45s se zyada time liya, dobara try karo');
+    }
+    throw e;
+  } finally {
+    clearTimeout(to);
   }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content || '';
-  if (!text) throw new Error('Groq returned an empty response.');
-  return text;
 }
 
 function looksLikeMissingModel(errMsg) {
@@ -212,20 +237,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //  - primary model gets 3 attempts (2s → 4s backoff) on transient errors
 //  - transient/missing-model errors then advance to the next model
 //  - auth errors fail fast (retrying won't help)
+//  - v1.0.6 Y Round1: cap total time across retries to 90s so spinner never hangs forever
 async function callProvider(models, requester, args) {
   let lastErr;
+  const start = Date.now();
+  const MAX_TOTAL_MS = 90000;
   for (let mi = 0; mi < models.length; mi++) {
     const attempts = mi === 0 ? 3 : 1; // backoff retries only on the primary model
     const waits = [0, 2000, 4000];
     for (let a = 0; a < attempts; a++) {
+      if (Date.now() - start > MAX_TOTAL_MS) {
+        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded, dobara try karo`);
+      }
       if (waits[a]) await sleep(waits[a]);
       try {
         return await requester(models[mi], args);
       } catch (e) {
         lastErr = e;
         const msg = String(e?.message || '');
-        if (isRetryable(msg) && a < attempts - 1) continue; // wait + retry same model
-        if (isRetryable(msg) || looksLikeMissingModel(msg)) break; // next model
+        // timeout is retryable to next model/provider, but respect total cap
+        const timeoutLike = /timeout/i.test(msg);
+        if ((isRetryable(msg) || timeoutLike) && a < attempts - 1) continue; // wait + retry same model
+        if (isRetryable(msg) || looksLikeMissingModel(msg) || timeoutLike) break; // next model
         throw e; // hard error (bad key, bad request…) — no point continuing
       }
     }
@@ -244,6 +277,9 @@ async function callGroq(args) {
 // Plain-English translation of provider errors (FIX C: honest messages).
 function humanizeError(provider, errMsg) {
   const m = String(errMsg || '');
+  if (/timeout/i.test(m)) {
+    return `${provider} ne time liya — 45s timeout, dobara try karo`;
+  }
   if (/decommissioned|not found|does not exist|model_not_found/i.test(m)) {
     return `${provider} ka model retire ho gaya tha — naye build me fix ho gaya hai. App refresh karke try karo.`;
   }

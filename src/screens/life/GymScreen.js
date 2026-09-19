@@ -90,9 +90,10 @@ export function GymScreen({ navigation }) {
         xp_earned: 30,
         created_at: nowIso(),
       });
-      await awardXP('WORKOUT');
+      // v1.0.6 Y Round1: confetti only after XP actually saved
+      const xpRes = await awardXP('WORKOUT');
+      if (xpRes) setConfetti(Date.now());
       setEntries({});
-      setConfetti(Date.now());
       await load();
     } finally {
       setSaving(false);

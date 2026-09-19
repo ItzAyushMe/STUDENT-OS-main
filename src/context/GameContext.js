@@ -77,6 +77,7 @@ export function GameProvider({ children }) {
         return result;
       } catch (e) {
         console.warn('[GameContext] awardXP failed', e?.message);
+        try { pushNotice(`XP save nahi hua: ${e?.message || 'unknown error'}`); } catch {}
         return null;
       }
       };

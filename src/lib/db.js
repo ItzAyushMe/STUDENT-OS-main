@@ -175,9 +175,27 @@ export const db = {
   async insert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).insert(full).select().single();
-      if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).insert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        // v1.0.6 Y Round1: fallback if updated_at / created_at column missing in live DB (old deployments)
+        if (msg.includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        if (msg.includes('created_at') && full.created_at) {
+          const { created_at: _c, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.insert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     rows.push(full);
@@ -189,9 +207,26 @@ export const db = {
     if (!list || !list.length) return [];
     if (isRemote()) {
       const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
-      const { data, error } = await supabase.from(table).insert(full).select();
-      if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-      return data || full;
+      try {
+        const { data, error } = await supabase.from(table).insert(full).select();
+        if (error) throw error;
+        return data || full;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        if (msg.includes('updated_at')) {
+          const without = full.map(({ updated_at: _u, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        if (msg.includes('created_at')) {
+          const without = full.map(({ created_at: _c, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));

@@ -121,8 +121,9 @@ export function HabitsScreen({ navigation }) {
       frozen: false,
     });
     setLogs((prev) => [...prev, row]);
-    setConfetti(Date.now());
-    await awardXP('HABIT');
+    // v1.0.6 Y Round1: confetti only after XP actually saved, otherwise user sees false success
+    const xpRes = await awardXP('HABIT');
+    if (xpRes) setConfetti(Date.now());
   };
 
   const useFreeze = async (habit) => {
