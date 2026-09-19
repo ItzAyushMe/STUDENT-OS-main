@@ -79,7 +79,8 @@ create table if not exists public.syllabus (
   progress_percent integer default 0 check (progress_percent between 0 and 100),
   deadline date,
   completed_at timestamptz,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.syllabus enable row level security;
@@ -106,7 +107,8 @@ create table if not exists public.schedule (
   status text default 'pending' check (status in ('pending','completed','skipped')),
   duration_minutes integer default 45,
   priority text default 'normal',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.schedule enable row level security;
@@ -132,7 +134,8 @@ create table if not exists public.focus_sessions (
   reflection text,
   xp_earned integer default 0,
   distractions integer default 0,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.focus_sessions enable row level security;
@@ -155,7 +158,8 @@ create table if not exists public.habits (
   part text default 'morning',            -- morning | afternoon | evening
   target_time text,
   is_active boolean default true,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.habits enable row level security;
@@ -179,7 +183,8 @@ create table if not exists public.habit_logs (
   completed_at timestamptz,
   streak_count integer default 0,
   -- app data layer stamps every inserted row with created_at (BUG #1 fix)
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.habit_logs enable row level security;
@@ -206,7 +211,8 @@ create table if not exists public.flashcards (
   mastery_level integer default 0 check (mastery_level between 0 and 5),
   next_review timestamptz default now(),
   times_reviewed integer default 0,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.flashcards enable row level security;
@@ -232,7 +238,8 @@ create table if not exists public.quiz_results (
   time_taken integer default 0,
   xp_earned integer default 0,
   weak_topics jsonb default '[]',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.quiz_results enable row level security;
@@ -264,7 +271,8 @@ create table if not exists public.content (
   topic text,
   ai_summary text,
   file_size numeric,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.content enable row level security;
@@ -285,6 +293,7 @@ create table if not exists public.friends (
   friend_name text,
   status text default 'pending' check (status in ('pending','accepted','blocked')),
   created_at timestamptz default now(),
+  updated_at timestamptz default now(),
   unique (user_id, friend_id)
 );
 
@@ -322,6 +331,7 @@ create table if not exists public.leaderboard (
   social_xp integer default 0,
   rank integer,
   created_at timestamptz default now(),
+  updated_at timestamptz default now(),
   unique (user_id, week_start)
 );
 
@@ -351,7 +361,8 @@ create table if not exists public.deadlines (
   deadline_date date,
   status text default 'pending' check (status in ('pending','in_progress','completed','missed')),
   priority text default 'normal',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.deadlines enable row level security;
@@ -373,7 +384,8 @@ create table if not exists public.xp_events (
   amount integer not null default 0,
   label text,
   meta jsonb,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.xp_events enable row level security;
@@ -412,7 +424,8 @@ create table if not exists public.mood_logs (
   mood integer check (mood between 1 and 5),
   note text,
   ai_reply text,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.mood_logs enable row level security;
@@ -433,7 +446,8 @@ create table if not exists public.workout_logs (
   plan_name text,
   exercises jsonb default '[]',           -- [{name, sets, reps, weight}]
   xp_earned integer default 30,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.workout_logs enable row level security;
@@ -504,3 +518,22 @@ alter table public.schedule add constraint schedule_track_check
 alter table public.syllabus drop constraint if exists syllabus_track_check;
 alter table public.syllabus add constraint syllabus_track_check
   check (track in ('class','olympiad','exam') or track like 'custom:%');
+
+
+-- v1.0.6 recovery: updated_at column agreement — db.js update() stamps updated_at on every update.
+-- All tables that get updated must have updated_at, otherwise cloud mode fails.
+alter table public.syllabus     add column if not exists updated_at timestamptz default now();
+alter table public.schedule     add column if not exists updated_at timestamptz default now();
+alter table public.focus_sessions add column if not exists updated_at timestamptz default now();
+alter table public.habits       add column if not exists updated_at timestamptz default now();
+alter table public.habit_logs   add column if not exists updated_at timestamptz default now();
+alter table public.flashcards   add column if not exists updated_at timestamptz default now();
+alter table public.quiz_results add column if not exists updated_at timestamptz default now();
+alter table public.content      add column if not exists updated_at timestamptz default now();
+alter table public.friends      add column if not exists updated_at timestamptz default now();
+alter table public.leaderboard  add column if not exists updated_at timestamptz default now();
+alter table public.deadlines    add column if not exists updated_at timestamptz default now();
+alter table public.xp_events    add column if not exists updated_at timestamptz default now();
+alter table public.mood_logs    add column if not exists updated_at timestamptz default now();
+alter table public.workout_logs add column if not exists updated_at timestamptz default now();
+

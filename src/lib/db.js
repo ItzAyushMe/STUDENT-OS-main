@@ -146,9 +146,15 @@ function sortRows(rows, order) {
 export const db = {
   async list(table, opts = {}) {
     if (isRemote()) {
+      // v1.0.6 J: guard empty in() — Supabase errors on empty array
+      for (const [col, vals] of Object.entries(opts.in || {})) {
+        if (!Array.isArray(vals) || vals.length === 0) {
+          return [];
+        }
+      }
       let q = supabase.from(table).select('*');
       for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
-      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val); // L-8 (audit): was silently ignored in cloud mode
+      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
       for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
       for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
       for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
@@ -196,9 +202,19 @@ export const db = {
   async update(table, id, patch) {
     const full = { ...patch, updated_at: nowIso() };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
-      if (error) throw new Error(`[db.update ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // v1.0.6 recovery: fallback if updated_at column missing in remote DB (old deployments)
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
+          if (error) throw new Error(`[db.update ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.update ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     let updated = null;
@@ -216,9 +232,20 @@ export const db = {
   async upsert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).upsert(full).select().single();
-      if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).upsert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // fallback without updated_at if column missing
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).upsert(without).select().single();
+          if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.upsert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const i = rows.findIndex((r) => r.id === full.id);

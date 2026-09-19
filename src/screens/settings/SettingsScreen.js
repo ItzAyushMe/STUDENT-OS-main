@@ -118,9 +118,9 @@ export function SettingsScreen({ navigation }) {
     );
   };
 
-  // v1.0.2 + audit M-8: delete my account — wipes every row, signs out,
+  // v1.0.6 recovery I: delete my account — wipes every row, signs out,
   // clears local data, and (if the delete-user Edge Function is deployed)
-  // removes the Supabase login itself so the email can't sign back in.
+  // removes the Supabase login itself. Fixed user column, RLS, entrypoint, swallowed errors.
   const deleteAccount = () => {
     confirmAlert(
       'Delete your account?',
@@ -131,16 +131,47 @@ export function SettingsScreen({ navigation }) {
           'Data erase ho jayega. Note: agar delete-user function deploy nahi hua hai to tumhara login (email/Google) auth provider pe reh jayega — sign in karke fresh start kar sakte ho. Continue?',
           async () => {
             setDeleting(true);
+            let lastErr = null;
             try {
               if (cloudMode && profile?.id) {
-                // M-8 proper fix: best-effort call to the Edge Function that
-                // deletes the auth user server-side (service-role). Cascades
-                // wipe every table via ON DELETE CASCADE.
+                // v1.0.6: delete data rows FIRST (while session still valid), then call Edge Function.
+                // users table uses id column, not user_id — fixed.
+                // friends needs both sides.
+                const tablesByUserId = [
+                  'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
+                  'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
+                  'habits', 'focus_sessions', 'leaderboard', 'friends',
+                ];
+                for (const t of tablesByUserId) {
+                  try {
+                    await db.removeWhere(t, { user_id: profile.id });
+                  } catch (e) {
+                    console.warn(`[deleteAccount] failed to delete ${t} by user_id:`, e?.message);
+                    lastErr = e;
+                  }
+                }
+                // friends: other side where this user is friend_id
+                try {
+                  await db.removeWhere('friends', { friend_id: profile.id });
+                } catch (e) {
+                  console.warn('[deleteAccount] failed to delete friends by friend_id:', e?.message);
+                  lastErr = e;
+                }
+                // users table uses id column
+                try {
+                  const { error } = await supabase.from('users').delete().eq('id', profile.id);
+                  if (error) throw error;
+                } catch (e) {
+                  console.warn('[deleteAccount] failed to delete users row:', e?.message);
+                  lastErr = e;
+                }
+
+                // Now try Edge Function to delete auth user (service-role)
                 try {
                   const { data: authData } = await supabase.auth.getSession();
                   const token = authData?.session?.access_token;
                   if (token) {
-                    await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
+                    const res = await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
                       method: 'POST',
                       headers: {
                         'Content-Type': 'application/json',
@@ -148,21 +179,27 @@ export function SettingsScreen({ navigation }) {
                       },
                       body: JSON.stringify({ user_id: profile.id }),
                     });
+                    if (!res.ok) {
+                      const txt = await res.text().catch(() => '');
+                      console.warn('[deleteAccount] Edge Function failed:', res.status, txt);
+                      // Don't throw — data already wiped, auth deletion is best-effort
+                    }
                   }
-                } catch { /* function not deployed — rows are wiped below anyway */ }
-                const tables = [
-                  'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
-                  'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
-                  'habits', 'focus_sessions', 'leaderboard', 'friends', 'users',
-                ];
-                for (const t of tables) {
-                  try { await db.removeWhere(t, { user_id: profile.id }); } catch { /* RLS/best-effort */ }
+                } catch (e) {
+                  console.warn('[deleteAccount] Edge Function call failed (not deployed?):', e?.message);
+                  // best-effort, don't block
                 }
-                try { await db.removeWhere('friends', { friend_id: profile.id }); } catch { /* other side keeps a ghost entry */ }
               }
               await wipeLocalData();
               try { await AsyncStorage.removeItem('sos.session'); } catch { /* ignore */ }
               await signOut();
+              if (lastErr) {
+                // Show last error after signout? No, already signed out. Log kept.
+                console.warn('[deleteAccount] completed with some row delete failures:', lastErr?.message);
+              }
+            } catch (e) {
+              console.error('[deleteAccount] unexpected error:', e);
+              infoAlert('Delete failed', e?.message || 'Kuch gadbad ho gayi — dobara try karo.');
             } finally {
               setDeleting(false);
             }

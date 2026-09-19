@@ -223,9 +223,22 @@ export function generateSchedule(opts) {
 
   const today = todayStr();
   const examLimit = examDate ? dayjs(examDate) : null;
+  const olympiadLimit = olympiadDate ? dayjs(olympiadDate) : null;
   const rollingLimit = dayjs(today).add(weeks * 7, 'day');
-  const horizon =
-    examLimit && examLimit.isBefore(rollingLimit) ? examLimit : rollingLimit;
+  // v1.0.6 recovery: horizon must cover exam/olympiad/school exams beyond rolling window, up to 365 days
+  // Previously used min( exam, rolling ) which stopped at 42 days even when exam was 249 days away.
+  let horizon = rollingLimit;
+  if (examLimit && examLimit.isAfter(horizon)) horizon = examLimit;
+  if (olympiadLimit && olympiadLimit.isAfter(horizon)) horizon = olympiadLimit;
+  // also consider furthest school exam date
+  const examsForHorizon = allSchoolExams(schoolExams);
+  if (examsForHorizon.length) {
+    const furthestSchool = dayjs(examsForHorizon[examsForHorizon.length - 1].end || examsForHorizon[examsForHorizon.length - 1].start);
+    if (furthestSchool.isAfter(horizon)) horizon = furthestSchool;
+  }
+  // cap at 365 days as per historical target
+  const maxHorizon = dayjs(today).add(365, 'day');
+  if (horizon.isAfter(maxHorizon)) horizon = maxHorizon;
   const totalDays = Math.max(1, horizon.diff(dayjs(today), 'day'));
 
   const factor = difficultyFactor(prepLevel);
@@ -436,7 +449,14 @@ export function generateSchedule(opts) {
   }
 
   // Track coverage summary — powers the priority banner in the UI
+  // v1.0.6 recovery: honest coverage warning when required hrs/day exceeds available
   const nextSchool = nextSchoolExamOnOrAfter(exams, today);
+  const totalRequiredHours = Object.values(pendingByTrack).flat().reduce((a, r) => a + (r.estimated_hours || 4) * factor, 0);
+  const totalAvailableHours = totalDays * dailyHours;
+  const requiredPerDay = totalDays > 0 ? totalRequiredHours / totalDays : 0;
+  const coverageWarning = requiredPerDay > dailyHours
+    ? `⚠️ Need ${requiredPerDay.toFixed(1)} hrs/day but you have ${dailyHours} hrs/day — ${ (requiredPerDay - dailyHours).toFixed(1)} hrs short. Increase daily hours or extend exam date.`
+    : null;
   const coverage = {
     priorityOrder: activeOrder,
     timeSplit: prio.timeSplit,
@@ -451,6 +471,10 @@ export function generateSchedule(opts) {
       .map(([t, rows]) => ({ id: t, name: prio.custom?.[t]?.name || t, total: rows.length, planned: covered[t] || 0 })),
     nextSchoolExam: nextSchool,
     classDoneBy: nextSchool ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')) : null,
+    totalRequiredHours: Math.round(totalRequiredHours),
+    totalAvailableHours: Math.round(totalAvailableHours),
+    requiredPerDay: Math.round(requiredPerDay * 10) / 10,
+    coverageWarning,
   };
   out.coverage = coverage;
   return out;

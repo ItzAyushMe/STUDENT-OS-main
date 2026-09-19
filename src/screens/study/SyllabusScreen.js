@@ -133,7 +133,7 @@ export function SyllabusScreen({ navigation }) {
       completed_at: null,
       created_at: nowIso(),
     }));
-    // avoid duplicate chapters for the same subject+track
+    // v1.0.6 recovery H: avoid duplicate chapters for same subject+track, preserve completed
     const existing = new Set(rows.filter((r) => rowTrack(r) === track).map((r) => `${r.subject}::${r.chapter}`));
     const fresh = rowsToInsert.filter((r) => !existing.has(`${r.subject}::${r.chapter}`));
     if (fresh.length) await db.insertMany('syllabus', fresh);
@@ -157,7 +157,8 @@ export function SyllabusScreen({ navigation }) {
         exam: activeTrack === 'exam' ? profile?.competitive_exam || '' : '',
         subjects: '',
       });
-      const existing = new Set(rows.map((r) => `${r.subject}::${r.chapter}`));
+      // v1.0.6 recovery H: filter per track only, preserve completed, no dupes
+      const existing = new Set(rows.filter((r) => rowTrack(r) === activeTrack).map((r) => `${r.subject}::${r.chapter}`));
       const fresh = gen
         .filter((r) => !existing.has(`${r.subject}::${r.chapter}`))
         .map((r) => ({

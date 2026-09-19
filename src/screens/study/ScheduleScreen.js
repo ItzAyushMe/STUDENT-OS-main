@@ -72,7 +72,8 @@ export function ScheduleScreen({ navigation, route }) {
     setLoading(true);
     try {
       const from = dateStr(dayjs().subtract(30, 'day'));
-      const to = dateStr(dayjs().add(180, 'day'));
+      // v1.0.6 recovery: load up to 365 days to support long-horizon schedules
+      const to = dateStr(dayjs().add(365, 'day'));
       const data = await db.list('schedule', {
         eq: { user_id: profile.id },
         gte: { date: from },
@@ -153,7 +154,28 @@ export function ScheduleScreen({ navigation, route }) {
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
-        weeks: 6,
+        // v1.0.6 recovery: dynamic weeks to cover exam horizon up to 365 days
+        // Previously hardcoded 6 weeks (42 days) stopped early for 249-day exams
+        weeks: (() => {
+          const today = dayjs();
+          const exam = profile.exam_date ? dayjs(profile.exam_date) : null;
+          const olymp = profile.olympiad_date ? dayjs(profile.olympiad_date) : null;
+          let maxDate = today.add(6 * 7, 'day');
+          if (exam && exam.isAfter(maxDate)) maxDate = exam;
+          if (olymp && olymp.isAfter(maxDate)) maxDate = olymp;
+          if (Array.isArray(profile.school_exams) && profile.school_exams.length) {
+            for (const e of profile.school_exams) {
+              const d = e.end_date || e.start_date || e.date;
+              if (d) {
+                const sd = dayjs(d);
+                if (sd.isAfter(maxDate)) maxDate = sd;
+              }
+            }
+          }
+          const diffDays = Math.max(42, maxDate.diff(today, 'day'));
+          const weeksNeeded = Math.ceil(diffDays / 7);
+          return Math.min(52, Math.max(6, weeksNeeded)); // cap 52 weeks = 365 days
+        })(),
         userId: profile.id,
       });
       setCoverage(rows.coverage || null);
@@ -301,20 +323,34 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
-      {/* Priority coverage banner — class first, olympiad second, exam last */}
+      {/* Priority coverage banner — class first, olympiad second, exam last + v1.0.6 honest warning */}
       {coverage ? (
-        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
-            🏫 Class {coverage.classPlanned}/{coverage.classTotal} planned
-            {coverage.olympiadTotal ? ` · 🏅 Olympiad ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
-            {coverage.examTotal ? ` · 🎯 ${profile.competitive_exam || 'Exam'} ${coverage.examPlanned}/${coverage.examTotal}` : ''}
-          </Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
-            {coverage.classDoneBy && coverage.nextSchoolExam
-              ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.start}) 📅`
-              : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
-          </Text>
-        </Card>
+        <>
+          <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
+              🏫 Class {coverage.classPlanned}/{coverage.classTotal} planned
+              {coverage.olympiadTotal ? ` · 🏅 Olympiad ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
+              {coverage.examTotal ? ` · 🎯 ${profile.competitive_exam || 'Exam'} ${coverage.examPlanned}/${coverage.examTotal}` : ''}
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
+              {coverage.classDoneBy && coverage.nextSchoolExam
+                ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.start}) 📅`
+                : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
+            </Text>
+            {coverage.totalRequiredHours ? (
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed
+              </Text>
+            ) : null}
+          </Card>
+          {coverage.coverageWarning ? (
+            <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
+                {coverage.coverageWarning}
+              </Text>
+            </Card>
+          ) : null}
+        </>
       ) : null}
 
       {loading ? <Loading mode="light" /> : null}

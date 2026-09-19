@@ -33,6 +33,12 @@ function escapeHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function getAnswerDisplay(q) {
+  if (q?.answer_text) return q.answer_text;
+  if (Array.isArray(q?.options) && typeof q?.answer === 'number' && q.options[q.answer]) return q.options[q.answer];
+  return q?.answer ?? '—';
+}
+
 function printHtml(title, bodyHtml) {
   if (Platform.OS === 'web') {
     const w = window.open('', '_blank');
@@ -177,7 +183,7 @@ export function TestBuilderScreen({ navigation }) {
           <h3>${escapeHtml(sec.label || sec.type)}</h3>
           ${(sec.questions || []).map((q, i) => qHtml(q, i + 1)).join('')}`).join('')}
         <div class="ans"><b>Answer Key — Set ${escapeHtml(s.set)}</b>
-          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(q.answer ?? '—')}</div>`).join('')}
+          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(getAnswerDisplay(q) ?? '—')}</div>`).join('')}
         </div>
       </div>`).join('');
     printHtml('StudentOS Test', body);
@@ -191,7 +197,7 @@ export function TestBuilderScreen({ navigation }) {
       <h2>Questions</h2>
       ${r.questions.map((q, i) => qHtml(q, i + 1)).join('')}
       <div class="ans"><b>Answers</b>
-        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(q.answer ?? '—')}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
+        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(getAnswerDisplay(q) ?? '—')}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
       </div>`;
     printHtml('StudentOS Question Bank', body);
   };
@@ -225,7 +231,7 @@ export function TestBuilderScreen({ navigation }) {
         lines.push(`--- SET ${s.set} ---`);
         (s.sections || []).forEach((sec) => {
           lines.push(sec.label || sec.type);
-          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}${q.answer != null ? `\n   Ans: ${q.answer}` : ''}`));
+          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}${q.answer != null ? `\n   Ans: ${getAnswerDisplay(q)}` : ''}`));
         });
       });
     } else if (result.kind === 'bank') {
@@ -395,7 +401,7 @@ export function TestBuilderScreen({ navigation }) {
                   ) : null}
                   {showAnswers ? (
                     <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 3 }}>
-                      Ans: {String(q.answer ?? '—')}
+                      Ans: {String(getAnswerDisplay(q) ?? '—')}
                     </Text>
                   ) : null}
                 </View>
@@ -434,7 +440,7 @@ export function TestBuilderScreen({ navigation }) {
                 </View>
               ) : null}
               <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 2 }}>
-                Ans: {String(q.answer ?? '—')}{q.why ? ` — ${q.why}` : ''}
+                Ans: {String(getAnswerDisplay(q) ?? '—')}{q.why ? ` — ${q.why}` : ''}
               </Text>
             </View>
           ))}

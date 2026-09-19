@@ -318,95 +318,11 @@ export const QUOTES = [
 // SYLLABUS PRESETS (bundled starter syllabi)
 // Format: rows of { subject, chapter, weightage (0-5), estimated_hours }
 // ============================================================
-export const SYLLABUS_PRESETS = {
-  'class10_cbse': {
-    label: 'Class 10 · CBSE (Science + Maths)',
-    rows: [
-      { subject: 'Science', chapter: 'Chemical Reactions and Equations', weightage: 4, estimated_hours: 6 },
-      { subject: 'Science', chapter: 'Acids, Bases and Salts', weightage: 4, estimated_hours: 7 },
-      { subject: 'Science', chapter: 'Metals and Non-metals', weightage: 4, estimated_hours: 8 },
-      { subject: 'Science', chapter: 'Life Processes', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Control and Coordination', weightage: 3, estimated_hours: 7 },
-      { subject: 'Science', chapter: 'How do Organisms Reproduce?', weightage: 4, estimated_hours: 8 },
-      { subject: 'Science', chapter: 'Light — Reflection and Refraction', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Electricity', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Our Environment', weightage: 2, estimated_hours: 4 },
-      { subject: 'Maths', chapter: 'Real Numbers', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Polynomials', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Pair of Linear Equations', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Quadratic Equations', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Arithmetic Progressions', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Triangles', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Coordinate Geometry', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Trigonometry', weightage: 5, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Statistics and Probability', weightage: 3, estimated_hours: 7 },
-    ],
-  },
-  'class12_pcm': {
-    label: 'Class 11–12 · PCM (JEE base)',
-    rows: [
-      { subject: 'Physics', chapter: 'Units, Dimensions and Errors', weightage: 2, estimated_hours: 5 },
-      { subject: 'Physics', chapter: 'Kinematics', weightage: 4, estimated_hours: 10 },
-      { subject: 'Physics', chapter: 'Laws of Motion', weightage: 4, estimated_hours: 10 },
-      { subject: 'Physics', chapter: 'Work, Energy and Power', weightage: 4, estimated_hours: 9 },
-      { subject: 'Physics', chapter: 'Rotational Motion', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Thermodynamics', weightage: 5, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Electrostatics', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Current Electricity', weightage: 5, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Magnetism and EMI', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Optics', weightage: 4, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Modern Physics', weightage: 5, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Mole Concept and Stoichiometry', weightage: 4, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Atomic Structure', weightage: 4, estimated_hours: 8 },
-      { subject: 'Chemistry', chapter: 'Chemical Bonding', weightage: 5, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Thermodynamics and Equilibrium', weightage: 5, estimated_hours: 14 },
-      { subject: 'Chemistry', chapter: 'Electrochemistry', weightage: 4, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Chemical Kinetics', weightage: 4, estimated_hours: 8 },
-      { subject: 'Chemistry', chapter: 'p-Block Elements', weightage: 4, estimated_hours: 12 },
-      { subject: 'Chemistry', chapter: 'Organic Chemistry — GOC', weightage: 5, estimated_hours: 14 },
-      { subject: 'Chemistry', chapter: 'Organic — Hydrocarbons & Haloalkanes', weightage: 4, estimated_hours: 12 },
-      { subject: 'Maths', chapter: 'Sets, Relations and Functions', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Complex Numbers and Quadratic Equations', weightage: 4, hours: 10, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Sequences and Series', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Permutations and Combinations', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Binomial Theorem', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Matrices and Determinants', weightage: 5, estimated_hours: 12 },
-      { subject: 'Maths', chapter: 'Limits, Continuity and Differentiability', weightage: 5, estimated_hours: 14 },
-      { subject: 'Maths', chapter: 'Applications of Derivatives & Integrals', weightage: 5, hours: 16, estimated_hours: 16 },
-      { subject: 'Maths', chapter: 'Probability', weightage: 4, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Vectors and 3D Geometry', weightage: 5, estimated_hours: 12 },
-    ],
-  },
-  'neet_bio': {
-    label: 'NEET · Biology (NCERT)',
-    rows: [
-      { subject: 'Biology', chapter: 'Cell — The Unit of Life', weightage: 5, estimated_hours: 10 },
-      { subject: 'Biology', chapter: 'Biomolecules', weightage: 4, estimated_hours: 8 },
-      { subject: 'Biology', chapter: 'Plant Physiology', weightage: 5, estimated_hours: 14 },
-      { subject: 'Biology', chapter: 'Human Physiology', weightage: 5, estimated_hours: 18 },
-      { subject: 'Biology', chapter: 'Reproduction', weightage: 5, estimated_hours: 14 },
-      { subject: 'Biology', chapter: 'Genetics and Evolution', weightage: 5, estimated_hours: 16 },
-      { subject: 'Biology', chapter: 'Biology and Human Welfare', weightage: 3, estimated_hours: 8 },
-      { subject: 'Biology', chapter: 'Biotechnology', weightage: 4, estimated_hours: 10 },
-      { subject: 'Biology', chapter: 'Ecology and Environment', weightage: 5, estimated_hours: 12 },
-    ],
-  },
-  'foundation': {
-    label: 'Class 6–8 · Foundation (Science + Maths)',
-    rows: [
-      { subject: 'Science', chapter: 'Food and Nutrition', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Acids, Bases and Salts (basics)', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Motion and Time', weightage: 4, estimated_hours: 6 },
-      { subject: 'Science', chapter: 'Light and Shadow', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Cell Structure', weightage: 4, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Integers and Fractions', weightage: 4, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Algebraic Expressions', weightage: 4, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Ratio and Proportion', weightage: 3, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Geometry — Lines and Angles', weightage: 3, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Data Handling', weightage: 2, estimated_hours: 4 },
-    ],
-  },
-};
+// ============================================================
+// SYLLABUS PRESETS — v1.0.6 recovery M: legacy presets cleaned up
+// Old bundled presets removed. Source of truth is now src/data/syllabusData.js
+// ============================================================
+export const SYLLABUS_PRESETS = {};
 
 // ============================================================
 // MISC

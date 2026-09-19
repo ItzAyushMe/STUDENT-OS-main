@@ -1,7 +1,7 @@
 // CONTENT LOCKER — notes, links, YouTube refs with optional AI
 // summaries (AI summarize arrives with Layer 4; data model ready).
 import { useCallback, useState } from 'react';
-import { Linking, Pressable, Text, View } from 'react-native';
+import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -34,6 +34,9 @@ export function ContentScreen({ navigation }) {
   const [aiBusyId, setAiBusyId] = useState(null);
   const [aiMsg, setAiMsg] = useState('');
   const [form, setForm] = useState({ kind: 'note', title: '', body: '', subject: '' });
+  // v1.0.6 recovery: readable note view
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [selectedNote, setSelectedNote] = useState(null);
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -102,7 +105,13 @@ export function ContentScreen({ navigation }) {
   };
 
   const open = (item) => {
-    if (item.url) Linking.openURL(normalizeUrl(item.url)).catch(() => {});
+    if (item.url) {
+      Linking.openURL(normalizeUrl(item.url)).catch(() => {});
+    } else if (item.text) {
+      // v1.0.6 recovery: tapping a note opens readable note view
+      setSelectedNote(item);
+      setNoteOpen(true);
+    }
   };
 
   if (!items) {
@@ -171,7 +180,7 @@ export function ContentScreen({ navigation }) {
         shown.map((item) => {
           const t = CONTENT_TYPES[item.type] || CONTENT_TYPES.note;
           return (
-            <Card key={item.id} mode="light" onPress={item.url ? () => open(item) : undefined} style={{ marginBottom: 10 }}>
+            <Card key={item.id} mode="light" onPress={() => open(item)} style={{ marginBottom: 10 }}>
               <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
                 <Text style={{ fontSize: 24, marginRight: 12 }}>{t.icon}</Text>
                 <View style={{ flex: 1 }}>
@@ -233,6 +242,39 @@ export function ContentScreen({ navigation }) {
         />
         <Input label="Subject (optional)" value={form.subject} onChangeText={(v) => setForm({ ...form, subject: v })} placeholder="Physics" />
         <Button title="Save (+5 XP)" mode="light" onPress={add} disabled={!form.title.trim() || (form.kind === 'link' && !form.body.trim())} />
+      </ModalSheet>
+
+      {/* v1.0.6 recovery: readable scrollable note modal */}
+      <ModalSheet visible={noteOpen} onClose={() => { setNoteOpen(false); setSelectedNote(null); }} title={selectedNote?.title || 'Note'} mode="light">
+        {selectedNote ? (
+          <View style={{ maxHeight: 420 }}>
+            {selectedNote.subject ? (
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#6D28D9', marginBottom: 8 }}>{selectedNote.subject}</Text>
+            ) : null}
+            <ScrollView style={{ backgroundColor: '#F8FAFC', borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', maxHeight: 360 }} contentContainerStyle={{ padding: 14 }}>
+              <Text selectable style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#1E293B', lineHeight: 20 }}>
+                {selectedNote.text || '—'}
+              </Text>
+            </ScrollView>
+            {selectedNote.ai_summary ? (
+              <View style={{ backgroundColor: '#F0FDFA', borderRadius: 8, padding: 10, marginTop: 12 }}>
+                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#0891B2', marginBottom: 4 }}>🤖 AI Summary</Text>
+                <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#134E4A', lineHeight: 17 }}>{selectedNote.ai_summary}</Text>
+              </View>
+            ) : null}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 }}>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#94A3B8' }}>{localDateOf(selectedNote.created_at)}</Text>
+              {selectedNote.text && !selectedNote.ai_summary && aiStatus().configured ? (
+                <Pressable onPress={() => { setNoteOpen(false); summarize(selectedNote); }} hitSlop={8}>
+                  <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#0891B2' }}>✨ Summarize</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            <View style={{ marginTop: 14 }}>
+              <Button title="Close" mode="light" variant="secondary" onPress={() => { setNoteOpen(false); setSelectedNote(null); }} />
+            </View>
+          </View>
+        ) : null}
       </ModalSheet>
     </Screen>
   );

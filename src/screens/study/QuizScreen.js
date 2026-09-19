@@ -38,6 +38,16 @@ export function QuizScreen({ navigation, route }) {
   const [mode, setMode] = useState(route?.params?.mode || 'quick');
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState(route?.params?.subject || 'Mixed');
+
+  // v1.0.6 K: sync route.params when screen already mounted (e.g., navigate from StudyHub/Tutor)
+  useEffect(() => {
+    if (route?.params?.mode && route.params.mode !== mode) setMode(route.params.mode);
+    if (route?.params?.subject && route.params.subject !== subject) setSubject(route.params.subject);
+    // If new params arrive while playing, reset to setup to show new context
+    if (route?.params && (route.params.mode || route.params.subject || route.params.topic)) {
+      setPhase('setup');
+    }
+  }, [route?.params?.mode, route?.params?.subject, route?.params?.topic]);
   const [questions, setQuestions] = useState([]);
   const [qIndex, setQIndex] = useState(0);
   const [selected, setSelected] = useState(null);

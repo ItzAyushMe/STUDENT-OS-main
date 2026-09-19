@@ -4,6 +4,7 @@
 // askAIJSON. Each function degrades gracefully: if AI is offline
 // or unconfigured it throws AIUnavailableError which callers catch
 // and fall back to the offline engines.
+// v1.0.6 recovery: robust normalization, count validation, retry
 // ============================================================
 import { askAI, askAIJSON, AIUnavailableError, AI_PERSONA } from './aiService';
 
@@ -12,8 +13,6 @@ export { AIUnavailableError };
 const esc = (s) => String(s ?? '').slice(0, 400);
 
 // ---------- shared, class-aware context (used by EVERY feature) ----------
-// The student's class is non-negotiable context: a Class 10 student
-// must get Class-10-level answers, never Class 12 or generic trivia.
 export function buildProfileContext(profile = {}) {
   const bits = [];
   if (profile.class_level) bits.push(String(profile.class_level));
@@ -51,8 +50,7 @@ export async function aiTutorReply({ history = [], message, context = '' }) {
 
   return askAI({
     prompt,
-    system: `${AI_PERSONA}
-You are chatting in the AI Tutor screen. You can explain concepts simply, solve problems step-by-step, quiz the student, summarize chapters, plan study strategy and motivate. Use bullet points and short paragraphs. If the student asks something unrelated to studying, gently steer back with warmth and one fun line. Max ~180 words unless solving a problem needs more.`,
+    system: `${AI_PERSONA}\nYou are chatting in the AI Tutor screen. You can explain concepts simply, solve problems step-by-step, quiz the student, summarize chapters, plan study strategy and motivate. Use bullet points and short paragraphs. If the student asks something unrelated to studying, gently steer back with warmth and one fun line. Max ~180 words unless solving a problem needs more.`,
     temperature: 0.7,
   });
 }
@@ -67,7 +65,6 @@ export async function aiMotivate({ name = 'champ', streak = 0, context = '' }) {
 }
 
 // ---------- personalized daily morning message (Home) ----------
-// Uses the student's REAL schedule for today + weak areas + streak.
 export async function aiDailyMessage({ profile = {}, todaySessions = [], weakAreas = [], streak = 0, xp = 0, habitsPending = 0 }) {
   const ctx = buildProfileContext(profile);
   const plan = todaySessions.length
@@ -109,10 +106,7 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
   const clean = habits.filter((h) => h?.name).map((h) => ({
     name: String(h.name).slice(0, 60),
     icon: String(h.icon || '✨').slice(0, 4),
-    // HIGH-3 (audit): the AI returns health|study|mind|life but the app's
-    // categories (and the DB CHECK constraint) are academic|health|mental|productivity.
     category: { health: 'health', study: 'academic', mind: 'mental', life: 'productivity', academic: 'academic', mental: 'mental', productivity: 'productivity' }[h.category] || 'productivity',
-    // map AI-proposed parts onto the app's real parts (morning/afternoon/evening)
     part: { morning: 'morning', day: 'afternoon', afternoon: 'afternoon', evening: 'evening', night: 'evening' }[h.part] || 'afternoon',
     target_time: /^\d{2}:\d{2}$/.test(String(h.target_time || '')) ? h.target_time : null,
     why: String(h.why || '').slice(0, 120),
@@ -121,62 +115,140 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
   return clean;
 }
 
-
 // LOW-9 (audit): never blindly trust Number(q.answer). Models sometimes
 // reply 1-based indices or the option text. Resolve by matching the
 // answer text against the options first, then fall back to the number.
 function resolveAnswerIndex(q) {
   const options = Array.isArray(q.options) ? q.options.map(String) : [];
-  const at = String(q.answer_text ?? q.answerText ?? '').trim();
+  const at = String(q.answer_text ?? q.answerText ?? q.answer ?? '').trim();
+
+  // Try letter a/b/c/d
+  const letterMatch = at.toLowerCase().match(/^[a-d]$/);
+  if (letterMatch) {
+    return letterMatch[0].charCodeAt(0) - 97;
+  }
+  // Try matching answer_text against options
   if (at) {
     const i = options.findIndex(
-      (o) => o.trim().toLowerCase() === at.toLowerCase() || o.trim().toLowerCase().startsWith(at.toLowerCase())
+      (o) => o.trim().toLowerCase() === at.toLowerCase() || o.trim().toLowerCase().startsWith(at.toLowerCase()) || at.toLowerCase().startsWith(o.trim().toLowerCase())
     );
     if (i >= 0) return i;
   }
   const n = Number(q.answer);
   if (Number.isInteger(n) && n >= 0 && n < options.length) return n;
-  if (Number.isInteger(n) && n >= 1 && n <= options.length) return n - 1; // 1-based reply
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) return n - 1;
+  // Try answer as letter in options like "a", "b"
+  if (typeof q.answer === 'string') {
+    const l = q.answer.trim().toLowerCase();
+    if (l.length === 1 && l >= 'a' && l <= 'd') return l.charCodeAt(0) - 97;
+  }
   return 0;
 }
 
-// ---------- quiz generation ----------
+function normalizeQuestionShape(q, subject, topic, difficultyDefault) {
+  if (!q) return null;
+  const qText = q.q || q.question || q.text || q.prompt || q.title || '';
+  if (!qText || typeof qText !== 'string' || qText.trim().length < 3) return null;
+
+  let options = [];
+  if (Array.isArray(q.options)) options = q.options;
+  else if (Array.isArray(q.choices)) options = q.choices;
+  else if (q.options && typeof q.options === 'object') options = Object.values(q.options);
+  else if (q.a && q.b) options = [q.a, q.b, q.c, q.d].filter(Boolean);
+
+  options = options.map((o) => String(o).trim()).filter(Boolean);
+  // For non-MCQ types, options may be empty — allow but ensure at least 2 for MCQ
+  const isMCQ = (q.type || 'mcq').toLowerCase().includes('mcq') || options.length >= 2;
+  if (isMCQ) {
+    if (options.length < 2) return null;
+    while (options.length < 4) options.push(`Option ${options.length + 1}`);
+    options = options.slice(0, 4);
+  }
+
+  const answerIdx = isMCQ ? resolveAnswerIndex({ ...q, options }) : 0;
+
+  return {
+    subject: q.subject || subject || 'AI Quiz',
+    topic: q.topic || topic || 'Mixed',
+    difficulty: q.difficulty || difficultyDefault || 2,
+    q: String(qText).slice(0, 600),
+    options,
+    answer: answerIdx,
+    answer_text: options[answerIdx] || q.answer_text || q.answer || '',
+    explanation: String(q.explanation || q.why || q.reason || '').slice(0, 400),
+    marks: q.marks || 1,
+    type: q.type || (isMCQ ? 'mcq' : 'saq'),
+    source: 'ai',
+  };
+}
+
+// ---------- quiz generation — v1.0.6 recovery: filter FIRST, then limit, robust normalization ----------
 export async function aiGenerateQuiz({ subject, topic, count = 5, difficulty = 'medium', profileContext = '', syllabusChapters = [] }) {
-  const chapterHint = syllabusChapters?.length
-    ? `Generate from these chapters of the student's OWN syllabus: ${syllabusChapters.slice(0, 25).map(esc).join('; ')}.`
+  // L: filter by selected subject FIRST, only then apply prompt-size limit — ensures later Class 10 subjects reach AI
+  let chaptersForPrompt = (syllabusChapters || []).filter(Boolean);
+  // If subject is specific, ensure filtering already happened upstream, but we still ensure we don't slice before filtering
+  // For Mixed, we want to include diverse subjects, so sample across if large
+  if (chaptersForPrompt.length > 40) {
+    // If Mixed and large, take a diverse sample: first 20 + last 20 to include later subjects like SST, English
+    if (!subject || subject === 'Mixed' || subject === 'All') {
+      const first = chaptersForPrompt.slice(0, 20);
+      const last = chaptersForPrompt.slice(-20);
+      const combined = [...new Set([...first, ...last])];
+      chaptersForPrompt = combined.slice(0, 40);
+    } else {
+      chaptersForPrompt = chaptersForPrompt.slice(0, 40);
+    }
+  }
+
+  const chapterHint = chaptersForPrompt.length
+    ? `Generate from these chapters of the student's OWN syllabus: ${chaptersForPrompt.map(esc).join('; ')}.`
     : '';
-  const data = await askAIJSON({
-    prompt: `Create ${count} multiple-choice questions for an Indian student.
+
+  const attempt = async (requestedCount) => {
+    const data = await askAIJSON({
+      prompt: `Create ${requestedCount} multiple-choice questions for an Indian student.
 Subject: ${esc(subject) || 'General'}${topic ? ` · Topic: ${esc(topic)}` : ''}.
 Difficulty: ${difficulty}. Mix conceptual + application questions.
 ${chapterHint}
 ${classGuard(profileContext)}
+IMPORTANT: Return EXACTLY ${requestedCount} questions, no fewer. If you cannot make ${requestedCount}, return what you can but include a field \"incomplete\": true.
 Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"answer_text":"exact text of the correct option","explanation":"one line why","topic":"subtopic name","difficulty":1}]}. "answer" is the 0-based index of the correct option. Options must be plausible and unambiguous.`,
-    system: AI_PERSONA,
-    schemaHint: '{"questions":[{q, options[4], answer, explanation, topic, difficulty}]}',
-    temperature: 0.5,
-  });
-  const qs = Array.isArray(data?.questions) ? data.questions : [];
-  const clean = qs
-    .filter((q) => q?.q && Array.isArray(q?.options) && q.options.length >= 3)
-    .map((q) => ({
-      subject: subject || 'AI Quiz',
-      topic: q.topic || topic || 'Mixed',
-      difficulty: q.difficulty || 2,
-      q: String(q.q),
-      options: q.options.map(String),
-      answer: resolveAnswerIndex(q),
-      explanation: String(q.explanation || ''),
-      source: 'ai',
-    }));
-  if (!clean.length) throw new AIUnavailableError('AI ka quiz samajh nahi aaya — bank se laa raha hoon.');
-  return clean;
+      system: AI_PERSONA,
+      schemaHint: '{"questions":[{q, options[4], answer, explanation, topic, difficulty}]}',
+      temperature: 0.5,
+      noCache: true,
+    });
+    const qs = Array.isArray(data?.questions) ? data.questions : [];
+    const clean = qs.map((q) => normalizeQuestionShape(q, subject || 'AI Quiz', topic || 'Mixed', difficulty === 'hard' ? 3 : 2)).filter(Boolean);
+    return { clean, incomplete: data?.incomplete, rawCount: qs.length };
+  };
+
+  let result = await attempt(count);
+
+  // D: If generation is incomplete, retry once for missing count
+  if (result.clean.length < Math.ceil(count * 0.7) && result.clean.length > 0) {
+    try {
+      const missing = count - result.clean.length;
+      const retry = await attempt(missing);
+      result.clean = [...result.clean, ...retry.clean].slice(0, count);
+    } catch {
+      // keep existing
+    }
+  }
+
+  if (!result.clean.length) throw new AIUnavailableError('AI ka quiz samajh nahi aaya — bank se laa raha hoon.');
+
+  if (result.clean.length < Math.ceil(count * 0.5)) {
+    throw new AIUnavailableError(`AI ne sirf ${result.clean.length}/${count} questions diye — thoda chhota count try karo ya dobara try karo.`);
+  }
+
+  return result.clean.slice(0, count);
 }
 
 // ---------- flashcard deck generation ----------
 export async function aiGenerateFlashcards({ subject, topic, count = 8, profileContext = '' }) {
   const data = await askAIJSON({
-    prompt: `Create ${count} flashcards for topic "${esc(topic)}" of subject "${esc(subject)}" for an Indian student.
+    prompt: `Create ${count} flashcards for topic "${esc(topic)}\" of subject \"${esc(subject)}\" for an Indian student.
 ${profileContext ? `Student: ${esc(profileContext)}.` : ''}
 Mix card types: definitions, formulas, one-liner Q&A, and 1-2 "concept link" cards.
 Return JSON: {"cards":[{"front":"...","back":"...","type":"qa|definition|formula|concept"}]}. Fronts must be crisp questions/prompts; backs must be self-contained answers.`,
@@ -195,11 +267,15 @@ Return JSON: {"cards":[{"front":"...","back":"...","type":"qa|definition|formula
 }
 
 // ---------- arena / battle challenges (class-aware!) ----------
-// Arena & Battle questions come from the STUDENT'S OWN syllabus and
-// class level — never generic trivia. Offline → static bank fallback.
 export async function aiChallengeQuestions({ profile = {}, syllabusRows = [], count = 5, topic = '' }) {
   const ctx = buildProfileContext(profile);
-  const chapters = syllabusRows.slice(0, 60).map((r) => r.chapter);
+  // L: filter FIRST then limit — ensure later subjects included
+  let chapters = syllabusRows.map((r) => r.chapter).filter(Boolean);
+  if (chapters.length > 60) {
+    const first = chapters.slice(0, 30);
+    const last = chapters.slice(-30);
+    chapters = [...new Set([...first, ...last])].slice(0, 60);
+  }
   const data = await askAIJSON({
     prompt: `Create ${count} rapid-fire multiple-choice questions for a daily challenge in a study game.
 ${classGuard(ctx)}
@@ -214,17 +290,9 @@ Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"an
   });
   const qs = Array.isArray(data?.questions) ? data.questions : [];
   const clean = qs
-    .filter((q) => q?.q && Array.isArray(q?.options) && q.options.length >= 3)
-    .map((q) => ({
-      subject: 'Challenge',
-      topic: q.topic || topic || 'Mixed',
-      difficulty: q.difficulty || 2,
-      q: String(q.q),
-      options: q.options.map(String),
-      answer: resolveAnswerIndex(q),
-      explanation: String(q.explanation || ''),
-      source: 'ai',
-    }));
+    .map((q) => normalizeQuestionShape(q, 'Challenge', topic || 'Mixed', 2))
+    .filter(Boolean)
+    .map((q) => ({ ...q, source: 'ai' }));
   if (clean.length < 3) throw new AIUnavailableError('AI challenge questions nahi mile.');
   return clean.slice(0, count);
 }
@@ -240,7 +308,6 @@ export async function aiSummarizeContent({ title, text }) {
 }
 
 // ---------- adaptive rescheduling ----------
-// AI proposes adjustments for missed sessions / behind-schedule student.
 export async function aiReschedule({ missed = [], upcomingCount = 0, examDate, dailyHours, behindTopics = [] }) {
   const data = await askAIJSON({
     prompt: `A student missed ${missed.length} study sessions (topics: ${missed.map((m) => esc(m.topic || m.subject)).join('; ').slice(0, 300)}).
@@ -308,7 +375,43 @@ export async function aiMoodReply({ mood, note = '' }) {
 // ============================================================
 // AI TEST BUILDER (v1.0.2) — full tests (2 sets), question banks
 // and per-chapter mind maps, with a strict JSON contract.
+// v1.0.6 recovery: robust normalization, count validation, retry
 // ============================================================
+function normalizeTestQuestion(q) {
+  if (!q) return null;
+  const qText = q.q || q.question || q.text || '';
+  if (!qText) return null;
+  let options = [];
+  if (Array.isArray(q.options)) options = q.options;
+  else if (Array.isArray(q.choices)) options = q.choices;
+  else if (q.options && typeof q.options === 'object') options = Object.values(q.options);
+  else if (q.a && q.b) options = [q.a, q.b, q.c, q.d].filter(Boolean);
+
+  options = options.map((o) => String(o).trim()).filter(Boolean);
+  const isMCQ = (q.type || 'mcq').toLowerCase().includes('mcq') || options.length >= 2;
+
+  if (isMCQ && options.length < 2) return null;
+  if (isMCQ) {
+    while (options.length < 4) options.push(`Option ${options.length + 1}`);
+    options = options.slice(0, 4);
+  }
+
+  const answerIdx = isMCQ ? resolveAnswerIndex({ ...q, options }) : 0;
+  const answerText = isMCQ ? options[answerIdx] : (q.answer || q.answer_text || '');
+
+  return {
+    q: String(qText).slice(0, 600),
+    options: isMCQ ? options : [],
+    answer: isMCQ ? answerIdx : String(answerText).slice(0, 300),
+    answer_text: isMCQ ? String(answerText).slice(0, 300) : String(answerText).slice(0, 300),
+    explanation: String(q.explanation || q.why || '').slice(0, 400),
+    why: String(q.why || q.explanation || '').slice(0, 400),
+    marks: q.marks || 1,
+    type: q.type || (isMCQ ? 'mcq' : 'saq'),
+    topic: q.topic || '',
+  };
+}
+
 export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = {}, totalMarks = 80, totalQuestions = 30, difficultyPct = 100, timeMinutes = 180 }) {
   const ctx = buildProfileContext(profile);
   const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
@@ -318,8 +421,10 @@ export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = 
     `Short Answer (SAQ): ${breakdown.saq || 0} (3 marks each)`,
     `Long Answer (LAQ): ${breakdown.laq || 0} (5 marks each)`,
   ].filter((p) => !p.match(/: 0 /)).join(', ');
-  return askAIJSON({
-    prompt: `Generate a complete school test as JSON for this student.
+
+  const attempt = async () => {
+    const data = await askAIJSON({
+      prompt: `Generate a complete school test as JSON for this student.
 Student: ${esc(ctx)}.
 Chapters to cover: ${esc(chList)}.
 Test: ${totalMarks} marks, ${totalQuestions} questions, ${timeMinutes} minutes.
@@ -327,9 +432,10 @@ Question breakdown: ${parts || 'MCQs and short answers'}.
 Difficulty: ${difficultyPct}% of the student's exam level (100% = board/exam level, 150% = competitive level, 200% = olympiad level).
 Create TWO full sets (Set A and Set B) with DIFFERENT questions of the same pattern, like real exam papers.
 Questions must be syllabus-accurate, in simple English, no markdown anywhere.
-Math notation: plain text only (a/b, sqrt(x), x^2) — never LaTeX.`,
-    system: `${AI_PERSONA}\nYou are a strict examiner. Output ONLY the JSON object.`,
-    schemaHint: `{
+Math notation: plain text only (a/b, sqrt(x), x^2) — never LaTeX.
+IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer.`,
+      system: `${AI_PERSONA}\nYou are a strict examiner. Output ONLY the JSON object.`,
+      schemaHint: `{
   "sets": [
     { "set": "A", "sections": [
       { "type": "mcq", "label": "Section A — MCQ (1 mark each)",
@@ -340,30 +446,94 @@ Math notation: plain text only (a/b, sqrt(x), x^2) — never LaTeX.`,
   ],
   "tips": "one line of exam tips"
 }`,
-    temperature: 0.5,
-    noCache: true,
-  });
+      temperature: 0.5,
+      noCache: true,
+    });
+
+    // Normalize sets
+    if (Array.isArray(data?.sets)) {
+      data.sets = data.sets.map((set) => ({
+        set: set.set || 'A',
+        sections: Array.isArray(set.sections)
+          ? set.sections.map((sec) => ({
+              type: sec.type || 'mcq',
+              label: sec.label || sec.type || 'Section',
+              questions: Array.isArray(sec.questions) ? sec.questions.map(normalizeTestQuestion).filter(Boolean) : [],
+            }))
+          : [],
+      }));
+      // Count total questions
+      const total = data.sets.reduce((a, s) => a + s.sections.reduce((aa, sec) => aa + (sec.questions?.length || 0), 0), 0);
+      data._totalQuestions = total;
+    }
+    return data;
+  };
+
+  let data = await attempt();
+
+  // If incomplete, retry once
+  if (data?._totalQuestions && data._totalQuestions < totalQuestions) {
+    try {
+      const retry = await attempt();
+      if (retry._totalQuestions > data._totalQuestions) data = retry;
+    } catch {}
+  }
+
+  if (!data?.sets?.length) throw new Error('AI ne khaali paper bheja — thoda chhota try karo.');
+
+  const totalQs = data.sets.reduce((a, s) => a + s.sections.reduce((aa, sec) => aa + (sec.questions?.length || 0), 0), 0);
+  if (totalQs < Math.ceil(totalQuestions * 0.5)) {
+    throw new AIUnavailableError(`AI ne sirf ${totalQs}/${totalQuestions} questions diye — chhota count try karo ya dobara try karo.`);
+  }
+
+  return data;
 }
 
 export async function aiGenerateQuestionBank({ profile = {}, chapters = [], breakdown = {}, totalQuestions = 25, difficultyPct = 100 }) {
   const ctx = buildProfileContext(profile);
   const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
-  return askAIJSON({
-    prompt: `Generate a practice QUESTION BANK as JSON for this student.
+
+  const attempt = async (reqCount) => {
+    const data = await askAIJSON({
+      prompt: `Generate a practice QUESTION BANK as JSON for this student.
 Student: ${esc(ctx)}.
 Chapters: ${esc(chList)}.
-Total questions: ${totalQuestions}. Mix: MCQ ${breakdown.mcq || 0}, VSAQ ${breakdown.vsaq || 0}, SAQ ${breakdown.saq || 0}, LAQ ${breakdown.laq || 0}.
+Total questions: ${reqCount}. Mix: MCQ ${breakdown.mcq || 0}, VSAQ ${breakdown.vsaq || 0}, SAQ ${breakdown.saq || 0}, LAQ ${breakdown.laq || 0}.
 Difficulty: ${difficultyPct}% of their exam level. No time limit, no marks total — just practice questions with answers.
-Simple English, no markdown. Math in plain text only.`,
-    system: `${AI_PERSONA}\nYou are a question-bank generator. Output ONLY the JSON object.`,
-    schemaHint: `{
+Simple English, no markdown. Math in plain text only.
+IMPORTANT: Return EXACTLY ${reqCount} questions, no fewer.`,
+      system: `${AI_PERSONA}\nYou are a question-bank generator. Output ONLY the JSON object.`,
+      schemaHint: `{
   "questions": [ { "type": "mcq", "q": "text", "options": ["a","b","c","d"], "answer": "b", "why": "one-line reason" },
                  { "type": "saq", "q": "text", "answer": "model answer" } ],
   "weakSpots": "one line on what to revise"
 }`,
-    temperature: 0.5,
-    noCache: true,
-  });
+      temperature: 0.5,
+      noCache: true,
+    });
+
+    const qs = Array.isArray(data?.questions) ? data.questions : [];
+    const clean = qs.map((q) => normalizeTestQuestion(q)).filter(Boolean);
+    return { data: { ...data, questions: clean }, count: clean.length };
+  };
+
+  let result = await attempt(totalQuestions);
+
+  if (result.count < Math.ceil(totalQuestions * 0.7) && result.count > 0) {
+    try {
+      const retry = await attempt(totalQuestions - result.count);
+      result.data.questions = [...result.data.questions, ...retry.data.questions].slice(0, totalQuestions);
+      result.count = result.data.questions.length;
+    } catch {}
+  }
+
+  if (!result.data?.questions?.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
+
+  if (result.count < Math.ceil(totalQuestions * 0.5)) {
+    throw new AIUnavailableError(`AI ne sirf ${result.count}/${totalQuestions} questions diye — chhota count try karo ya dobara try karo.`);
+  }
+
+  return result.data;
 }
 
 export async function aiGenerateMindMap({ profile = {}, chapters = [] }) {

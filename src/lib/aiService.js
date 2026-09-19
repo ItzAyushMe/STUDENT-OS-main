@@ -144,7 +144,8 @@ async function geminiRequest(model, { prompt, system, json, temperature, key }) 
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: temperature ?? 0.7,
-      maxOutputTokens: 4096,
+      // v1.0.6 recovery: increase to 8192 to prevent truncation of large question banks/tests
+      maxOutputTokens: 8192,
       ...(json ? { responseMimeType: 'application/json' } : {}),
     },
   };
@@ -174,7 +175,8 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
     model,
     messages,
     temperature: temperature ?? 0.7,
-    max_tokens: 4096,
+    // v1.0.6 recovery: increase to 8192 to prevent truncation of large question banks/tests
+    max_tokens: 8192,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
   };
   const res = await fetch(GROQ_URL, {
@@ -327,34 +329,79 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
   );
 }
 
-// Robust JSON extraction (LLMs love wrapping JSON in prose/fences)
+// Robust JSON extraction (LLMs love wrapping JSON in prose/fences) — v1.0.6 recovery: handles truncation, multiple fences, and recovers partial JSON
 function extractJSON(text) {
   if (typeof text !== 'string') return text;
   let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) t = fence[1].trim();
+
+  // Try multiple fence patterns
+  const fencePatterns = [
+    /```(?:json)?\s*([\s\S]*?)```/g,
+    /```\s*([\s\S]*?)```/g,
+  ];
+  for (const pat of fencePatterns) {
+    let m;
+    while ((m = pat.exec(t)) !== null) {
+      const candidate = m[1].trim();
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // try to extract JSON inside fence
+        const inner = candidate.slice(candidate.indexOf('{') >= 0 ? candidate.indexOf('{') : 0, candidate.lastIndexOf('}') + 1 || undefined);
+        try {
+          if (inner) return JSON.parse(inner);
+        } catch {}
+      }
+    }
+  }
+
+  // Direct parse
   try {
     return JSON.parse(t);
   } catch {
     /* keep digging */
   }
+
+  // Find first { or [ and try to parse progressively smaller slices to handle truncation
   const firstObj = t.indexOf('{');
   const firstArr = t.indexOf('[');
   let start = -1;
-  if (firstObj >= 0 && (firstArr < 0 || firstObj < firstArr)) start = firstObj;
-  else if (firstArr >= 0) start = firstArr;
+  let openCh = '{';
+  if (firstObj >= 0 && (firstArr < 0 || firstObj < firstArr)) {
+    start = firstObj;
+    openCh = '{';
+  } else if (firstArr >= 0) {
+    start = firstArr;
+    openCh = '[';
+  }
+
   if (start >= 0) {
-    const openCh = t[start];
     const closeCh = openCh === '{' ? '}' : ']';
-    const end = t.lastIndexOf(closeCh);
-    if (end > start) {
+    // Try last occurrence of closeCh
+    let end = t.lastIndexOf(closeCh);
+    while (end > start) {
+      const slice = t.slice(start, end + 1);
       try {
-        return JSON.parse(t.slice(start, end + 1));
+        return JSON.parse(slice);
       } catch {
-        /* ignore */
+        // try previous closeCh occurrence (handles extra trailing prose)
+        end = t.lastIndexOf(closeCh, end - 1);
+      }
+    }
+
+    // If still failing, it might be truncated — try to detect truncation and attempt repair for common cases
+    // For truncated arrays/objects, we can try to close open brackets
+    const truncatedSlice = t.slice(start);
+    // If it ends abruptly without closing, throw specific truncation error
+    if (truncatedSlice.length > 50 && !truncatedSlice.trim().endsWith(closeCh)) {
+      // Check if it's likely truncated (ends mid-string or mid-object)
+      const lastChars = truncatedSlice.slice(-100);
+      if (!lastChars.includes(closeCh) || truncatedSlice.split('{').length !== truncatedSlice.split('}').length) {
+        throw new AIUnavailableError('AI ka answer beech mein kat gaya (truncated). Dobara try karo — ab generation limit badh gaya hai!');
       }
     }
   }
+
   throw new AIUnavailableError('AI ka answer samajh nahi aaya. Dobara try karo!');
 }
 

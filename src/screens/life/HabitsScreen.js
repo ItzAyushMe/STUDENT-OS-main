@@ -294,7 +294,7 @@ export function HabitsScreen({ navigation }) {
                   key={h.id}
                   habit={h}
                   week={week}
-                frozenYesterday={Boolean(logMap[`${habit.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`]?.frozen)}
+                frozenYesterday={Boolean(logMap[`${h.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`]?.frozen)}
                   today={today}
                   logMap={logMap}
                   streak={streak}
