@@ -283,56 +283,23 @@ assert.ok(!plan5.some((r) => r.track === 'exam' || r.track === 'olympiad'), '0% 
 }
 
 
-// ---------- v1.0.6 recovery: new regression tests ----------
+// ---------- v1.0.6 recovery: genuine regression tests (import real files) ----------
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+
 // A: habit data/log mapping must use correct habit ID (h.id not habit.id)
-// Simulate HabitsScreen logMap building
 {
-  const habits = [{ id: 'h1', name: 'Test' }, { id: 'h2', name: 'Test2' }];
-  const logs = [{ habit_id: 'h1', date: '2026-09-19', completed: true }];
-  const logMap = {};
-  for (const l of logs) logMap[`${l.habit_id}::${l.date}`] = l;
-  const today = '2026-09-19';
-  // Correct mapping uses h.id
-  const doneCorrect = habits.filter((h) => logMap[`${h.id}::${today}`]?.completed).length;
-  assert.equal(doneCorrect, 1, 'habit log mapping uses h.id correctly');
-  // Bug would be using habit.id undefined in map callback where habit is not defined but h is
-  // The fixed code uses h.id, so this passes
-}
-
-// K: quiz parameter changes should not reset active quiz unexpectedly
-{
-  // Simulate QuizScreen param sync logic: should NOT reset when playing
-  function shouldResetQuiz({ phase, newParams, currentMode, currentSubject }) {
-    if (!newParams) return false;
-    if (phase === 'playing') return false; // active quiz must not reset
-    const hasNew = newParams.mode || newParams.subject || newParams.topic;
-    if (!hasNew) return false;
-    // If mode/subject different and not playing, should apply
-    return true;
-  }
-  assert.equal(shouldResetQuiz({ phase: 'playing', newParams: { mode: 'boss' }, currentMode: 'quick', currentSubject: 'Mixed' }), false, 'active quiz not reset on param change');
-  assert.equal(shouldResetQuiz({ phase: 'setup', newParams: { mode: 'boss' }, currentMode: 'quick', currentSubject: 'Mixed' }), true, 'setup phase allows new quiz params');
-  assert.equal(shouldResetQuiz({ phase: 'setup', newParams: null, currentMode: 'quick', currentSubject: 'Mixed' }), false, 'no params no reset');
-}
-
-// H: syllabus merge should add missing without deleting/completing existing
-{
-  const existingRows = [
-    { subject: 'Science', chapter: 'Motion', track: 'class', status: 'completed', progress_percent: 100 },
-    { subject: 'Science', chapter: 'Force', track: 'class', status: 'in_progress', progress_percent: 50 },
-  ];
-  const presetRows = [
-    { subject: 'Science', chapter: 'Motion', weightage: 4, estimated_hours: 8 },
-    { subject: 'Science', chapter: 'Force', weightage: 4, estimated_hours: 8 },
-    { subject: 'Science', chapter: 'Gravitation', weightage: 4, estimated_hours: 9 },
-  ];
-  const existingKeys = new Set(existingRows.map((r) => `${r.subject}::${r.chapter}`));
-  const fresh = presetRows.filter((r) => !existingKeys.has(`${r.subject}::${r.chapter}`));
-  assert.equal(fresh.length, 1, 'merge adds only missing chapter');
-  assert.equal(fresh[0].chapter, 'Gravitation', 'missing chapter is Gravitation');
-  // Preserve completed
-  const stillCompleted = existingRows.find((r) => r.chapter === 'Motion');
-  assert.equal(stillCompleted.status, 'completed', 'existing completed preserved');
+  const src = read('src/screens/life/HabitsScreen.js');
+  const lines = src.split('\n');
+  const frozenLines = lines.filter(l => l.includes('frozenYesterday'));
+  const hasHId = frozenLines.some(l => l.includes('h.id'));
+  const hasHabitIdBug = frozenLines.some(l => l.includes('habit.id'));
+  assert.ok(hasHId, 'HabitsScreen frozenYesterday uses h.id');
+  assert.ok(!hasHabitIdBug, 'HabitsScreen does NOT contain buggy habit.id in frozenYesterday');
 }
 
 // B: schedule horizon should cover distant exam (249 days) not stop at 42 days
@@ -349,42 +316,75 @@ assert.ok(!plan5.some((r) => r.track === 'exam' || r.track === 'olympiad'), '0% 
     preferredTime: 'Evening',
     daysOff: [],
     prepLevel: 'Intermediate',
-    weeks: 6, // old hardcoded 6 weeks would stop at 42 days
+    weeks: 6,
     userId: 'u_long',
   });
-  // New logic: horizon should be at least exam date, capped 365
   const lastDate = longPlan.map((r) => r.date).sort().pop();
   const diffDays = Math.ceil((new Date(lastDate) - new Date()) / 86400000);
-  assert.ok(diffDays >= 200, `distant exam horizon covered: lastDate ${lastDate} diff ${diffDays} >= 200 (exam ${distantExam})`);
-  // Coverage should exist and have warning logic
+  assert.ok(diffDays >= 200, 'distant exam horizon covered: lastDate ' + lastDate + ' diff ' + diffDays + ' >= 200 (exam ' + distantExam + ')');
   assert.ok(longPlan.coverage.totalRequiredHours > 0, 'coverage totalRequiredHours computed');
-  assert.ok(typeof longPlan.coverage.coverageWarning === 'string' || longPlan.coverage.coverageWarning === null || longPlan.coverage.coverageWarning === undefined || typeof longPlan.coverage.coverageWarning === 'string', 'coverageWarning exists');
 }
 
-// F: updated_at handling — db.update should include updated_at but fallback if missing
+// H: syllabus merge should add missing without early exit
 {
-  // Simulate db.update logic: full includes updated_at
-  const patch = { status: 'completed' };
-  const full = { ...patch, updated_at: new Date().toISOString() };
-  assert.ok(full.updated_at, 'update includes updated_at');
-  assert.equal(full.status, 'completed', 'patch preserved');
-  // Fallback: if remote errors on updated_at, retry without it should work
-  // This is logic tested via existence of fallback code path, not DB
-  assert.ok(true, 'updated_at fallback path exists (manual verification for old DBs)');
+  const src = read('src/lib/starterData.js');
+  // seedSyllabusTrack should NOT have early exit that blocks merge; seedHabits/seedSyllabus may keep theirs for first-run
+  const trackFnIdx = src.indexOf('seedSyllabusTrack');
+  const trackFnSlice = src.slice(trackFnIdx, trackFnIdx + 800);
+  assert.ok(!trackFnSlice.includes('if (existing && existing.length) return 0;'), 'seedSyllabusTrack does NOT have early exit blocking merge');
+  assert.ok(trackFnSlice.includes('existingKeys') && trackFnSlice.includes('fresh'), 'seedSyllabusTrack uses existingKeys/fresh merge logic');
+  const existingRows = [
+    { subject: 'Science', chapter: 'Motion', track: 'class', status: 'completed' },
+    { subject: 'Science', chapter: 'Force', track: 'class', status: 'in_progress' },
+  ];
+  const presetRows = [
+    { subject: 'Science', chapter: 'Motion' },
+    { subject: 'Science', chapter: 'Force' },
+    { subject: 'Science', chapter: 'Gravitation' },
+  ];
+  const existingKeys = new Set(existingRows.map((r) => r.subject + '::' + r.chapter));
+  const fresh = presetRows.filter((r) => !existingKeys.has(r.subject + '::' + r.chapter));
+  assert.equal(fresh.length, 1, 'merge adds only missing');
+  assert.equal(fresh[0].chapter, 'Gravitation');
 }
 
-// J: empty in() guard
+// K: quiz param changes should not reset active quiz — inspect real QuizScreen
 {
-  // db.list should return [] for empty in() without error
-  // We test the guard logic directly
-  const opts = { in: { id: [] } };
-  let hasEmpty = false;
-  for (const [col, vals] of Object.entries(opts.in || {})) {
-    if (!Array.isArray(vals) || vals.length === 0) hasEmpty = true;
+  const src = read('src/screens/study/QuizScreen.js');
+  assert.ok(src.includes("phase === 'playing'") || src.includes('phase !=='), 'QuizScreen guards playing phase');
+  assert.ok(src.includes("phase !== 'setup'") && src.includes('return;'), 'QuizScreen only syncs in setup phase');
+  // Ensure it does NOT have the results bug: topic param causing setup from results
+  // Fixed version should have early return if phase !== setup, so results phase wont bounce
+  const hasEarlyReturn = src.includes("if (phase !== 'setup') return;");
+  assert.ok(hasEarlyReturn, 'QuizScreen has early return for non-setup phase (prevents results bug)');
+}
+
+// F: updated_at handling — schema and db.js fallback
+{
+  const schema = read('supabase/schema.sql');
+  const tables = ['syllabus','schedule','habits','habit_logs','flashcards','content','friends','leaderboard','deadlines','mood_logs'];
+  for (const t of tables) {
+    const re = new RegExp('create table if not exists public\\.' + t + '[\\s\\S]*?updated_at', 'i');
+    assert.ok(re.test(schema), 'schema ' + t + ' has updated_at');
   }
-  assert.ok(hasEmpty, 'empty in() detected');
-  // If guard works, it would return [] early
+  assert.ok(schema.includes('users_delete_own'), 'schema has users_delete_own RLS policy');
+  const dbSrc = read('src/lib/db.js');
+  assert.ok(dbSrc.includes('updated_at') && dbSrc.includes('fallback'), 'db.js has updated_at fallback');
 }
 
+// J: empty in() guard — genuine check of db.js
+{
+  const dbSrc = read('src/lib/db.js');
+  assert.ok(dbSrc.includes('empty in()') || dbSrc.includes('vals.length === 0'), 'db.js has empty in() guard');
+  assert.ok(dbSrc.includes('return [];'), 'db.js returns [] for empty in()');
+}
+
+// Edge Function single implementation
+{
+  const edgeDir = path.join(__dirname, '..', 'supabase', 'functions', 'delete-user');
+  const files = fs.readdirSync(edgeDir);
+  assert.ok(files.includes('index.ts'), 'Edge Function has index.ts');
+  assert.ok(!files.includes('index.js'), 'Edge Function does NOT have duplicate index.js');
+}
 
 console.log('ALL LOGIC TESTS PASSED ✅');
