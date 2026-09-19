@@ -62,6 +62,12 @@ drop policy if exists "users_update_own" on public.users;
 create policy "users_update_own"
   on public.users for update to authenticated using (auth.uid() = id);
 
+-- v1.0.6 recovery Y audit 1: users table had no delete policy, so direct delete via db.removeWhere would fail RLS.
+-- Minimal correct fix: allow user to delete own row. Auth user deletion via Edge Function uses service-role and bypasses RLS, but direct delete is useful fallback.
+drop policy if exists "users_delete_own" on public.users;
+create policy "users_delete_own"
+  on public.users for delete to authenticated using (auth.uid() = id);
+
 -- ============================================================
 -- SYLLABUS
 -- ============================================================

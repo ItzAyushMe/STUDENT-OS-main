@@ -39,15 +39,33 @@ export function QuizScreen({ navigation, route }) {
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState(route?.params?.subject || 'Mixed');
 
-  // v1.0.6 K: sync route.params when screen already mounted (e.g., navigate from StudyHub/Tutor)
+// v1.0.6 K + Y audit: sync route.params safely without resetting active quiz
+  // A: new quiz with different subject/mode → apply
+  // B: active quiz → must NOT reset
+  // C: intentional config change → setup
   useEffect(() => {
-    if (route?.params?.mode && route.params.mode !== mode) setMode(route.params.mode);
-    if (route?.params?.subject && route.params.subject !== subject) setSubject(route.params.subject);
-    // If new params arrive while playing, reset to setup to show new context
-    if (route?.params && (route.params.mode || route.params.subject || route.params.topic)) {
-      setPhase('setup');
+    const newMode = route?.params?.mode;
+    const newSubject = route?.params?.subject;
+    const hasNew = newMode || newSubject || route?.params?.topic;
+    if (!hasNew) return;
+    // If student is currently answering, do NOT touch anything — preserve progress
+    if (phase === 'playing') return;
+    let changed = false;
+    if (newMode && newMode !== mode) {
+      setMode(newMode);
+      changed = true;
     }
-  }, [route?.params?.mode, route?.params?.subject, route?.params?.topic]);
+    if (newSubject && newSubject !== subject) {
+      setSubject(newSubject);
+      changed = true;
+    }
+    // If params include topic or mode/subject changed, ensure we are in setup
+    // but only if not already in setup/results transition
+    if (changed || route?.params?.topic) {
+      if (phase !== 'setup') setPhase('setup');
+    }
+  }, [route?.params?.mode, route?.params?.subject, route?.params?.topic, phase]);
+
   const [questions, setQuestions] = useState([]);
   const [qIndex, setQIndex] = useState(0);
   const [selected, setSelected] = useState(null);
