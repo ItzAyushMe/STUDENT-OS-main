@@ -472,17 +472,20 @@ export function SettingsScreen({ navigation }) {
           size="sm"
           mode="light"
           onPress={async () => {
-            const norm = normalizePriorities(priorities);
-            setPriorities(norm);
-            await updateProfile({ priorities: norm });
-            setTestResult('Priorities saved ✅');
-            // BUG 10: apply immediately — offer to regenerate the schedule
-            confirmAlert(
-              'Regenerate schedule?',
-              'Naye priorities schedule pe turant apply ho jayenge. Abhi regenerate karein?',
-              () => navigation.navigate('StudyTab', { screen: 'Schedule', params: { autoRegen: true } }),
-              'Regenerate'
-            );
+            try {
+              const norm = normalizePriorities(priorities);
+              setPriorities(norm);
+              await updateProfile({ priorities: norm });
+              setTestResult('Priorities saved ✅');
+              confirmAlert(
+                'Regenerate schedule?',
+                'Naye priorities schedule pe turant apply ho jayenge. Abhi regenerate karein?',
+                () => navigation.navigate('StudyTab', { screen: 'Schedule', params: { autoRegen: true } }),
+                'Regenerate'
+              );
+            } catch (e) {
+              infoAlert('Priorities save fail hua', e?.message || 'Priorities save nahi ho paye — dobara try karo');
+            }
           }}
           style={{ marginTop: 6 }}
         />
@@ -625,24 +628,28 @@ export function SettingsScreen({ navigation }) {
           title="Save Exam Setup"
           size="sm"
           mode="light"
-          onPress={() => {
-            const clean = schoolExams
-              .map((e) => ({
-                label: (e.label || 'School exam').trim() || 'School exam',
-                exact: Boolean(e.exact),
-                ...(e.exact
-                  ? { date: (e.date || '').trim() }
-                  : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
-              }))
-              .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
-            setSchoolExams(clean);
-            updateProfile({
-              exam_date: examDate || null,
-              olympiad_date: olympiadDate || null,
-              school_exams: clean,
-              priorities: normalizePriorities(priorities),
-            });
-            setTestResult('Exam setup saved ✅');
+          onPress={async () => {
+            try {
+              const clean = schoolExams
+                .map((e) => ({
+                  label: (e.label || 'School exam').trim() || 'School exam',
+                  exact: Boolean(e.exact),
+                  ...(e.exact
+                    ? { date: (e.date || '').trim() }
+                    : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
+                }))
+                .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
+              setSchoolExams(clean);
+              await updateProfile({
+                exam_date: examDate || null,
+                olympiad_date: olympiadDate || null,
+                school_exams: clean,
+                priorities: normalizePriorities(priorities),
+              });
+              setTestResult('Exam setup saved ✅');
+            } catch (e) {
+              infoAlert('Exam setup save fail hua', e?.message || 'Exam setup save nahi ho paya — dobara try karo');
+            }
           }}
         />
       </Card>

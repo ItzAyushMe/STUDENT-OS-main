@@ -445,4 +445,28 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(trackIdx !== -1 && doIdx !== -1 && trackIdx < doIdx, 'columns added BEFORE constraints (fixes abort bug)');
 }
 
+
+// ---------- NEW X R2: visible errors ----------
+{
+  const habitsSrc = read('src/screens/life/HabitsScreen.js');
+  assert.ok(habitsSrc.includes('toggleToday') && habitsSrc.includes('infoAlert') && habitsSrc.includes('Habit save fail hua'), 'HabitsScreen toggleToday shows visible error on failure');
+  assert.ok(habitsSrc.includes('useFreeze') && habitsSrc.includes('catch'), 'HabitsScreen useFreeze has try/catch');
+
+  const gymSrc = read('src/screens/life/GymScreen.js');
+  assert.ok(gymSrc.includes('finishWorkout') && gymSrc.includes('catch') && gymSrc.includes('Workout save fail hua'), 'GymScreen finishWorkout has catch with alert');
+  assert.ok(gymSrc.includes('Pehle kuch sets/reps bharo'), 'GymScreen empty workout shows info alert, not silent return');
+  assert.ok(gymSrc.includes('addCustomExercise') && gymSrc.includes('infoAlert'), 'GymScreen addCustomExercise visible error');
+  assert.ok(gymSrc.includes('removeCustomExercise') && gymSrc.includes('infoAlert'), 'GymScreen removeCustomExercise visible error');
+
+  const settingsSrc = read('src/screens/settings/SettingsScreen.js');
+  assert.ok(settingsSrc.includes('Save Priorities') && settingsSrc.includes('try {') && settingsSrc.includes('Priorities save fail hua'), 'Settings Save Priorities has try/catch with visible error');
+  assert.ok(settingsSrc.includes('Save Exam Setup') && settingsSrc.includes('Exam setup save fail hua'), 'Settings Save Exam Setup has try/catch with visible error');
+
+  const syllabusSrc = read('src/screens/study/SyllabusScreen.js');
+  assert.ok(syllabusSrc.includes('importPreset') && syllabusSrc.includes('Syllabus import fail hua'), 'Syllabus importPreset visible error');
+  assert.ok(syllabusSrc.includes('importMyTrack') && syllabusSrc.includes('catch'), 'Syllabus importMyTrack has catch');
+  assert.ok(syllabusSrc.includes('addChapter') && syllabusSrc.includes('Syllabus save fail hua'), 'Syllabus addChapter visible error');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+

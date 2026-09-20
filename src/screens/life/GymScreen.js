@@ -15,6 +15,7 @@ import { Chip } from '../../components/ui/Chip';
 import { Confetti } from '../../components/gamer/Confetti';
 import { EmptyState, SectionTitle } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { infoAlert } from '../../lib/alert';
 import { GYM_PLANS } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, fmtDate } from '../../lib/utils';
@@ -41,15 +42,23 @@ export function GymScreen({ navigation }) {
     const name = newEx.trim();
     if (!name) return;
     const next = [...customExercises.filter((e) => e.name !== name), { name, sets: 3, reps: '12' }];
-    setCustomExercises(next);
-    setNewEx('');
-    try { await updateProfile({ custom_exercises: next }); } catch { /* keep UI state anyway */ }
+    try {
+      await updateProfile({ custom_exercises: next });
+      setCustomExercises(next);
+      setNewEx('');
+    } catch (e) {
+      infoAlert('Exercise save fail', e?.message || 'Custom exercise save nahi ho paya');
+    }
   };
 
   const removeCustomExercise = async (name) => {
     const next = customExercises.filter((e) => e.name !== name);
-    setCustomExercises(next);
-    try { await updateProfile({ custom_exercises: next }); } catch { /* keep UI state anyway */ }
+    try {
+      await updateProfile({ custom_exercises: next });
+      setCustomExercises(next);
+    } catch (e) {
+      infoAlert('Exercise remove fail', e?.message || 'Custom exercise delete nahi ho paya');
+    }
   };
 
   const plan = GYM_PLANS[planKey];
@@ -81,7 +90,10 @@ export function GymScreen({ navigation }) {
           reps: v.reps || '—',
           weight: Number(v.weight) || 0,
         }));
-      if (!exercises.length) return;
+      if (!exercises.length) {
+        infoAlert('Kuch bharo 💪', 'Pehle kuch sets/reps bharo 💪 — khaali workout save nahi hota');
+        return;
+      }
       await db.insert('workout_logs', {
         user_id: profile.id,
         date: todayStr(),
@@ -90,11 +102,12 @@ export function GymScreen({ navigation }) {
         xp_earned: 30,
         created_at: nowIso(),
       });
-      // v1.0.6 Y Round1: confetti only after XP actually saved
       const xpRes = await awardXP('WORKOUT');
       if (xpRes) setConfetti(Date.now());
       setEntries({});
       await load();
+    } catch (e) {
+      infoAlert('Workout save fail hua', e?.message || 'Workout log nahi ho paya — dobara try karo');
     } finally {
       setSaving(false);
     }

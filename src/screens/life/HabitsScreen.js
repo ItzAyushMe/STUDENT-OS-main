@@ -18,7 +18,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { aiSuggestHabits, AIUnavailableError } from '../../lib/aiFeatures';
-import { confirmAlert } from '../../lib/alert';
+import { confirmAlert, infoAlert } from '../../lib/alert';
 import { HABIT_CATEGORIES } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, groupBy } from '../../lib/utils';
@@ -105,44 +105,53 @@ export function HabitsScreen({ navigation }) {
   const toggleToday = async (habit) => {
     const existing = logMap[`${habit.id}::${today}`];
     if (existing && existing.completed) {
-      // undo
-      await db.remove('habit_logs', existing.id);
-      setLogs((prev) => prev.filter((l) => l.id !== existing.id));
+      try {
+        await db.remove('habit_logs', existing.id);
+        setLogs((prev) => prev.filter((l) => l.id !== existing.id));
+      } catch (e) {
+        infoAlert('Habit save fail hua', e?.message || 'Habit untick nahi ho paya — dobara try karo');
+      }
       return;
     }
-    const streak = streakFor(habit.id).streak;
-    const row = await db.insert('habit_logs', {
-      habit_id: habit.id,
-      user_id: profile.id,
-      date: today,
-      completed: true,
-      completed_at: nowIso(),
-      streak_count: streak + 1,
-      frozen: false,
-    });
-    setLogs((prev) => [...prev, row]);
-    // v1.0.6 Y Round1: confetti only after XP actually saved, otherwise user sees false success
-    const xpRes = await awardXP('HABIT');
-    if (xpRes) setConfetti(Date.now());
+    try {
+      const streak = streakFor(habit.id).streak;
+      const row = await db.insert('habit_logs', {
+        habit_id: habit.id,
+        user_id: profile.id,
+        date: today,
+        completed: true,
+        completed_at: nowIso(),
+        streak_count: streak + 1,
+        frozen: false,
+      });
+      setLogs((prev) => [...prev, row]);
+      const xpRes = await awardXP('HABIT');
+      if (xpRes) setConfetti(Date.now());
+    } catch (e) {
+      infoAlert('Habit save fail hua', e?.message || 'Habit tick nahi ho paya — dobara try karo');
+    }
   };
 
   const useFreeze = async (habit) => {
     if (freezes <= 0) return;
-    const yesterday = dateStr(dayjs(today).subtract(1, 'day'));
-    const row = await db.insert('habit_logs', {
-      habit_id: habit.id,
-      user_id: profile.id,
-      date: yesterday,
-      completed: false,
-      completed_at: nowIso(),
-      streak_count: streakFor(habit.id).streak,
-      frozen: true,
-    });
-    setLogs((prev) => [...prev, row]);
-    // consume a global freeze from the profile and refresh state
-    await db.update('users', profile.id, { streak_freezes: Math.max(0, (profile.streak_freezes || 0) - 1) });
-    await reloadProfile();
-    await load();
+    try {
+      const yesterday = dateStr(dayjs(today).subtract(1, 'day'));
+      const row = await db.insert('habit_logs', {
+        habit_id: habit.id,
+        user_id: profile.id,
+        date: yesterday,
+        completed: false,
+        completed_at: nowIso(),
+        streak_count: streakFor(habit.id).streak,
+        frozen: true,
+      });
+      setLogs((prev) => [...prev, row]);
+      await db.update('users', profile.id, { streak_freezes: Math.max(0, (profile.streak_freezes || 0) - 1) });
+      await reloadProfile();
+      await load();
+    } catch (e) {
+      infoAlert('Freeze fail hua', e?.message || 'Freeze save nahi ho paya — dobara try karo');
+    }
   };
 
   const addHabit = async () => {
