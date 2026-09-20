@@ -527,6 +527,38 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(overlaySrc.includes('isNeg') || overlaySrc.includes('Number(toast.amount) < 0'), 'Overlays handles negative toast in red');
 }
 
+
+// ---------- NEW X R4: AI service layer ----------
+{
+  const { looksLikeMissingModel, callProvider } = await import('./../src/lib/aiModelGuard.js');
+  assert.ok(looksLikeMissingModel('Gemini 404 gemini-2.5-flash is no longer available to new users'), 'looksLikeMissingModel matches no longer available');
+  assert.ok(looksLikeMissingModel('model_not_found: openai/gpt-oss-20b'), 'looksLikeMissingModel matches model_not_found');
+  assert.ok(looksLikeMissingModel('shut down 16 Aug 2026'), 'looksLikeMissingModel matches shut down');
+
+  // simulate callProvider with fake requester that 404s model1 and succeeds on model2
+  let calls = [];
+  const fakeRequester = async (model, args) => {
+    calls.push(model);
+    if (model === 'gemini-flash-latest') throw new Error('404 gemini-flash-latest is no longer available to new users');
+    return `ok from ${model}`;
+  };
+  const res = await callProvider(['gemini-flash-latest', 'gemini-3.5-flash'], fakeRequester, {});
+  assert.equal(res, 'ok from gemini-3.5-flash', 'callProvider advances to next model on missing model');
+  assert.ok(calls.includes('gemini-flash-latest') && calls.includes('gemini-3.5-flash'), 'both models tried');
+
+  const src = read('src/lib/aiService.js');
+  assert.ok(src.includes("'gemini-flash-latest'") && src.includes("'gemini-3.5-flash'") && src.includes("'gemini-3.1-flash-lite'"), 'GEMINI_MODELS updated to new list');
+  assert.ok(src.includes("'openai/gpt-oss-120b'") && src.includes("'openai/gpt-oss-20b'") && src.includes("'qwen/qwen3.6-27b'"), 'GROQ_MODELS updated to new list');
+  assert.ok(!src.includes('gemini-2.0-flash') && !src.includes('gemini-2.5-flash'), 'old Gemini models removed');
+  // old models removed from actual model arrays (comment may mention them for history)
+  const groqModelsLine = src.split('\n').find(l => l.includes('GROQ_MODELS')) || '';
+  assert.ok(!groqModelsLine.includes('llama-3.3-70b-versatile') && !groqModelsLine.includes('llama-3.1-8b-instant'), 'old Groq llama models removed from GROQ_MODELS');
+
+  const constSrc = read('src/config/constants.js');
+  assert.ok(constSrc.includes("gemini: 'gemini-flash-latest'") && constSrc.includes("groq: 'openai/gpt-oss-120b'"), 'AI_MODELS constants updated');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 

@@ -14,8 +14,8 @@ export const APP_VERSION = '1.0.0';
 // the AI service automatically falls back to Gemini.
 export const AI_PROVIDER = (process.env.EXPO_PUBLIC_AI_PROVIDER || 'groq').toLowerCase();
 export const AI_MODELS = {
-  gemini: 'gemini-2.0-flash',
-  groq: 'llama-3.3-70b-versatile',
+  gemini: 'gemini-flash-latest',
+  groq: 'openai/gpt-oss-120b',
 };
 
 // ============================================================

@@ -30,12 +30,11 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CACHE_TTL = 30 * 60 * 1000;
 const RUNTIME_KEY = 'sos.ai.runtime';
 
-// Fallback chains — the first entry is the default model.
-// llama-3.3-70b-specdec was DECOMMISSIONED by Groq and is removed.
-// L-10 (audit): gemini-1.5-flash is retired — pruned. Prefer the
-// -latest alias first so future model swaps need no code change.
-const GEMINI_MODELS = ['gemini-flash-latest', AI_MODELS.gemini, 'gemini-2.5-flash'];
-const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'openai/gpt-oss-20b'];
+// NEW X R4: Fallback chains verified 20 Sep 2026 against official deprecations
+// Gemini: lead with floating alias gemini-flash-latest (cannot go stale), fallbacks 3.5-flash and 3.1-flash-lite GA
+// Groq: verified deprecations page — llama-3.3-70b-versatile and llama-3.1-8b-instant shut down 16 Aug 2026, removed
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
 
 // ---------- runtime config (Settings screen overrides env) ----------
 let runtime = {
@@ -219,8 +218,8 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
   }
 }
 
-function looksLikeMissingModel(errMsg) {
-  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model|model_not_found/i.test(String(errMsg));
+export function looksLikeMissingModel(errMsg) {
+  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model|model_not_found|no longer available|not available to new users|shut down/i.test(String(errMsg));
 }
 
 // Transient failures worth retrying: overload (503), rate limit (429),
@@ -238,7 +237,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //  - transient/missing-model errors then advance to the next model
 //  - auth errors fail fast (retrying won't help)
 //  - v1.0.6 Y Round1: cap total time across retries to 90s so spinner never hangs forever
-async function callProvider(models, requester, args) {
+export async function callProvider(models, requester, args) {
   let lastErr;
   const start = Date.now();
   const MAX_TOTAL_MS = 90000;
