@@ -743,8 +743,8 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const c9 = CLASS_SYLLABI['Class 9'];
   const c10 = CLASS_SYLLABI['Class 10'];
   assert.ok(c9 && c10, 'FIX-B: Class 9 and 10 present');
-  assert.ok(c9.rows.length >= 80, `FIX-B: Class 9 rows >=80 got ${c9?.rows.length}`);
-  assert.ok(c10.rows.length >= 90, `FIX-B: Class 10 rows >=90 got ${c10?.rows.length}`);
+  assert.ok(c9.rows.length === 72, `FIX-B: Class 9 rows must be exactly 72 got ${c9?.rows.length}`);
+  assert.ok(c10.rows.length === 106, `FIX-B: Class 10 rows must be exactly 106 got ${c10?.rows.length}`);
 
   // Representative exact chapter names per audit
   const hasChapter = (rows, name) => rows.some(r => r.chapter === name || r.chapter.includes(name));
