@@ -332,6 +332,8 @@ export const db = {
 };
 
 // Wipe all local-mode data (used by "Reset local data" in Settings)
+export { getWeeklyGymSplit } from './gymSplit.js';
+
 export async function wipeLocalData() {
   const keys = await AsyncStorage.getAllKeys();
   const ours = keys.filter((k) => k.startsWith('sos.'));

@@ -672,7 +672,33 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(schedSrc.includes('auto-roll') || schedSrc.includes('auto-roll forward'), 'Auto-run notice for skipped rollover');
 }
 
+
+// ---------- NEW X R8: gym split ----------
+{
+  const { getWeeklyGymSplit, classifyExercise, gymSplitBadgeText } = await import('./../src/lib/gymSplit.js');
+  const logs = [
+    { date: new Date().toISOString().slice(0,10), exercises: [{ name: 'Bench Press' }, { name: 'Squat' }, { name: 'Barbell Row' }] },
+  ];
+  const weekly = getWeeklyGymSplit(logs);
+  assert.ok(weekly.breakdown.push >=1, 'push classified');
+  assert.ok(weekly.breakdown.pull >=1, 'pull classified');
+  assert.ok(weekly.breakdown.legs >=1, 'legs classified');
+  assert.ok(weekly.splitLabel.includes('PPL'), 'PPL split detected');
+
+  const c1 = classifyExercise('Push-ups');
+  assert.ok(c1 === 'push', 'classify push');
+
+  const badge = gymSplitBadgeText(null, weekly);
+  assert.ok(badge.includes('PPL'), 'badge text from weekly');
+
+  const gymSrc = read('src/screens/life/GymScreen.js');
+  assert.ok(gymSrc.includes('Split:') && gymSrc.includes('getWeeklyGymSplit'), 'GymScreen shows split badge');
+  const dbSrc = read('src/lib/db.js');
+  assert.ok(dbSrc.includes('getWeeklyGymSplit'), 'db.js exports getWeeklyGymSplit');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

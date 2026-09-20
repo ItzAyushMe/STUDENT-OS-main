@@ -17,6 +17,7 @@ import { EmptyState, SectionTitle } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { infoAlert } from '../../lib/alert';
 import { GYM_PLANS } from '../../config/constants';
+import { getWeeklyGymSplit, normalizeGymSplit, gymSplitBadgeText } from '../../lib/gymSplit';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, fmtDate } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
@@ -159,6 +160,23 @@ export function GymScreen({ navigation }) {
             {thisWeek >= 3 ? 'Beast mode 🔥' : thisWeek >= 1 ? 'Chalo shuru hua 👍' : 'Aaj se shuru karo!'}
           </Text>
         </View>
+        {(() => {
+          const weekly = getWeeklyGymSplit(logs || []);
+          const userSplit = normalizeGymSplit(profile?.gym_split);
+          const badge = gymSplitBadgeText(userSplit, weekly);
+          return (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', marginBottom: 12, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#B91C1C', marginRight: 8 }}>Split: {badge}</Text>
+              {weekly.total ? (
+                <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#7F1D1D' }}>
+                  {weekly.breakdown.push ? `Push ${weekly.breakdown.push} · ` : ''}{weekly.breakdown.pull ? `Pull ${weekly.breakdown.pull} · ` : ''}{weekly.breakdown.legs ? `Legs ${weekly.breakdown.legs} · ` : ''}{weekly.breakdown.core ? `Core ${weekly.breakdown.core} · ` : ''}{weekly.breakdown.cardio ? `Cardio ${weekly.breakdown.cardio}` : ''}
+                </Text>
+              ) : (
+                <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#7F1D1D' }}>No exercises logged yet this week — start with Push/Pull/Legs</Text>
+              )}
+            </View>
+          );
+        })()}
         <View style={{ flexDirection: 'row' }}>
           {week.map((d) => (
             <View key={d.date} style={{ flex: 1, alignItems: 'center' }}>
