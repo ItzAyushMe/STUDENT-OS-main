@@ -708,7 +708,42 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(xpSrc.includes('HABIT_BAD'), 'XP rules include HABIT_BAD');
 }
 
+
+// ---------- NEW X R10: syllabus data overhaul ----------
+{
+  const { CLASS_SYLLABI } = await import('./../src/data/syllabusData.js');
+  const c9 = CLASS_SYLLABI['Class 9'];
+  const c10 = CLASS_SYLLABI['Class 10'];
+  assert.ok(c9 && c9.rows.length >= 80, `Class 9 rows >=80 got ${c9?.rows.length}`);
+  assert.ok(c10 && c10.rows.length >= 100, `Class 10 rows >=100 got ${c10?.rows.length}`);
+  // Subject coverage
+  const subjects9 = new Set(c9.rows.map(r=>r.subject));
+  assert.ok(subjects9.has('Science') && subjects9.has('Maths') && subjects9.has('English'), 'Class9 has core subjects');
+  assert.ok(subjects9.has('History') || subjects9.has('Political Science'), 'Class9 has SST');
+  const subjects10 = new Set(c10.rows.map(r=>r.subject));
+  assert.ok(subjects10.has('Science') && subjects10.has('Maths') && subjects10.has('English'), 'Class10 has core subjects');
+  assert.ok(subjects10.has('Geography') && subjects10.has('Economics'), 'Class10 has full SST');
+  // No duplicate chapter within same subject (exact duplicate)
+  const dupCheck = (rows) => {
+    const seen = new Set();
+    for (const r of rows) {
+      const key = `${r.subject}::${r.chapter}`;
+      if (seen.has(key)) return key;
+      seen.add(key);
+    }
+    return null;
+  };
+  assert.ok(!dupCheck(c9.rows), `Class9 no duplicate chapters`);
+  assert.ok(!dupCheck(c10.rows), `Class10 no duplicate chapters`);
+  // Weightage 1-5 and estimated_hours reasonable
+  for (const r of [...c9.rows, ...c10.rows]) {
+    assert.ok(r.weightage >=1 && r.weightage <=5, `weightage 1-5 for ${r.chapter}`);
+    assert.ok(r.estimated_hours >=1 && r.estimated_hours <=20, `estimated_hours reasonable for ${r.chapter}`);
+  }
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 
