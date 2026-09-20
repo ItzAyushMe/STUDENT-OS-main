@@ -1,7 +1,7 @@
 // Smart Schedule — daily time-blocks, weekly grid, monthly calendar.
 // Generates plans offline (scheduleGenerator) with revision cycles,
 // mock days and buffer days; missed quests auto-reschedule.
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,6 +42,8 @@ export function ScheduleScreen({ navigation, route }) {
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
   const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
   const [genError, setGenError] = useState('');
+  const [autoRollMsg, setAutoRollMsg] = useState('');
+  const autoRolledRef = useRef(false); // FIX-E: guard to auto-roll only once per screen load session
 
   // human-readable priority line for the generate modal (reads the
   // student's own priority settings — FIX B)
@@ -97,6 +99,41 @@ export function ScheduleScreen({ navigation, route }) {
       navigation.setParams({ autoRegen: undefined });
     }
   }, [route.params?.autoRegen]);
+
+  // FIX-E: auto rollover on schedule load — skipped/pending past due auto-moves without button press
+  useEffect(() => {
+    if (loading) return;
+    if (!sessions.length) return;
+    if (autoRolledRef.current) return;
+    const pastDue = sessions.filter((s) => (s.status === 'pending' || s.status === 'skipped') && s.date < todayStr());
+    if (!pastDue.length) return;
+    // auto-roll once per screen focus session
+    autoRolledRef.current = true;
+    (async () => {
+      try {
+        const schoolExams = Array.isArray(profile?.school_exams) ? profile.school_exams : [];
+        const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile?.daily_study_hours || 3, schoolExams });
+        if (moved.length) {
+          for (const m of moved) {
+            try { await db.update('schedule', m.id, { date: m.date, status: 'pending' }); } catch {}
+          }
+          setSessions((prev) => prev.map((s) => {
+            const mv = moved.find((x) => x.id === s.id);
+            return mv ? { ...s, date: mv.date, status: 'pending' } : s;
+          }));
+          setAutoRollMsg(`Auto-rolled ${moved.length} missed/skipped quest${moved.length>1?'s':''} to upcoming days — no button needed ✅`);
+        }
+      } catch (e) {
+        console.warn('[FIX-E] auto rollover failed', e?.message);
+      }
+    })();
+  }, [sessions, loading, profile?.school_exams, profile?.daily_study_hours]);
+
+  // Reset guard when screen refocuses (so next visit can auto-roll again)
+  useFocusEffect(useCallback(() => {
+    autoRolledRef.current = false;
+    setAutoRollMsg('');
+  }, []));
 
   const missed = useMemo(
     () => sessions.filter((s) => (s.status === 'pending' || s.status === 'skipped') && s.date < todayStr()),
@@ -309,11 +346,16 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
+      {autoRollMsg ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#065F46', lineHeight: 17 }}>{autoRollMsg}</Text>
+        </Card>
+      ) : null}
       {missed.length > 0 ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#92400E', flex: 1 }}>
-            {missed.length} quest{missed.length > 1 ? 's' : ''} miss/skipped ho gaye. Chinta mat karo — ek tap mein aage shift karo.
-            Class-track quests pehle shift honge 🏫 Skipped = kal auto-roll forward ⏭️
+            {missed.length} quest{missed.length > 1 ? 's' : ''} miss/skipped ho gaye. FIX-E: auto-roll on load already tried — if still here, tap to shift again.
+            Class-track quests pehle shift honge 🏫 Skipped = kal auto-roll forward ⏭️ (now automatic on load)
           </Text>
           <Button
             title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule missed + skipped (AI catch-up)'}
@@ -329,7 +371,7 @@ export function ScheduleScreen({ navigation, route }) {
             </Text>
           ) : null}
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#92400E', marginTop: 8, lineHeight: 15 }}>
-            ℹ️ Skip = is quest ko kal shift karna, delete nahi. Missed/skipped dono agle dinon mein auto-roll honge jab Auto-reschedule dabao.
+            ℹ️ Skip = is quest ko kal shift karna, delete nahi. Missed/skipped auto-roll on screen load (FIX-E) + manual button still available.
           </Text>
         </Card>
       ) : null}

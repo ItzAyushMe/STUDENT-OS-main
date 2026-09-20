@@ -927,7 +927,33 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(res.moved[0].date === dayAfter || res.moved[0].date === today || new Date(res.moved[0].date) > new Date(tomorrow), 'FIX-D4: moved to non-exam day');
 }
 
+
+// ---------- FIX-E: auto rollover on schedule load ----------
+{
+  const schedScreenSrc = read('src/screens/study/ScheduleScreen.js');
+  assert.ok(schedScreenSrc.includes('FIX-E') && schedScreenSrc.includes('auto rollover on schedule load'), 'FIX-E: auto rollover comment present');
+  assert.ok(schedScreenSrc.includes('autoRolledRef') && schedScreenSrc.includes('useRef'), 'FIX-E: autoRolledRef guard with useRef');
+  assert.ok(schedScreenSrc.includes('autoRollMsg') && schedScreenSrc.includes('Auto-rolled'), 'FIX-E: autoRollMsg banner shows auto-rolled count');
+  assert.ok(schedScreenSrc.includes('useFocusEffect') && schedScreenSrc.includes('autoRolledRef.current = false'), 'FIX-E: guard reset on focus so next visit can auto-roll again');
+  assert.ok(schedScreenSrc.includes('pastDue') && schedScreenSrc.includes('autoRescheduleMissed'), 'FIX-E: pastDue detection + autoRescheduleMissed call on load');
+  assert.ok(schedScreenSrc.includes('schoolExams') && schedScreenSrc.includes('autoRescheduleMissed'), 'FIX-E: respects schoolExams (from FIX-D4)');
+
+  // Functional: simulate load with missed -> auto moves
+  const { autoRescheduleMissed } = await import('./../src/lib/scheduleGenerator.js');
+  const today = new Date().toISOString().slice(0,10);
+  const yesterday = new Date(Date.now()-86400000).toISOString().slice(0,10);
+  const rows = [
+    { id: 'a1', status: 'pending', date: yesterday, duration_minutes: 30, track: 'class', subject: 'Physics', session_type: 'study' },
+    { id: 'a2', status: 'skipped', date: yesterday, duration_minutes: 30, track: 'exam', subject: 'Chemistry', session_type: 'study' },
+  ];
+  const res = autoRescheduleMissed(rows, { dailyHours: 3, schoolExams: [] });
+  assert.ok(res.moved.length === 2, 'FIX-E: autoRescheduleMissed moves both pending+skipped on load');
+  assert.ok(res.moved.every(m => m.date >= today), 'FIX-E: moved to today or future, not past');
+  assert.ok(res.moved.every(m => m.status === 'pending'), 'FIX-E: moved reset to pending');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 
