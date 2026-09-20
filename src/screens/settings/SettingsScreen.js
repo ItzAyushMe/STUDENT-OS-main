@@ -9,7 +9,7 @@ import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { SegmentedControl } from '../../components/ui/SegmentedControl';
-import { Input } from '../../components/ui/Input';
+import { Input, Stepper } from '../../components/ui/Input';
 import { ModalSheet } from '../../components/ui/ModalSheet';
 import { Chip } from '../../components/ui/Chip';
 import { SectionTitle } from '../../components/ui/EmptyState';
@@ -35,6 +35,7 @@ export function SettingsScreen({ navigation }) {
   const [testResult, setTestResult] = useState('');
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
   const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
+  const [dailyHours, setDailyHours] = useState(Number(profile?.daily_study_hours) || 3);
   const [schoolExams, setSchoolExams] = useState(
     Array.isArray(profile?.school_exams)
       ? profile.school_exams.map((e) => ({
@@ -523,6 +524,15 @@ export function SettingsScreen({ navigation }) {
       {/* Profile basics */}
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
+        <View style={{ marginBottom: 12 }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Daily study hours</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Pressable onPress={() => setDailyHours(h => Math.max(0.5, Math.round((h-0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{dailyHours} hrs</Text>
+            <Pressable onPress={() => setDailyHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
+        </View>
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}
@@ -530,6 +540,16 @@ export function SettingsScreen({ navigation }) {
           placeholder="2027-05-24"
           hint="Smart schedule + auto deadlines isse use karte hain."
         />
+        {(() => {
+          const today = new Date().toISOString().slice(0,10);
+          if (!examDate) {
+            return <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#D97706', marginTop: 6, lineHeight: 15 }}>ℹ️ No exam date set — self-paced mode chalega, schedule 6 weeks rolling hoga. Exam date set karo for full-year planning.</Text>;
+          }
+          if (examDate < today) {
+            return <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#DC2626', marginTop: 6, lineHeight: 15 }}>⚠️ Exam date past hai ({examDate}) — update karo, nahi to schedule purana lagega. Future date set karo.</Text>;
+          }
+          return null;
+        })()}
         {profile?.olympiad && profile.olympiad !== 'None' ? (
           <Input
             label={`Olympiad date — ${profile.olympiad} (YYYY-MM-DD)`}
@@ -643,6 +663,7 @@ export function SettingsScreen({ navigation }) {
               await updateProfile({
                 exam_date: examDate || null,
                 olympiad_date: olympiadDate || null,
+                daily_study_hours: dailyHours,
                 school_exams: clean,
                 priorities: normalizePriorities(priorities),
               });
@@ -770,7 +791,7 @@ function Row({ label, value }) {
   return (
     <View style={{ flexDirection: 'row', paddingVertical: 7 }}>
       <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#64748B', flex: 1 }}>{label}</Text>
-      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B' }}>{value}</Text>
+      <Text numberOfLines={1} style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B', flexShrink: 1, textAlign: 'right' }}>{value}</Text>
     </View>
   );
 }

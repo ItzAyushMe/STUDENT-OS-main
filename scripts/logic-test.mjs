@@ -742,7 +742,25 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   }
 }
 
+
+// ---------- NEW X R11: UX pack ----------
+{
+  const contentSrc = read('src/screens/study/ContentScreen.js');
+  assert.ok(contentSrc.includes('noteOpen') && contentSrc.includes('ScrollView') && contentSrc.includes('selectable'), 'ContentScreen note viewer readable scrollable selectable');
+  assert.ok(contentSrc.includes('numberOfLines'), 'ContentScreen truncation with numberOfLines');
+
+  const settingsSrc = read('src/screens/settings/SettingsScreen.js');
+  assert.ok(settingsSrc.includes('dailyHours') && settingsSrc.includes('hrs') && settingsSrc.includes('0.5'), 'SettingsScreen hours stepper exists');
+  assert.ok(settingsSrc.includes('No exam date set') && settingsSrc.includes('Exam date past'), 'SettingsScreen exam honesty messages');
+  assert.ok(settingsSrc.includes('numberOfLines'), 'SettingsScreen truncation');
+
+  const guildSrc = read('src/screens/guild/GuildScreen.js');
+  assert.ok(guildSrc.includes('once per day') || guildSrc.includes('DAILY ARENA'), 'GuildScreen arena guard note');
+  assert.ok(guildSrc.includes('hasEarnedToday') || read('src/screens/guild/ArenaScreen.js').includes('hasEarnedToday'), 'Arena XP once-per-day guard exists');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

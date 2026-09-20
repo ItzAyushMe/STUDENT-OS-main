@@ -296,7 +296,7 @@ export function GuildScreen({ navigation }) {
         <EntryCard
           icon="⚔️"
           title="DAILY ARENA"
-          sub="Same 5 Qs · global rank"
+          sub="Same 5 Qs · global rank · once per day"
           onPress={() => navigation.navigate('Arena')}
           color={GAMER.gold}
         />
