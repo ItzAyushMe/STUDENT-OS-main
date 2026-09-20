@@ -36,8 +36,6 @@ function resolveAnswerIndexStrict({ answer, options }) {
   const lowerAt = at.toLowerCase();
   let idx = opts.findIndex(o => o.trim().toLowerCase() === lowerAt);
   if (idx >=0) return idx;
-  idx = opts.findIndex(o => o.trim().toLowerCase().startsWith(lowerAt) || lowerAt.startsWith(o.trim().toLowerCase()));
-  if (idx >=0) return idx;
   const n = Number(at);
   if (Number.isInteger(n) && n >=0 && n < opts.length) return n;
   if (Number.isInteger(n) && n >=1 && n <= opts.length) return n-1;
@@ -53,8 +51,8 @@ export function normalizeTestQuestion(q, fallbackType = 'saq') {
     return {
       q: txt.slice(0, 600),
       options: [],
-      answer: txt.slice(0, 300),
-      answer_text: txt.slice(0, 300),
+      answer: '',
+      answer_text: '',
       explanation: '',
       why: '',
       marks: ft.includes('vsaq') ? 2 : ft.includes('saq') ? 3 : ft.includes('laq') ? 5 : 1,

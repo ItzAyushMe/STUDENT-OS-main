@@ -132,7 +132,7 @@ export function HabitsScreen({ navigation }) {
       });
       setLogs((prev) => [...prev, row]);
       if (isBad) {
-        await awardXP('HABIT_BAD', { countActivity: true });
+        await awardXP('HABIT_BAD', { countActivity: false });
       } else {
         const xpRes = await awardXP('HABIT');
         if (xpRes) setConfetti(Date.now());

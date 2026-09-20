@@ -563,15 +563,22 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 {
   const { normalizeTestQuestion } = await import('./../src/lib/testQuestionNormalizer.js');
 
-  // Scenario 1: string-form VSAQ/SAQ/LAQ should NOT be dropped (inherits type)
+  // Scenario 1: string-form VSAQ/SAQ/LAQ should NOT be dropped (inherits type) — FIX-A2: answer must be EMPTY
   const s1 = normalizeTestQuestion("What is photosynthesis?", "vsaq");
   assert.ok(s1 && s1.q.includes("photosynthesis") && s1.type.includes("vsaq"), "string-form VSAQ kept with type inheritance");
+  assert.ok(s1.answer === '' && s1.answer_text === '', "FIX-A2: string-form answer empty, not question repeated");
 
   const s2 = normalizeTestQuestion("Explain Newton's laws", "saq");
   assert.ok(s2 && s2.type.includes("saq"), "string-form SAQ kept");
+  assert.ok(s2.answer === '' && s2.answer_text === '', "FIX-A2: SAQ string-form empty answer");
 
   const s3 = normalizeTestQuestion("Derive the equation", "laq");
   assert.ok(s3 && s3.type.includes("laq"), "string-form LAQ kept");
+  assert.ok(s3.answer === '' && s3.answer_text === '', "FIX-A2: LAQ string-form empty answer");
+
+  // FIX-A2 specific regression
+  const regA2 = normalizeTestQuestion("Define photosynthesis.", "vsaq");
+  assert.ok(regA2.q === "Define photosynthesis." && regA2.answer === '' && regA2.type === 'vsaq', "FIX-A2 regression: Define photosynthesis. -> q kept, answer empty, type vsaq");
 
   // Scenario 2: answers under ans/solution/model_answer are read
   const qAns = normalizeTestQuestion({ q: "Capital of India?", ans: "New Delhi", type: "saq" });
@@ -589,6 +596,19 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
   const qBadAns = normalizeTestQuestion({ q: "What is Y?", options: ["A","B","C","D"], answer: "Z", type: "mcq" });
   assert.ok(qBadAns && qBadAns.answer === null, "MCQ with unresolvable answer → null");
+
+  // FIX-A3: loose prefix must NOT match
+  const { resolveAnswerIndexStrict } = await import('./../src/lib/testQuestionNormalizer.js');
+  const strictZebra = resolveAnswerIndexStrict({ answer: 'zebra', options: ['x','y','z','w'] });
+  assert.ok(strictZebra === null, "FIX-A3: zebra should NOT match z via prefix → null");
+  const strictParis = resolveAnswerIndexStrict({ answer: 'Paris', options: ['London','Paris','Berlin','Rome'] });
+  assert.ok(strictParis === 1, "FIX-A3: exact Paris matches index 1");
+  const strictLetter = resolveAnswerIndexStrict({ answer: 'b', options: ['Opt A','Opt B','Opt C','Opt D'] });
+  assert.ok(strictLetter === 1, "FIX-A3: letter b resolves to 1");
+  const strictNum = resolveAnswerIndexStrict({ answer: '2', options: ['A','B','C','D'] });
+  assert.ok(strictNum === 2 || strictNum === 1, "FIX-A3: numeric 2 resolves (0-based 2 or 1-based 1) not null");
+  const strictZero = resolveAnswerIndexStrict({ answer: '0', options: ['A','B','C','D'] });
+  assert.ok(strictZero === 0, "FIX-A3: numeric 0 resolves to 0");
 
   // Scenario 4: blank question text rejected (trim length <3)
   const qBlank = normalizeTestQuestion({ q: "  ", type: "mcq", options: ["A","B"] });
@@ -742,6 +762,26 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   }
 }
 
+
+// ---------- FIX-A1: bad habits never feed streak ----------
+{
+  const { awardXPToProfile } = await import('./../src/lib/xpService.js');
+  let prof = { id: 'u_bad', total_xp: 100, level: 2, current_streak: 3, longest_streak: 3, streak_freezes: 1, last_active_date: '2026-09-19' };
+  const inserts = [];
+  const deps = {
+    profile: prof,
+    getProfile: () => prof,
+    updateProfile: async (patch) => { prof = { ...prof, ...patch }; },
+    insert: async (row) => { inserts.push(row); },
+  };
+  const r = await awardXPToProfile(deps, 'HABIT_BAD', { countActivity: false });
+  assert.ok(r.gained === -5, 'FIX-A1: HABIT_BAD -5');
+  assert.equal(prof.current_streak, 3, 'FIX-A1: bad habit countActivity false leaves streak untouched');
+  assert.equal(prof.last_active_date, '2026-09-19', 'FIX-A1: bad habit leaves last_active_date untouched');
+
+  const habitSrc = read('src/screens/life/HabitsScreen.js');
+  assert.ok(habitSrc.includes("await awardXP('HABIT_BAD', { countActivity: false })"), 'FIX-A1: HabitsScreen bad habit uses countActivity:false');
+}
 
 // ---------- NEW X R11: UX pack ----------
 {
