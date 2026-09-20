@@ -39,7 +39,7 @@ export function HabitsScreen({ navigation }) {
   const [logs, setLogs] = useState([]);
   const [confetti, setConfetti] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
   const [editHabit, setEditHabit] = useState(null); // habit being edited (null = add mode)
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSuggests, setAiSuggests] = useState([]);
@@ -103,12 +103,17 @@ export function HabitsScreen({ navigation }) {
   );
 
   const toggleToday = async (habit) => {
+    const isBad = (habit.kind || 'good') === 'bad';
     const existing = logMap[`${habit.id}::${today}`];
     if (existing && existing.completed) {
       try {
         await db.remove('habit_logs', existing.id);
         setLogs((prev) => prev.filter((l) => l.id !== existing.id));
-        await awardXP('HABIT_UNDO', { countActivity: false });
+        if (isBad) {
+          await awardXP('HABIT_BAD_UNDO', { countActivity: false });
+        } else {
+          await awardXP('HABIT_UNDO', { countActivity: false });
+        }
       } catch (e) {
         infoAlert('Habit save fail hua', e?.message || 'Habit untick nahi ho paya — dobara try karo');
       }
@@ -126,8 +131,12 @@ export function HabitsScreen({ navigation }) {
         frozen: false,
       });
       setLogs((prev) => [...prev, row]);
-      const xpRes = await awardXP('HABIT');
-      if (xpRes) setConfetti(Date.now());
+      if (isBad) {
+        await awardXP('HABIT_BAD', { countActivity: true });
+      } else {
+        const xpRes = await awardXP('HABIT');
+        if (xpRes) setConfetti(Date.now());
+      }
     } catch (e) {
       infoAlert('Habit save fail hua', e?.message || 'Habit tick nahi ho paya — dobara try karo');
     }
@@ -159,13 +168,13 @@ export function HabitsScreen({ navigation }) {
     if (!form.name.trim()) return;
     const targetTime = /^\d{1,2}:\d{2}$/.test((form.target_time || '').trim()) ? form.target_time.trim() : null;
     if (editHabit) {
-      // EDIT: keep history/logs untouched — only the habit definition changes
       await db.update('habits', editHabit.id, {
         name: form.name.trim(),
         category: form.category,
         icon: form.icon,
         part: form.part,
         target_time: targetTime,
+        kind: form.kind || 'good',
       });
       setEditHabit(null);
     } else {
@@ -176,11 +185,12 @@ export function HabitsScreen({ navigation }) {
         icon: form.icon,
         target_time: targetTime,
         part: form.part,
+        kind: form.kind || 'good',
         is_active: true,
         created_at: nowIso(),
       });
     }
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
     setAddOpen(false);
     await load();
   };
@@ -211,6 +221,7 @@ export function HabitsScreen({ navigation }) {
       icon: habit.icon || '🎯',
       part: habit.part || 'morning',
       target_time: habit.target_time || '',
+      kind: habit.kind || 'good',
     });
     setAddOpen(true);
   };
@@ -219,7 +230,7 @@ export function HabitsScreen({ navigation }) {
     setEditHabit(null);
     setAiSuggests([]);
     setAiMsg('');
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
     setAddOpen(true);
   };
 
@@ -369,6 +380,11 @@ export function HabitsScreen({ navigation }) {
           keyboardType="numeric"
           style={{ marginTop: 4 }}
         />
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Type</Text>
+        <View style={{ flexDirection: 'row', marginBottom: 10 }}>
+          <Chip label="✅ Good habit" small selected={(form.kind||'good')==='good'} onPress={() => setForm({ ...form, kind: 'good' })} mode="light" />
+          <Chip label="🚫 Bad habit (avoid)" small selected={form.kind==='bad'} onPress={() => setForm({ ...form, kind: 'bad' })} mode="light" />
+        </View>
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Category</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
           {Object.entries(HABIT_CATEGORIES).map(([key, c]) => (
@@ -421,15 +437,16 @@ export function HabitsScreen({ navigation }) {
 
 const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, frozenYesterday, onToggle, onFreeze, onEdit, onDelete }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
+  const isBad = (habit.kind || 'good') === 'bad';
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
-  const canFreeze = atRisk && streak >= 2 && freezes > 0 && !doneToday;
+  const canFreeze = !isBad && atRisk && streak >= 2 && freezes > 0 && !doneToday;
 
   return (
     <View
       style={{
-        backgroundColor: '#FFFFFF',
+        backgroundColor: isBad ? (doneToday ? '#FEF2F2' : '#FFFBEB') : '#FFFFFF',
         borderWidth: 1,
-        borderColor: '#E2E8F0',
+        borderColor: isBad ? (doneToday ? '#FECACA' : '#FDE68A') : '#E2E8F0',
         borderRadius: radius.md,
         padding: 11,
         marginBottom: 8,
@@ -445,8 +462,8 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
           height: 36,
           borderRadius: 10,
           borderWidth: 2,
-          borderColor: doneToday ? cat.color : '#CBD5E1',
-          backgroundColor: doneToday ? cat.color : 'transparent',
+          borderColor: doneToday ? (isBad ? '#DC2626' : cat.color) : '#CBD5E1',
+          backgroundColor: doneToday ? (isBad ? '#DC2626' : cat.color) : 'transparent',
           alignItems: 'center',
           justifyContent: 'center',
           marginRight: 10,
@@ -461,8 +478,8 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
           <Text style={{ fontSize: 10, marginRight: 4 }}>{cat.icon}</Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8' }}>
-            {streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet'}
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: isBad ? '#DC2626' : (streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8') }}>
+            {isBad ? (doneToday ? '⚠️ Avoided? No — you did it today (-5 XP)' : '🚫 Avoid this — tap if you slipped') : (streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet')}
           </Text>
           {/* L-6 (audit): on Mondays the frozen Sunday cell isn't in this
               week's grid — show the freeze on the row instead. */}

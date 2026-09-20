@@ -697,7 +697,19 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(dbSrc.includes('getWeeklyGymSplit'), 'db.js exports getWeeklyGymSplit');
 }
 
+
+// ---------- NEW X R9: good/bad habits ----------
+{
+  const habitSrc = read('src/screens/life/HabitsScreen.js');
+  assert.ok(habitSrc.includes("kind") && habitSrc.includes("good") && habitSrc.includes("bad"), 'HabitsScreen handles good/bad kind');
+  assert.ok(habitSrc.includes('HABIT_BAD') && habitSrc.includes('HABIT_BAD_UNDO'), 'HabitsScreen awards BAD XP and undo');
+  assert.ok(habitSrc.includes('isBad'), 'HabitsScreen distinguishes bad habit UI');
+  const xpSrc = read('src/config/constants.js');
+  assert.ok(xpSrc.includes('HABIT_BAD'), 'XP rules include HABIT_BAD');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 
