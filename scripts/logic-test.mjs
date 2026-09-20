@@ -468,5 +468,65 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(syllabusSrc.includes('addChapter') && syllabusSrc.includes('Syllabus save fail hua'), 'Syllabus addChapter visible error');
 }
 
+
+// ---------- NEW X R3: Fair XP ----------
+{
+  // negative award reduces total, floor at 0, countActivity false leaves streak untouched
+  const { awardXPToProfile } = await import('./../src/lib/xpService.js');
+  let prof = { id: 'u_r3', total_xp: 5, level: 1, current_streak: 5, longest_streak: 5, streak_freezes: 2, last_active_date: '2026-09-19' };
+  const inserts = [];
+  const deps = {
+    profile: prof,
+    getProfile: () => prof,
+    updateProfile: async (patch) => { prof = { ...prof, ...patch }; },
+    insert: async (row) => { inserts.push(row); },
+  };
+  // HABIT_UNDO -10 with floor
+  const r1 = await awardXPToProfile(deps, 'HABIT_UNDO', { countActivity: false });
+  assert.ok(r1.gained === -10, 'HABIT_UNDO gained -10');
+  assert.equal(prof.total_xp, 0, 'floor at 0 (5 + -10 => 0)');
+  assert.equal(prof.current_streak, 5, 'countActivity false leaves streak untouched');
+  assert.equal(prof.last_active_date, '2026-09-19', 'countActivity false leaves last_active_date untouched');
+
+  // CHAPTER_UNDO -100
+  prof = { id: 'u_r3b', total_xp: 150, level: 2, current_streak: 3, longest_streak: 3, streak_freezes: 1, last_active_date: '2026-09-19' };
+  const deps2 = {
+    profile: prof,
+    getProfile: () => prof,
+    updateProfile: async (patch) => { prof = { ...prof, ...patch }; },
+    insert: async (row) => { inserts.push(row); },
+  };
+  const r2 = await awardXPToProfile(deps2, 'CHAPTER_UNDO', { countActivity: false });
+  assert.equal(r2.gained, -100, 'CHAPTER_UNDO -100');
+  assert.equal(prof.total_xp, 50, '150-100=50');
+
+  // XP_RULES amounts
+  const { XP_RULES } = await import('./../src/config/constants.js');
+  assert.equal(XP_RULES.HABIT_UNDO.amount, -10, 'HABIT_UNDO rule -10');
+  assert.equal(XP_RULES.CHAPTER_UNDO.amount, -100, 'CHAPTER_UNDO rule -100');
+}
+
+{
+  // hasEarnedToday helper exists
+  const src = read('src/lib/xpOnce.js');
+  assert.ok(src.includes('hasEarnedToday') && src.includes('markEarnedToday'), 'xpOnce helper has hasEarnedToday + markEarnedToday');
+  assert.ok(src.includes('xp_events') && src.includes('AsyncStorage'), 'xpOnce uses xp_events cloud + AsyncStorage local');
+  assert.ok(src.includes('localDateOf'), 'xpOnce filters by local date');
+
+  const arenaSrc = read('src/screens/guild/ArenaScreen.js');
+  assert.ok(arenaSrc.includes('hasEarnedToday') && arenaSrc.includes('alreadyEarnedNote'), 'ArenaScreen uses hasEarnedToday guard + note');
+  assert.ok(arenaSrc.includes('XP aaj le liya'), 'ArenaScreen shows once-per-day note');
+
+  const topicSrc = read('src/screens/study/TopicDetailScreen.js');
+  assert.ok(topicSrc.includes('CHAPTER_UNDO') && topicSrc.includes('countActivity'), 'TopicDetailScreen awards CHAPTER_UNDO on downgrade');
+
+  const habitsSrc = read('src/screens/life/HabitsScreen.js');
+  assert.ok(habitsSrc.includes('HABIT_UNDO'), 'HabitsScreen undo awards HABIT_UNDO');
+
+  const overlaySrc = read('src/components/gamer/Overlays.js');
+  assert.ok(overlaySrc.includes('isNeg') || overlaySrc.includes('Number(toast.amount) < 0'), 'Overlays handles negative toast in red');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 

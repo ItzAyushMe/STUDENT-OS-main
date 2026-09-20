@@ -108,6 +108,7 @@ export function HabitsScreen({ navigation }) {
       try {
         await db.remove('habit_logs', existing.id);
         setLogs((prev) => prev.filter((l) => l.id !== existing.id));
+        await awardXP('HABIT_UNDO', { countActivity: false });
       } catch (e) {
         infoAlert('Habit save fail hua', e?.message || 'Habit untick nahi ho paya — dobara try karo');
       }

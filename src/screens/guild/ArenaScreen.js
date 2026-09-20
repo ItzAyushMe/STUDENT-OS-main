@@ -14,6 +14,7 @@ import { aiStatus, isOnline } from '../../lib/aiService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { demoArenaBoard } from '../../lib/guildData';
 import { db, isRemote } from '../../lib/db';
+import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce';
 import { PixelText } from '../../components/gamer/PixelText';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -41,6 +42,7 @@ export function ArenaScreen({ navigation }) {
   const [questions, setQuestions] = useState(() => pickDailyArena(todayStr()));
   const [qSource, setQSource] = useState('bank'); // 'ai' | 'bank'
   const [qLoading, setQLoading] = useState(true);
+  const [alreadyEarnedNote, setAlreadyEarnedNote] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,21 +126,33 @@ export function ArenaScreen({ navigation }) {
   const finish = async () => {
     setPhase('result');
     if (correct >= 3) setConfetti(Date.now());
-    await db.insert('quiz_results', {
-      user_id: profile.id,
-      subject: null,
-      topic: null,
-      mode: 'arena',
-      total_questions: questions.length,
-      correct_answers: correct,
-      accuracy: Math.round((correct / questions.length) * 100),
-      time_taken: totalTime,
-      xp_earned: correct * 10 + 20,
-      weak_topics: [],
-      created_at: nowIso(),
-    });
-    await awardXP('ARENA_COMPLETE', { amount: 20, label: 'Arena complete' });
-    if (correct > 0) await awardXP('ARENA_CORRECT', { amount: correct * 10, label: `${correct} correct` });
+    // NEW X R3: once per day guard
+    let alreadyEarned = false;
+    try {
+      alreadyEarned = await hasEarnedToday(profile.id, 'arena');
+    } catch {}
+    if (alreadyEarned) {
+      setAlreadyEarnedNote(true);
+    } else {
+      try {
+        await db.insert('quiz_results', {
+          user_id: profile.id,
+          subject: null,
+          topic: null,
+          mode: 'arena',
+          total_questions: questions.length,
+          correct_answers: correct,
+          accuracy: Math.round((correct / questions.length) * 100),
+          time_taken: totalTime,
+          xp_earned: correct * 10 + 20,
+          weak_topics: [],
+          created_at: nowIso(),
+        });
+      } catch {}
+      await awardXP('ARENA_COMPLETE', { amount: 20, label: 'Arena complete' });
+      if (correct > 0) await awardXP('ARENA_CORRECT', { amount: correct * 10, label: `${correct} correct` });
+      try { await markEarnedToday(profile.id, 'arena'); } catch {}
+    }
     // load board
     let myEntry = { id: profile.id, name: profile.display_name || 'You', correct, time: totalTime, emoji: '🫵' };
     let rows = [];
@@ -313,8 +327,13 @@ export function ArenaScreen({ navigation }) {
               {correct}/5 CORRECT
             </PixelText>
             <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: GAMER.subtext, marginTop: 10 }}>
-              {fmtClock(totalTime)} total · +{correct * 10 + 20} XP earned
+              {fmtClock(totalTime)} total · {alreadyEarnedNote ? '0 XP (already earned today)' : `+${correct * 10 + 20} XP earned`}
             </Text>
+            {alreadyEarnedNote ? (
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: GAMER.secondary, marginTop: 8, textAlign: 'center' }}>
+                XP aaj le liya — practice chalu rahegi 🎯
+              </Text>
+            ) : null}
             <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: GAMER.accent, marginTop: 8 }}>
               {correct === 5 ? 'FLAWLESS VICTORY! 👑' : correct >= 3 ? 'Solid fight! 🔥' : 'Kal phir — practice makes power 💪'}
             </Text>
