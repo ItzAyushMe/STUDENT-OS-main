@@ -99,7 +99,7 @@ export function ScheduleScreen({ navigation, route }) {
   }, [route.params?.autoRegen]);
 
   const missed = useMemo(
-    () => sessions.filter((s) => s.status === 'pending' && s.date < todayStr()),
+    () => sessions.filter((s) => (s.status === 'pending' || s.status === 'skipped') && s.date < todayStr()),
     [sessions]
   );
 
@@ -309,11 +309,11 @@ export function ScheduleScreen({ navigation, route }) {
       {missed.length > 0 ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#92400E', flex: 1 }}>
-            {missed.length} quest{missed.length > 1 ? 's' : ''} miss ho gaye. Chinta mat karo — ek tap mein aage shift karo.
-            Class-track quests pehle shift honge 🏫
+            {missed.length} quest{missed.length > 1 ? 's' : ''} miss/skipped ho gaye. Chinta mat karo — ek tap mein aage shift karo.
+            Class-track quests pehle shift honge 🏫 Skipped = kal auto-roll forward ⏭️
           </Text>
           <Button
-            title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule (AI catch-up plan)'}
+            title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule missed + skipped (AI catch-up)'}
             size="sm"
             mode="light"
             onPress={rescheduleMissed}
@@ -325,6 +325,9 @@ export function ScheduleScreen({ navigation, route }) {
               Professor Byte: {aiPlanMsg}
             </Text>
           ) : null}
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#92400E', marginTop: 8, lineHeight: 15 }}>
+            ℹ️ Skip = is quest ko kal shift karna, delete nahi. Missed/skipped dono agle dinon mein auto-roll honge jab Auto-reschedule dabao.
+          </Text>
         </Card>
       ) : null}
 
@@ -576,8 +579,9 @@ const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
       </View>
       {!completed && !skipped ? (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Pressable onPress={() => onSkip(s)} hitSlop={8} style={{ padding: 8 }}>
-            <Ionicons name="flash-outline" size={19} color="#CBD5E1" />
+          <Pressable onPress={() => onSkip(s)} hitSlop={8} style={{ padding: 8, alignItems: 'center' }}>
+            <Ionicons name="time-outline" size={19} color="#94A3B8" />
+            <Text style={{ fontFamily: fonts.body, fontSize: 9, color: '#94A3B8', marginTop: 1 }}>Kal</Text>
           </Pressable>
           <Pressable
             onPress={() => onComplete(s)}

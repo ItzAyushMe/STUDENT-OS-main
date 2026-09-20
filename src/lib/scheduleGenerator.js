@@ -486,8 +486,9 @@ export function generateSchedule(opts) {
 // they move FIRST (school can't wait; the exam track can).
 export function autoRescheduleMissed(scheduleRows, { dailyHours = 3 } = {}) {
   const today = todayStr();
+  // NEW X R7: also move skipped rows (date < today) — they roll forward, not vanish
   const missed = scheduleRows
-    .filter((r) => r.status === 'pending' && r.date < today)
+    .filter((r) => (r.status === 'pending' || r.status === 'skipped') && r.date < today)
     .sort((a, b) => {
       const ta = TRACK_PRIORITY[rowTrack(a)] || 1;
       const tb = TRACK_PRIORITY[rowTrack(b)] || 1;

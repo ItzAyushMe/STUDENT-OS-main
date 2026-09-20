@@ -650,7 +650,30 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(aiSrc.includes('trim().length >=1') && aiSrc.includes('front') && aiSrc.includes('back'), 'aiFeatures flashcard normalization filters empties');
 }
 
+
+// ---------- NEW X R7: skipped rollover ----------
+{
+  const { autoRescheduleMissed } = await import('./../src/lib/scheduleGenerator.js');
+  const today = new Date().toISOString().slice(0,10);
+  const yesterday = new Date(Date.now()-86400000).toISOString().slice(0,10);
+  const rows = [
+    { id: '1', status: 'pending', date: yesterday, duration_minutes: 30, track: 'class', subject: 'Math' },
+    { id: '2', status: 'skipped', date: yesterday, duration_minutes: 30, track: 'class', subject: 'Physics' },
+    { id: '3', status: 'pending', date: today, duration_minutes: 30, track: 'class', subject: 'Chem' },
+  ];
+  const res = autoRescheduleMissed(rows, { dailyHours: 3 });
+  assert.ok(res.moved.length === 2, 'autoRescheduleMissed moves both pending + skipped past due');
+  assert.ok(res.moved.some(m => m.id === '2'), 'skipped row is moved, not dropped');
+  assert.ok(res.moved.every(m => m.status === 'pending'), 'moved rows reset to pending');
+
+  const schedSrc = read('src/screens/study/ScheduleScreen.js');
+  assert.ok(schedSrc.includes("status === 'skipped'") && schedSrc.includes('missed'), 'ScheduleScreen missed includes skipped');
+  assert.ok(schedSrc.includes('Kal') || schedSrc.includes('kal shift'), 'Skip button clarity (Kal label)');
+  assert.ok(schedSrc.includes('auto-roll') || schedSrc.includes('auto-roll forward'), 'Auto-run notice for skipped rollover');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 
