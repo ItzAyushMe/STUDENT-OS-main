@@ -208,13 +208,15 @@ export function ScheduleScreen({ navigation, route }) {
 
   // AI-assisted catch-up: heuristic moves first, then Professor Byte
   // explains what to prioritise / drop (graceful if AI is offline).
+  // FIX-D4: school exam awareness — heuristic skips exam days, AI prompt includes ranges
   const rescheduleMissed = async () => {
     setAiPlanBusy(true);
     try {
-      const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours });
+      const schoolExams = Array.isArray(profile.school_exams) ? profile.school_exams : [];
+      const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours, schoolExams });
       for (const m of moved) await db.update('schedule', m.id, { date: m.date, status: 'pending' });
       await load();
-      // AI advice on what to prioritise / drop (best-effort)
+      // AI advice on what to prioritise / drop (best-effort) — FIX-D4 includes school exams
       try {
         const behindTopics = missed.map((m) => m.topic || m.subject).filter(Boolean);
         const plan = await aiReschedule({
@@ -223,6 +225,7 @@ export function ScheduleScreen({ navigation, route }) {
           examDate: profile.exam_date,
           dailyHours: profile.daily_study_hours,
           behindTopics,
+          schoolExams,
         });
         if (plan?.advice) setAiPlanMsg(plan.advice);
       } catch {

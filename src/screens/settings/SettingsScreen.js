@@ -566,6 +566,22 @@ export function SettingsScreen({ navigation }) {
         <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginBottom: 8, lineHeight: 16 }}>
           Mid-terms, finals… add them and the scheduler finishes your CLASS syllabus ~2 weeks before each one.
         </Text>
+        {/* FIX-D3: saved school-exam ranges visible — summary card */}
+        {profile?.school_exams && Array.isArray(profile.school_exams) && profile.school_exams.length ? (
+          <View style={{ backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#166534', marginBottom: 6 }}>✅ Saved school exams ({profile.school_exams.length}) — visible to scheduler</Text>
+            {profile.school_exams.map((e,i) => (
+              <Text key={i} style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#15803D', lineHeight: 17 }}>
+                • {e.label || 'School exam'}: {e.exact ? (e.date || e.start_date) : `${e.start_date || e.date || ''} → ${e.end_date || e.start_date || ''}`}{e.exact ? ' (exact)' : ' (range)'}
+              </Text>
+            ))}
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>Scheduler uses these ranges: class syllabus done 2 weeks before each range start, exam days = light revision only.</Text>
+          </View>
+        ) : (
+          <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B91C1C' }}>No school exams saved yet — add your mid-terms/finals below so scheduler can plan around them.</Text>
+          </View>
+        )}
         {(schoolExams || []).map((e, i) => (
           <View key={i} style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: radius.md, padding: 10, marginBottom: 10 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>

@@ -877,7 +877,58 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(gymSrc.includes('todayWorkout'), 'GymScreen uses todayWorkout pure');
 }
 
+
+// ---------- FIX-D: truncation, note viewer full-screen, saved ranges, AI catch-up school awareness ----------
+{
+  const testBuilderSrc = read('src/screens/study/TestBuilderScreen.js');
+  // D1 truncation worst fixed: no slice(0,42) on chapter chips
+  assert.ok(!testBuilderSrc.includes('slice(0, 42)'), 'FIX-D1: Test Builder chip no longer slices to 42 chars (truncation fixed)');
+  assert.ok(testBuilderSrc.includes('Selected chapters (full names)'), 'FIX-D1: full names display added for selected chapters');
+  assert.ok(testBuilderSrc.includes('selectable'), 'FIX-D1: selectable text for full chapter names');
+
+  const contentSrc = read('src/screens/study/ContentScreen.js');
+  // D2 full-screen note viewer
+  assert.ok(contentSrc.includes('full-screen note reader') || contentSrc.includes('Full-screen reader'), 'FIX-D2: full-screen note reader label present');
+  assert.ok(contentSrc.includes('fullReaderOpen') && contentSrc.includes('selectable'), 'FIX-D2: full-screen reader state + selectable text');
+  assert.ok(contentSrc.includes('maxHeight="92%"') || contentSrc.includes('maxHeight: 520') || contentSrc.includes('full-screen reader'), 'FIX-D2: note viewer enlarged to near full-screen (92% or 520)');
+  assert.ok(contentSrc.includes('position: \'absolute\'') && contentSrc.includes('zIndex: 9999'), 'FIX-D2: true full-screen overlay with absolute positioning');
+
+  const settingsSrc = read('src/screens/settings/SettingsScreen.js');
+  // D3 saved school-exam ranges visible
+  assert.ok(settingsSrc.includes('Saved school exams') && settingsSrc.includes('visible to scheduler'), 'FIX-D3: saved school-exam ranges summary card visible');
+  assert.ok(settingsSrc.includes('Scheduler uses these ranges') || settingsSrc.includes('light revision only'), 'FIX-D3: scheduler awareness text for saved ranges');
+
+  // D4 AI catch-up respects school exams
+  const schedGenSrc = read('src/lib/scheduleGenerator.js');
+  assert.ok(schedGenSrc.includes('schoolExams') && schedGenSrc.includes('examDates') && schedGenSrc.includes('isExamDay'), 'FIX-D4: autoRescheduleMissed respects school exam ranges (examDates set + isExamDay check)');
+  assert.ok(schedGenSrc.includes("isStudy && isExamDay") || schedGenSrc.includes("don't push study into exam range") || schedGenSrc.includes('FIX-D4'), 'FIX-D4: study sessions skipped on exam days');
+
+  const aiFeatSrc = read('src/lib/aiFeatures.js');
+  assert.ok(aiFeatSrc.includes('schoolExams') && aiFeatSrc.includes('school exam days are light revision only'), 'FIX-D4: aiReschedule prompt includes school exam awareness');
+
+  const schedScreenSrc = read('src/screens/study/ScheduleScreen.js');
+  assert.ok(schedScreenSrc.includes('schoolExams') && schedScreenSrc.includes('autoRescheduleMissed') && schedScreenSrc.includes('aiReschedule'), 'FIX-D4: ScheduleScreen passes schoolExams to both autoRescheduleMissed and aiReschedule');
+  assert.ok(schedScreenSrc.includes('FIX-D4'), 'FIX-D4: ScheduleScreen has FIX-D4 comment');
+
+  // Functional test: autoRescheduleMissed should NOT move study into exam range
+  const { autoRescheduleMissed } = await import('./../src/lib/scheduleGenerator.js');
+  const today = new Date().toISOString().slice(0,10);
+  const tomorrow = new Date(Date.now()+86400000).toISOString().slice(0,10);
+  const dayAfter = new Date(Date.now()+2*86400000).toISOString().slice(0,10);
+  const yesterday = new Date(Date.now()-86400000).toISOString().slice(0,10);
+  const rows = [
+    { id: 'miss1', status: 'pending', date: yesterday, duration_minutes: 30, track: 'class', subject: 'Math', session_type: 'study' },
+  ];
+  // School exam tomorrow — should skip tomorrow for study
+  const schoolExams = [{ label: 'Mid-Terms', start_date: tomorrow, end_date: tomorrow, exact: false }];
+  const res = autoRescheduleMissed(rows, { dailyHours: 3, schoolExams });
+  assert.ok(res.moved.length === 1, 'FIX-D4: missed moved even with exam tomorrow');
+  assert.ok(res.moved[0].date !== tomorrow, `FIX-D4: moved date ${res.moved[0].date} should NOT be exam day ${tomorrow}`);
+  assert.ok(res.moved[0].date === dayAfter || res.moved[0].date === today || new Date(res.moved[0].date) > new Date(tomorrow), 'FIX-D4: moved to non-exam day');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

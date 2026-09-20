@@ -339,12 +339,14 @@ export async function aiSummarizeContent({ title, text }) {
 }
 
 // ---------- adaptive rescheduling ----------
-export async function aiReschedule({ missed = [], upcomingCount = 0, examDate, dailyHours, behindTopics = [] }) {
+export async function aiReschedule({ missed = [], upcomingCount = 0, examDate, dailyHours, behindTopics = [], schoolExams = [] }) {
+  const schoolHint = schoolExams && schoolExams.length ? `School exams: ${schoolExams.map(e => `${e.label || 'Exam'} (${e.exact ? (e.date || e.start_date) : `${e.start_date || e.date || ''}→${e.end_date || e.start_date || ''}`})`).join('; ').slice(0, 300)}. IMPORTANT: school exam days are light revision only — do NOT schedule heavy study into those ranges. Class syllabus must finish ~2 weeks before each school exam range start.` : '';
   const data = await askAIJSON({
     prompt: `A student missed ${missed.length} study sessions (topics: ${missed.map((m) => esc(m.topic || m.subject)).join('; ').slice(0, 300)}).
 They have ${upcomingCount} upcoming sessions, study ${dailyHours} hrs/day${examDate ? `, exam on ${examDate}` : ''}.
+${schoolHint}
 Weak/behind topics: ${behindTopics.map(esc).join(', ').slice(0, 200) || 'unknown'}.
-Propose which topics to prioritise in the next 7 days and what to drop/merge.
+Propose which topics to prioritise in the next 7 days and what to drop/merge. Respect school exam ranges — no heavy study on those days.
 Return JSON: {"moves":[{"topic":"...","action":"prioritise|merge|drop|keep","reason":"short"},"advice":"one warm line"}. Max 6 moves.`,
     system: AI_PERSONA,
     schemaHint: '{"moves":[{topic, action, reason}],"advice":"..."}',

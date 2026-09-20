@@ -345,7 +345,7 @@ export function TestBuilderScreen({ navigation }) {
           {shownRows.map((r) => (
             <Chip
               key={r.id}
-              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}`.slice(0, 42)}
+              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}`}
               mode="light"
               selected={picked.includes(r.id)}
               onPress={() => toggleChapter(r.id)}
@@ -357,6 +357,14 @@ export function TestBuilderScreen({ navigation }) {
             </Text>
           ) : null}
         </View>
+        {picked.length ? (
+          <View style={{ backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', borderRadius: 10, padding: 10, marginTop: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#5B21B6', marginBottom: 4 }}>Selected chapters (full names):</Text>
+            {pickedChapters.map((c) => (
+              <Text key={c.id} style={{ fontFamily: fonts.body, fontSize: 12, color: '#334155', lineHeight: 17, marginBottom: 2 }} selectable>• {c.subject} — {c.chapter}</Text>
+            ))}
+          </View>
+        ) : null}
       </Card>
 
       <Button

@@ -484,9 +484,18 @@ export function generateSchedule(opts) {
 // Moves missed/overdue pending sessions to upcoming days, keeping
 // the daily load balanced. Class-track sessions jump the queue —
 // they move FIRST (school can't wait; the exam track can).
-export function autoRescheduleMissed(scheduleRows, { dailyHours = 3 } = {}) {
+export function autoRescheduleMissed(scheduleRows, { dailyHours = 3, schoolExams = [] } = {}) {
   const today = todayStr();
   // NEW X R7: also move skipped rows (date < today) — they roll forward, not vanish
+  // FIX-D4: respect school exam ranges — never schedule heavy work into exam days
+  const exams = allSchoolExams(schoolExams);
+  const examDates = new Set();
+  for (const e of exams) {
+    const days = dayjs(e.end).diff(dayjs(e.start), 'day');
+    for (let i = 0; i <= Math.min(days, 30); i++) examDates.add(dateStr(dayjs(e.start).add(i, 'day')));
+  }
+  const isExamDay = (d) => examDates.has(d);
+
   const missed = scheduleRows
     .filter((r) => (r.status === 'pending' || r.status === 'skipped') && r.date < today)
     .sort((a, b) => {
@@ -508,9 +517,11 @@ export function autoRescheduleMissed(scheduleRows, { dailyHours = 3 } = {}) {
   let day = dayjs(today);
   const moved = [];
   for (const m of missed) {
-    // find next day with room
-    for (let i = 0; i < 21; i++) {
+    // find next day with room, skipping school exam days for study sessions
+    for (let i = 0; i < 28; i++) {
       const dstr = dateStr(day.add(i, 'day'));
+      const isStudy = (m.session_type === 'study' || !m.session_type);
+      if (isStudy && isExamDay(dstr)) continue; // FIX-D4: don't push study into exam range
       if ((loadByDate[dstr] || 0) + (m.duration_minutes || 30) <= cap) {
         loadByDate[dstr] = (loadByDate[dstr] || 0) + (m.duration_minutes || 30);
         moved.push({ ...m, date: dstr, status: 'pending' });

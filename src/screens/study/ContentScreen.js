@@ -37,6 +37,7 @@ export function ContentScreen({ navigation }) {
   // v1.0.6 recovery: readable note view
   const [noteOpen, setNoteOpen] = useState(false);
   const [selectedNote, setSelectedNote] = useState(null);
+  const [fullReaderOpen, setFullReaderOpen] = useState(false); // FIX-D2 full-screen
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -244,22 +245,22 @@ export function ContentScreen({ navigation }) {
         <Button title="Save (+5 XP)" mode="light" onPress={add} disabled={!form.title.trim() || (form.kind === 'link' && !form.body.trim())} />
       </ModalSheet>
 
-      {/* v1.0.6 recovery: readable scrollable note modal */}
-      <ModalSheet visible={noteOpen} onClose={() => { setNoteOpen(false); setSelectedNote(null); }} title={selectedNote?.title || 'Note'} mode="light">
+      {/* FIX-D2: full-screen note reader — readable, scrollable, selectable, full height */}
+      <ModalSheet visible={noteOpen} onClose={() => { setNoteOpen(false); setSelectedNote(null); }} title={selectedNote?.title || 'Note'} mode="light" maxHeight="92%">
         {selectedNote ? (
-          <View style={{ maxHeight: 420 }}>
+          <View style={{ flex: 1, minHeight: 400 }}>
             {selectedNote.subject ? (
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#6D28D9', marginBottom: 8 }}>{selectedNote.subject}</Text>
             ) : null}
-            <ScrollView style={{ backgroundColor: '#F8FAFC', borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', maxHeight: 360 }} contentContainerStyle={{ padding: 14 }}>
-              <Text selectable style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#1E293B', lineHeight: 20 }}>
+            <ScrollView style={{ backgroundColor: '#F8FAFC', borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', flex: 1, maxHeight: 520 }} contentContainerStyle={{ padding: 16 }}>
+              <Text selectable style={{ fontFamily: fonts.body, fontSize: 14.5, color: '#1E293B', lineHeight: 22 }}>
                 {selectedNote.text || '—'}
               </Text>
             </ScrollView>
             {selectedNote.ai_summary ? (
               <View style={{ backgroundColor: '#F0FDFA', borderRadius: 8, padding: 10, marginTop: 12 }}>
                 <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#0891B2', marginBottom: 4 }}>🤖 AI Summary</Text>
-                <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#134E4A', lineHeight: 17 }}>{selectedNote.ai_summary}</Text>
+                <Text selectable style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#134E4A', lineHeight: 18 }}>{selectedNote.ai_summary}</Text>
               </View>
             ) : null}
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 }}>
@@ -270,12 +271,42 @@ export function ContentScreen({ navigation }) {
                 </Pressable>
               ) : null}
             </View>
-            <View style={{ marginTop: 14 }}>
-              <Button title="Close" mode="light" variant="secondary" onPress={() => { setNoteOpen(false); setSelectedNote(null); }} />
+            <View style={{ flexDirection: 'row', marginTop: 14 }}>
+              <Button title="Close" mode="light" variant="secondary" onPress={() => { setNoteOpen(false); setSelectedNote(null); }} style={{ flex: 1, marginRight: 8 }} />
+              <Button title="Full-screen reader" mode="light" size="sm" onPress={() => setFullReaderOpen(true)} style={{ flex: 1 }} />
             </View>
           </View>
         ) : null}
       </ModalSheet>
+      {/* FIX-D2: true full-screen reader overlay — full-screen note reader */}
+      {fullReaderOpen && selectedNote ? (
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#FFFFFF', zIndex: 9999 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', paddingTop: 50, paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#E2E8F0', backgroundColor: '#F8FAFC' }}>
+            <Pressable onPress={() => setFullReaderOpen(false)} hitSlop={8} style={{ padding: 6, marginRight: 8 }}>
+              <Ionicons name="arrow-back" size={22} color="#1E293B" />
+            </Pressable>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={{ fontFamily: fonts.bodySemiBold, fontSize: 16, color: '#1E293B' }}>{selectedNote.title}</Text>
+              {selectedNote.subject ? <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#6D28D9' }}>{selectedNote.subject}</Text> : null}
+            </View>
+            <Pressable onPress={() => { setFullReaderOpen(false); setNoteOpen(false); setSelectedNote(null); }} hitSlop={8} style={{ padding: 6 }}>
+              <Ionicons name="close" size={22} color="#64748B" />
+            </Pressable>
+          </View>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+            <Text selectable style={{ fontFamily: fonts.body, fontSize: 16, color: '#1E293B', lineHeight: 26 }}>
+              {selectedNote.text || '—'}
+            </Text>
+            {selectedNote.ai_summary ? (
+              <View style={{ backgroundColor: '#F0FDFA', borderRadius: 12, padding: 14, marginTop: 20, borderWidth: 1, borderColor: '#CCFBF1' }}>
+                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#0F766E', marginBottom: 6 }}>🤖 AI Summary</Text>
+                <Text selectable style={{ fontFamily: fonts.body, fontSize: 14, color: '#134E4A', lineHeight: 20 }}>{selectedNote.ai_summary}</Text>
+              </View>
+            ) : null}
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#94A3B8', marginTop: 20 }}>{localDateOf(selectedNote.created_at)} · full-screen reader</Text>
+          </ScrollView>
+        </View>
+      ) : null}
     </Screen>
   );
 }
