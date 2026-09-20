@@ -157,9 +157,8 @@ export const SUBJECT_COLORS = [
 // ============================================================
 // ONBOARDING OPTIONS
 // ============================================================
-// Class 6–8 and College were removed in v1.0.2 — StudentOS now targets
-// board-exam students (Class 9–12), where the scheduler matters most.
-// Existing Class 6–8 profiles keep working; the presets stay in syllabusData.
+// FIX-B: Class 6-8 and College removed per PO PDF — StudentOS targets board-exam students (Class 9-12)
+// Existing 6-8 profiles keep their rows — no DB deletion, but no new lookups
 export const CLASS_GROUPS = [
   { id: 'high', label: 'High School', hint: 'Class 9–10', classes: ['Class 9', 'Class 10'], showBoard: true },
   { id: 'senior', label: 'Senior Secondary', hint: 'Class 11–12', classes: ['Class 11', 'Class 12'], showBoard: true },

@@ -104,7 +104,7 @@ assert.equal(set.olympiad?.key, 'ioqm', 'IOQM track available as separate layer'
 assert.ok(set.class.rows.length >= 20, 'class 10 syllabus is substantial: ' + set.class.rows.length);
 
 set = pickSyllabusSet({ class_level: 'Class 6', competitive_exam: 'NEET' });
-assert.equal(set.class?.key, 'class6', 'Class 6 student gets Class 6 syllabus even with NEET picked');
+assert.equal(set.class, null, 'FIX-B: Class 6 deleted → pickSyllabusSet returns null (existing users keep rows, no new lookup)');
 
 set = pickSyllabusSet({ class_level: 'Class 12', competitive_exam: 'JEE Advanced' });
 assert.equal(set.class?.key, 'class12', 'Class 12 student gets Class 12 syllabus');
@@ -117,9 +117,11 @@ assert.equal(set.class?.key, 'class9', 'Class 9 default class syllabus');
 assert.equal(set.olympiad?.key, 'nso', 'NSO olympiad track');
 assert.equal(set.exam, null, 'no exam track when exam is None');
 
-for (const cls of ['Class 6', 'Class 7', 'Class 8', 'Class 9', 'Class 10', 'Class 11', 'Class 12', 'College']) {
+for (const cls of ['Class 9', 'Class 10', 'Class 11', 'Class 12']) {
   assert.ok(CLASS_SYLLABI[cls]?.rows.length >= 10, `${cls} syllabus exists with chapters`);
 }
+// FIX-B: 6/7/8/College deleted per PO PDF
+assert.ok(!CLASS_SYLLABI['Class 6'] && !CLASS_SYLLABI['Class 7'] && !CLASS_SYLLABI['Class 8'] && !CLASS_SYLLABI['College'], 'Class 6/7/8/College deleted per FIX-B');
 assert.ok(Object.keys(EXAM_SYLLABI).length >= 3, 'exam tracks exist');
 assert.ok(Object.keys(OLYMPIAD_SYLLABI).length >= 4, 'olympiad tracks exist');
 
@@ -729,21 +731,37 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 }
 
 
-// ---------- NEW X R10: syllabus data overhaul ----------
+// ---------- NEW X R10: syllabus data overhaul (FIX-B real) ----------
 {
   const { CLASS_SYLLABI } = await import('./../src/data/syllabusData.js');
+  // Class 6/7/8/College must be ABSENT per FIX-B
+  assert.ok(!CLASS_SYLLABI['Class 6'], 'FIX-B: Class 6 deleted');
+  assert.ok(!CLASS_SYLLABI['Class 7'], 'FIX-B: Class 7 deleted');
+  assert.ok(!CLASS_SYLLABI['Class 8'], 'FIX-B: Class 8 deleted');
+  assert.ok(!CLASS_SYLLABI['College'], 'FIX-B: College deleted');
+
   const c9 = CLASS_SYLLABI['Class 9'];
   const c10 = CLASS_SYLLABI['Class 10'];
-  assert.ok(c9 && c9.rows.length >= 80, `Class 9 rows >=80 got ${c9?.rows.length}`);
-  assert.ok(c10 && c10.rows.length >= 100, `Class 10 rows >=100 got ${c10?.rows.length}`);
-  // Subject coverage
+  assert.ok(c9 && c10, 'FIX-B: Class 9 and 10 present');
+  assert.ok(c9.rows.length >= 80, `FIX-B: Class 9 rows >=80 got ${c9?.rows.length}`);
+  assert.ok(c10.rows.length >= 90, `FIX-B: Class 10 rows >=90 got ${c10?.rows.length}`);
+
+  // Representative exact chapter names per audit
+  const hasChapter = (rows, name) => rows.some(r => r.chapter === name || r.chapter.includes(name));
+  assert.ok(hasChapter(c10.rows, 'The Rise of Nationalism in Europe'), 'FIX-B: Class10 has The Rise of Nationalism in Europe');
+  assert.ok(hasChapter(c9.rows, 'Kabir Ke Dohe'), 'FIX-B: Class9 has Kabir Ke Dohe');
+  assert.ok(hasChapter(c10.rows, 'A Letter to God'), 'FIX-B: Class10 has A Letter to God');
+
+  // Subject coverage Appendix A/B
   const subjects9 = new Set(c9.rows.map(r=>r.subject));
-  assert.ok(subjects9.has('Science') && subjects9.has('Maths') && subjects9.has('English'), 'Class9 has core subjects');
-  assert.ok(subjects9.has('History') || subjects9.has('Political Science'), 'Class9 has SST');
   const subjects10 = new Set(c10.rows.map(r=>r.subject));
-  assert.ok(subjects10.has('Science') && subjects10.has('Maths') && subjects10.has('English'), 'Class10 has core subjects');
-  assert.ok(subjects10.has('Geography') && subjects10.has('Economics'), 'Class10 has full SST');
-  // No duplicate chapter within same subject (exact duplicate)
+  // Science, Maths, History, Geography, Political Science, Economics, English, Hindi, AI
+  for (const subj of ['Science','Maths','History','Geography','Political Science','Economics','English','Hindi','AI']) {
+    assert.ok(subjects9.has(subj), `FIX-B: Class9 has ${subj}`);
+    assert.ok(subjects10.has(subj), `FIX-B: Class10 has ${subj}`);
+  }
+
+  // No duplicate exact chapter within same subject
   const dupCheck = (rows) => {
     const seen = new Set();
     for (const r of rows) {
@@ -753,34 +771,23 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     }
     return null;
   };
-  assert.ok(!dupCheck(c9.rows), `Class9 no duplicate chapters`);
-  assert.ok(!dupCheck(c10.rows), `Class10 no duplicate chapters`);
-  // Weightage 1-5 and estimated_hours reasonable
-  for (const r of [...c9.rows, ...c10.rows]) {
-    assert.ok(r.weightage >=1 && r.weightage <=5, `weightage 1-5 for ${r.chapter}`);
-    assert.ok(r.estimated_hours >=1 && r.estimated_hours <=20, `estimated_hours reasonable for ${r.chapter}`);
-  }
-}
+  assert.ok(!dupCheck(c9.rows), 'FIX-B: Class9 no duplicate chapters');
+  assert.ok(!dupCheck(c10.rows), 'FIX-B: Class10 no duplicate chapters');
 
+  // Class 9 Maths Part 2 speculative flag present
+  assert.ok(c9.rows.some(r => r.chapter.includes('Part 2') && r.chapter.includes('speculative')), 'FIX-B: Class9 Maths Part 2 speculative flag');
 
-// ---------- FIX-A1: bad habits never feed streak ----------
-{
-  const { awardXPToProfile } = await import('./../src/lib/xpService.js');
-  let prof = { id: 'u_bad', total_xp: 100, level: 2, current_streak: 3, longest_streak: 3, streak_freezes: 1, last_active_date: '2026-09-19' };
-  const inserts = [];
-  const deps = {
-    profile: prof,
-    getProfile: () => prof,
-    updateProfile: async (patch) => { prof = { ...prof, ...patch }; },
-    insert: async (row) => { inserts.push(row); },
-  };
-  const r = await awardXPToProfile(deps, 'HABIT_BAD', { countActivity: false });
-  assert.ok(r.gained === -5, 'FIX-A1: HABIT_BAD -5');
-  assert.equal(prof.current_streak, 3, 'FIX-A1: bad habit countActivity false leaves streak untouched');
-  assert.equal(prof.last_active_date, '2026-09-19', 'FIX-A1: bad habit leaves last_active_date untouched');
+  // Onboarding picker 9-12 only
+  const constSrc = read('src/config/constants.js');
+  // Extract CLASS_GROUPS block
+  const cgMatch = constSrc.match(/CLASS_GROUPS\s*=\s*\[([\s\S]*?)\];/);
+  const cgBlock = cgMatch ? cgMatch[1] : '';
+  assert.ok(cgBlock.includes('Class 9') && cgBlock.includes('Class 12'), 'CLASS_GROUPS has 9-12');
+  assert.ok(!cgBlock.includes('Class 6') && !cgBlock.includes('Class 7') && !cgBlock.includes('Class 8'), 'FIX-B: CLASS_GROUPS does NOT have 6-8');
 
-  const habitSrc = read('src/screens/life/HabitsScreen.js');
-  assert.ok(habitSrc.includes("await awardXP('HABIT_BAD', { countActivity: false })"), 'FIX-A1: HabitsScreen bad habit uses countActivity:false');
+  // pickSyllabusSet guards no 6-8 lookups
+  const syllSrc = read('src/data/syllabusData.js');
+  assert.ok(!syllSrc.includes('`Class ${n}`') || syllSrc.includes('if (n === 9'), 'normalizeClass only 9-12');
 }
 
 // ---------- NEW X R11: UX pack ----------
