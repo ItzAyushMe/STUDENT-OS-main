@@ -146,9 +146,15 @@ function sortRows(rows, order) {
 export const db = {
   async list(table, opts = {}) {
     if (isRemote()) {
+      // v1.0.6 J: guard empty in() — Supabase errors on empty array
+      for (const [col, vals] of Object.entries(opts.in || {})) {
+        if (!Array.isArray(vals) || vals.length === 0) {
+          return [];
+        }
+      }
       let q = supabase.from(table).select('*');
       for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
-      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val); // L-8 (audit): was silently ignored in cloud mode
+      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
       for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
       for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
       for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
@@ -169,9 +175,27 @@ export const db = {
   async insert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).insert(full).select().single();
-      if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).insert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        // v1.0.6 Y Round1: fallback if updated_at / created_at column missing in live DB (old deployments)
+        if (msg.includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        if (msg.includes('created_at') && full.created_at) {
+          const { created_at: _c, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.insert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     rows.push(full);
@@ -183,9 +207,26 @@ export const db = {
     if (!list || !list.length) return [];
     if (isRemote()) {
       const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
-      const { data, error } = await supabase.from(table).insert(full).select();
-      if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-      return data || full;
+      try {
+        const { data, error } = await supabase.from(table).insert(full).select();
+        if (error) throw error;
+        return data || full;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        if (msg.includes('updated_at')) {
+          const without = full.map(({ updated_at: _u, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        if (msg.includes('created_at')) {
+          const without = full.map(({ created_at: _c, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
@@ -196,9 +237,19 @@ export const db = {
   async update(table, id, patch) {
     const full = { ...patch, updated_at: nowIso() };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
-      if (error) throw new Error(`[db.update ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // v1.0.6 recovery: fallback if updated_at column missing in remote DB (old deployments)
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
+          if (error) throw new Error(`[db.update ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.update ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     let updated = null;
@@ -216,9 +267,20 @@ export const db = {
   async upsert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).upsert(full).select().single();
-      if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
-      return data;
+      try {
+        const { data, error } = await supabase.from(table).upsert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // fallback without updated_at if column missing
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).upsert(without).select().single();
+          if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.upsert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const i = rows.findIndex((r) => r.id === full.id);
@@ -270,6 +332,8 @@ export const db = {
 };
 
 // Wipe all local-mode data (used by "Reset local data" in Settings)
+export { getWeeklyGymSplit } from './gymSplit.js';
+
 export async function wipeLocalData() {
   const keys = await AsyncStorage.getAllKeys();
   const ours = keys.filter((k) => k.startsWith('sos.'));

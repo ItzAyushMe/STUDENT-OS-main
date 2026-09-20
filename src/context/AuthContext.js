@@ -168,6 +168,11 @@ export function AuthProvider({ children }) {
       try {
         await db.update('users', base.id, patch);
       } catch (e) {
+        console.warn('[auth] updateProfile failed:', e?.message);
+        if (isRemote()) {
+          // v1.0.6 Y Round1: do NOT swallow in cloud mode — caller must see failure
+          throw e;
+        }
         // keep optimistic state; local mode never throws here in practice
       }
     },

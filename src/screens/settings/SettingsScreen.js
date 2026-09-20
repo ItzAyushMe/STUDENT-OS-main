@@ -9,7 +9,7 @@ import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { SegmentedControl } from '../../components/ui/SegmentedControl';
-import { Input } from '../../components/ui/Input';
+import { Input, Stepper } from '../../components/ui/Input';
 import { ModalSheet } from '../../components/ui/ModalSheet';
 import { Chip } from '../../components/ui/Chip';
 import { SectionTitle } from '../../components/ui/EmptyState';
@@ -35,6 +35,7 @@ export function SettingsScreen({ navigation }) {
   const [testResult, setTestResult] = useState('');
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
   const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
+  const [dailyHours, setDailyHours] = useState(Number(profile?.daily_study_hours) || 3);
   const [schoolExams, setSchoolExams] = useState(
     Array.isArray(profile?.school_exams)
       ? profile.school_exams.map((e) => ({
@@ -118,9 +119,7 @@ export function SettingsScreen({ navigation }) {
     );
   };
 
-  // v1.0.2 + audit M-8: delete my account — wipes every row, signs out,
-  // clears local data, and (if the delete-user Edge Function is deployed)
-  // removes the Supabase login itself so the email can't sign back in.
+  // v1.0.6 recovery I + Y Round3: delete my account — honest reporting, no silent success
   const deleteAccount = () => {
     confirmAlert(
       'Delete your account?',
@@ -128,19 +127,51 @@ export function SettingsScreen({ navigation }) {
       () => {
         confirmAlert(
           'Last chance!',
-          'Data erase ho jayega. Note: agar delete-user function deploy nahi hua hai to tumhara login (email/Google) auth provider pe reh jayega — sign in karke fresh start kar sakte ho. Continue?',
+          'Data erase ho jayega. Continue?',
           async () => {
             setDeleting(true);
+            let lastErr = null;
+            const failedTables = [];
+            let edgeFailed = false;
+            let edgeError = '';
             try {
               if (cloudMode && profile?.id) {
-                // M-8 proper fix: best-effort call to the Edge Function that
-                // deletes the auth user server-side (service-role). Cascades
-                // wipe every table via ON DELETE CASCADE.
+                const tablesByUserId = [
+                  'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
+                  'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
+                  'habits', 'focus_sessions', 'leaderboard', 'friends',
+                ];
+                for (const t of tablesByUserId) {
+                  try {
+                    await db.removeWhere(t, { user_id: profile.id });
+                  } catch (e) {
+                    console.warn(`[deleteAccount] failed to delete ${t} by user_id:`, e?.message);
+                    lastErr = e;
+                    failedTables.push(`${t}(${e?.message || 'error'})`);
+                  }
+                }
+                try {
+                  await db.removeWhere('friends', { friend_id: profile.id });
+                } catch (e) {
+                  console.warn('[deleteAccount] failed to delete friends by friend_id:', e?.message);
+                  lastErr = e;
+                  failedTables.push(`friends(friend_id): ${e?.message || 'error'}`);
+                }
+                try {
+                  const { error } = await supabase.from('users').delete().eq('id', profile.id);
+                  if (error) throw error;
+                } catch (e) {
+                  console.warn('[deleteAccount] failed to delete users row:', e?.message);
+                  lastErr = e;
+                  failedTables.push(`users: ${e?.message || 'error'}`);
+                }
+
+                // Edge Function to delete auth user (service-role)
                 try {
                   const { data: authData } = await supabase.auth.getSession();
                   const token = authData?.session?.access_token;
                   if (token) {
-                    await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
+                    const res = await fetch(`${SUPABASE_URL}/functions/v1/delete-user`, {
                       method: 'POST',
                       headers: {
                         'Content-Type': 'application/json',
@@ -148,21 +179,41 @@ export function SettingsScreen({ navigation }) {
                       },
                       body: JSON.stringify({ user_id: profile.id }),
                     });
+                    if (!res.ok) {
+                      const txt = await res.text().catch(() => '');
+                      console.warn('[deleteAccount] Edge Function failed:', res.status, txt);
+                      edgeFailed = true;
+                      edgeError = `${res.status} ${txt}`.slice(0, 200);
+                    }
+                  } else {
+                    edgeFailed = true;
+                    edgeError = 'No session token';
                   }
-                } catch { /* function not deployed — rows are wiped below anyway */ }
-                const tables = [
-                  'xp_events', 'mood_logs', 'workout_logs', 'content', 'flashcards',
-                  'quiz_results', 'schedule', 'deadlines', 'syllabus', 'habit_logs',
-                  'habits', 'focus_sessions', 'leaderboard', 'friends', 'users',
-                ];
-                for (const t of tables) {
-                  try { await db.removeWhere(t, { user_id: profile.id }); } catch { /* RLS/best-effort */ }
+                } catch (e) {
+                  console.warn('[deleteAccount] Edge Function call failed (not deployed?):', e?.message);
+                  edgeFailed = true;
+                  edgeError = e?.message || 'Edge call failed';
                 }
-                try { await db.removeWhere('friends', { friend_id: profile.id }); } catch { /* other side keeps a ghost entry */ }
+
+                // Y Round3: honesty BEFORE signOut
+                if (failedTables.length || edgeFailed) {
+                  const msg = [
+                    failedTables.length ? `Kuch tables delete nahi ho paye: ${failedTables.join(', ')}` : '',
+                    edgeFailed ? `Login delete nahi ho paya (Edge Function): ${edgeError || 'not deployed'}. Data delete ho gaya, lekin login delete nahi ho paya — support se baat karo ya Supabase Dashboard se auth user delete karo.` : '',
+                  ].filter(Boolean).join('\n\n');
+                  // show alert BEFORE wipe/signout so user sees truth
+                  infoAlert('Delete partially completed', msg);
+                }
               }
               await wipeLocalData();
               try { await AsyncStorage.removeItem('sos.session'); } catch { /* ignore */ }
               await signOut();
+              if (lastErr) {
+                console.warn('[deleteAccount] completed with failures:', failedTables, edgeError);
+              }
+            } catch (e) {
+              console.error('[deleteAccount] unexpected error:', e);
+              infoAlert('Delete failed', e?.message || 'Kuch gadbad ho gayi — dobara try karo.');
             } finally {
               setDeleting(false);
             }
@@ -422,17 +473,20 @@ export function SettingsScreen({ navigation }) {
           size="sm"
           mode="light"
           onPress={async () => {
-            const norm = normalizePriorities(priorities);
-            setPriorities(norm);
-            await updateProfile({ priorities: norm });
-            setTestResult('Priorities saved ✅');
-            // BUG 10: apply immediately — offer to regenerate the schedule
-            confirmAlert(
-              'Regenerate schedule?',
-              'Naye priorities schedule pe turant apply ho jayenge. Abhi regenerate karein?',
-              () => navigation.navigate('StudyTab', { screen: 'Schedule', params: { autoRegen: true } }),
-              'Regenerate'
-            );
+            try {
+              const norm = normalizePriorities(priorities);
+              setPriorities(norm);
+              await updateProfile({ priorities: norm });
+              setTestResult('Priorities saved ✅');
+              confirmAlert(
+                'Regenerate schedule?',
+                'Naye priorities schedule pe turant apply ho jayenge. Abhi regenerate karein?',
+                () => navigation.navigate('StudyTab', { screen: 'Schedule', params: { autoRegen: true } }),
+                'Regenerate'
+              );
+            } catch (e) {
+              infoAlert('Priorities save fail hua', e?.message || 'Priorities save nahi ho paye — dobara try karo');
+            }
           }}
           style={{ marginTop: 6 }}
         />
@@ -470,6 +524,15 @@ export function SettingsScreen({ navigation }) {
       {/* Profile basics */}
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
+        <View style={{ marginBottom: 12 }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Daily study hours</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Pressable onPress={() => setDailyHours(h => Math.max(0.5, Math.round((h-0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{dailyHours} hrs</Text>
+            <Pressable onPress={() => setDailyHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
+        </View>
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}
@@ -477,6 +540,16 @@ export function SettingsScreen({ navigation }) {
           placeholder="2027-05-24"
           hint="Smart schedule + auto deadlines isse use karte hain."
         />
+        {(() => {
+          const today = new Date().toISOString().slice(0,10);
+          if (!examDate) {
+            return <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#D97706', marginTop: 6, lineHeight: 15 }}>ℹ️ No exam date set — self-paced mode chalega, schedule 6 weeks rolling hoga. Exam date set karo for full-year planning.</Text>;
+          }
+          if (examDate < today) {
+            return <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#DC2626', marginTop: 6, lineHeight: 15 }}>⚠️ Exam date past hai ({examDate}) — update karo, nahi to schedule purana lagega. Future date set karo.</Text>;
+          }
+          return null;
+        })()}
         {profile?.olympiad && profile.olympiad !== 'None' ? (
           <Input
             label={`Olympiad date — ${profile.olympiad} (YYYY-MM-DD)`}
@@ -493,6 +566,22 @@ export function SettingsScreen({ navigation }) {
         <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B', marginBottom: 8, lineHeight: 16 }}>
           Mid-terms, finals… add them and the scheduler finishes your CLASS syllabus ~2 weeks before each one.
         </Text>
+        {/* FIX-D3: saved school-exam ranges visible — summary card */}
+        {profile?.school_exams && Array.isArray(profile.school_exams) && profile.school_exams.length ? (
+          <View style={{ backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#166534', marginBottom: 6 }}>✅ Saved school exams ({profile.school_exams.length}) — visible to scheduler</Text>
+            {profile.school_exams.map((e,i) => (
+              <Text key={i} style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#15803D', lineHeight: 17 }}>
+                • {e.label || 'School exam'}: {e.exact ? (e.date || e.start_date) : `${e.start_date || e.date || ''} → ${e.end_date || e.start_date || ''}`}{e.exact ? ' (exact)' : ' (range)'}
+              </Text>
+            ))}
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>Scheduler uses these ranges: class syllabus done 2 weeks before each range start, exam days = light revision only.</Text>
+          </View>
+        ) : (
+          <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B91C1C' }}>No school exams saved yet — add your mid-terms/finals below so scheduler can plan around them.</Text>
+          </View>
+        )}
         {(schoolExams || []).map((e, i) => (
           <View key={i} style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: radius.md, padding: 10, marginBottom: 10 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
@@ -575,24 +664,29 @@ export function SettingsScreen({ navigation }) {
           title="Save Exam Setup"
           size="sm"
           mode="light"
-          onPress={() => {
-            const clean = schoolExams
-              .map((e) => ({
-                label: (e.label || 'School exam').trim() || 'School exam',
-                exact: Boolean(e.exact),
-                ...(e.exact
-                  ? { date: (e.date || '').trim() }
-                  : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
-              }))
-              .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
-            setSchoolExams(clean);
-            updateProfile({
-              exam_date: examDate || null,
-              olympiad_date: olympiadDate || null,
-              school_exams: clean,
-              priorities: normalizePriorities(priorities),
-            });
-            setTestResult('Exam setup saved ✅');
+          onPress={async () => {
+            try {
+              const clean = schoolExams
+                .map((e) => ({
+                  label: (e.label || 'School exam').trim() || 'School exam',
+                  exact: Boolean(e.exact),
+                  ...(e.exact
+                    ? { date: (e.date || '').trim() }
+                    : { start_date: (e.start_date || '').trim(), end_date: (e.end_date || e.start_date || '').trim() }),
+                }))
+                .filter((e) => (e.exact ? /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') : /^\d{4}-\d{2}-\d{2}$/.test(e.start_date || '')));
+              setSchoolExams(clean);
+              await updateProfile({
+                exam_date: examDate || null,
+                olympiad_date: olympiadDate || null,
+                daily_study_hours: dailyHours,
+                school_exams: clean,
+                priorities: normalizePriorities(priorities),
+              });
+              setTestResult('Exam setup saved ✅');
+            } catch (e) {
+              infoAlert('Exam setup save fail hua', e?.message || 'Exam setup save nahi ho paya — dobara try karo');
+            }
           }}
         />
       </Card>
@@ -713,7 +807,7 @@ function Row({ label, value }) {
   return (
     <View style={{ flexDirection: 'row', paddingVertical: 7 }}>
       <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#64748B', flex: 1 }}>{label}</Text>
-      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B' }}>{value}</Text>
+      <Text numberOfLines={1} style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B', flexShrink: 1, textAlign: 'right' }}>{value}</Text>
     </View>
   );
 }

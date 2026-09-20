@@ -13,9 +13,10 @@ import { HABIT_PRESETS } from '../config/constants';
 import { pickSyllabusSet } from '../data/syllabusData';
 
 export async function seedHabits(userId) {
-  const existing = await db.list('habits', { eq: { user_id: userId }, limit: 1 });
-  if (existing && existing.length) return 0;
-  const rows = HABIT_PRESETS.map((h) => ({
+  // v1.0.6 Y Round3: make idempotent by name — prevents duplicates if onboarding re-enters or setTimeout fires twice
+  const existing = await db.list('habits', { eq: { user_id: userId } });
+  const existingNames = new Set(existing.map((r) => (r.name || '').trim().toLowerCase()));
+  const rows = HABIT_PRESETS.filter((h) => !existingNames.has((h.name || '').trim().toLowerCase())).map((h) => ({
     user_id: userId,
     name: h.name,
     category: h.category,
@@ -25,6 +26,7 @@ export async function seedHabits(userId) {
     is_active: true,
     created_at: nowIso(),
   }));
+  if (!rows.length) return 0;
   await db.insertMany('habits', rows);
   return rows.length;
 }
@@ -74,13 +76,20 @@ export async function seedSyllabus(userId, opts = {}) {
 
 // Import a SINGLE track (used by the Syllabus screen's per-track import).
 // track: 'class' | 'olympiad' | 'exam'
+// v1.0.6 recovery H: no early exit, merge only missing chapters, no dupes, preserve completed
 export async function seedSyllabusTrack(userId, profile, track) {
-  const existing = await db.list('syllabus', { eq: { user_id: userId, track }, limit: 1 });
-  if (existing && existing.length) return 0;
   const set = pickSyllabusSet(profile);
   const preset = set[track];
-  const rows = presetToRows(userId, preset, track);
-  if (!rows.length) return 0;
-  await db.insertMany('syllabus', rows);
-  return rows.length;
+  if (!preset?.rows?.length) return 0;
+
+  const existingRows = await db.list('syllabus', { eq: { user_id: userId, track } });
+  const existingKeys = new Set(existingRows.map((r) => `${r.subject}::${r.chapter}`));
+
+  // Only insert chapters that don't already exist for this track
+  const allRows = presetToRows(userId, preset, track);
+  const fresh = allRows.filter((r) => !existingKeys.has(`${r.subject}::${r.chapter}`));
+
+  if (!fresh.length) return 0;
+  await db.insertMany('syllabus', fresh);
+  return fresh.length;
 }

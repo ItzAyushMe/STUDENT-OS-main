@@ -1,6 +1,7 @@
 // GUILD — friends, weekly leaderboard (resets Monday), activity
 // feed with cheers, entry points to Daily Arena & Battles.
 // Gamer mode. Cloud mode = real data; local mode = demo rivals.
+// v1.0.6 recovery J: pending vs accepted, RLS accept, empty friend-ID guard
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
@@ -34,7 +35,7 @@ export function GuildScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [weekRows, setWeekRows] = useState([]);
   const [friends, setFriends] = useState([]);
-  const [incoming, setIncoming] = useState([]); // HIGH-5: requests TO me (friend_id = me, pending)
+  const [incoming, setIncoming] = useState([]); // requests TO me (friend_id = me, pending)
   const [feed, setFeed] = useState([]);
   const [addOpen, setAddOpen] = useState(false);
   const [addUsername, setAddUsername] = useState('');
@@ -49,7 +50,7 @@ export function GuildScreen({ navigation }) {
       const mine = await syncMyWeeklyLeaderboard(profile);
       const weekStart = weekStartStr(todayStr());
 
-      // ----- leaderboard -----
+      // ----- leaderboard ----- v1.0.6 J: guard empty in() filters
       const rows = [];
       if (mine) rows.push({ ...mine, name: profile.display_name || profile.username || 'You', emoji: '🫵', me: true });
       if (isRemote()) {
@@ -68,6 +69,11 @@ export function GuildScreen({ navigation }) {
                 emoji: '🎮',
               })
             );
+        } else {
+          // no other users — avoid empty in() query that would error in Supabase
+          board
+            .filter((b) => b.user_id !== profile.id)
+            .forEach((b) => rows.push({ ...b, name: 'Player', emoji: '🎮' }));
         }
       } else {
         demoRivalWeeklyXp(todayStr()).forEach((r) =>
@@ -78,40 +84,83 @@ export function GuildScreen({ navigation }) {
       rows.forEach((r, i) => (r.rank = i + 1));
       setWeekRows(rows);
 
-      // ----- friends -----
+      // ----- friends ----- v1.0.6 J: pending vs accepted separation + empty guard
       const fr = await db.list('friends', { eq: { user_id: profile.id } });
-      // HIGH-5 (audit): incoming requests were never fetched, so nobody
-      // could ever ACCEPT a friend request — the whole social flow dead-ended.
+      // incoming requests TO me
       let inc = [];
       if (isRemote()) {
         try {
           inc = await db.list('friends', { eq: { friend_id: profile.id, status: 'pending' } });
-        } catch { /* RLS should allow this via friends_participants */ }
+        } catch { /* RLS should allow via friends_participants */ }
       }
-      const incUserIds = inc.map((r) => r.user_id);
+      const incUserIds = inc.map((r) => r.user_id).filter(Boolean);
       const incUsers = incUserIds.length ? await db.list('users', { in: { id: incUserIds } }) : [];
       const incNameOf = {};
       incUsers.forEach((u) => (incNameOf[u.id] = { name: u.display_name || u.username || 'Player', username: u.username || 'player' }));
       setIncoming(inc.map((r) => ({ ...r, from: incNameOf[r.user_id] || { name: 'Player', username: 'player' } })));
-      const demoFriends = fr.length || isRemote() || CLOUD_ONLY ? [] : DEMO_RIVALS.slice(0, 3).map((r) => ({ id: `demo-${r.id}`, friend: r, status: 'accepted', demo: true }));
-      setFriends([...fr.map((f) => ({ ...f, friend: { id: f.friend_id, display_name: f.friend_name || 'Player', username: f.friend_name || 'player' } })), ...demoFriends]);
 
-      // ----- feed -----
+      const acceptedFriends = fr.filter((f) => f.status === 'accepted');
+      const pendingSent = fr.filter((f) => f.status === 'pending');
+
+      // guard empty friend-id filters
+      const friendIds = [...new Set(acceptedFriends.map((f) => f.friend_id).filter(Boolean))];
+      let friendUsersById = {};
+      if (friendIds.length) {
+        try {
+          const users = await db.list('users', { in: { id: friendIds } });
+          users.forEach((u) => (friendUsersById[u.id] = u));
+        } catch {
+          friendUsersById = {};
+        }
+      }
+
+      const demoFriends = fr.length || isRemote() || CLOUD_ONLY ? [] : DEMO_RIVALS.slice(0, 3).map((r) => ({ id: `demo-${r.id}`, friend: r, status: 'accepted', demo: true }));
+
+      const mappedFriends = [
+        ...acceptedFriends.map((f) => ({
+          ...f,
+          friend: {
+            id: f.friend_id,
+            display_name: friendUsersById[f.friend_id]?.display_name || f.friend_name || 'Player',
+            username: friendUsersById[f.friend_id]?.username || f.friend_name || 'player',
+            total_xp: friendUsersById[f.friend_id]?.total_xp || 0,
+          },
+        })),
+        ...pendingSent.map((f) => ({
+          ...f,
+          friend: {
+            id: f.friend_id,
+            display_name: f.friend_name || 'Player',
+            username: f.friend_name || 'player',
+          },
+          pendingSent: true,
+        })),
+        ...demoFriends,
+      ];
+      setFriends(mappedFriends);
+
+      // ----- feed ----- only from accepted friends
       const items = [];
       if (isRemote()) {
         const events = await db.list('xp_events', { gte: { created_at: `${weekStart}T00:00:00` }, order: { col: 'created_at', asc: false }, limit: 40 });
-        // feed from friends' events (RLS allows reading friends' xp_events)
-        const friendIds = new Set(fr.filter((f) => f.status === 'accepted').map((f) => f.friend_id));
-        const users = fr.length ? await db.list('users', { in: { id: [...friendIds] } }) : [];
-        const nameOf = {};
-        users.forEach((u) => (nameOf[u.id] = u.display_name || u.username));
+        const acceptedIds = new Set(acceptedFriends.map((f) => f.friend_id).filter(Boolean));
+        let nameOf = {};
+        if (acceptedIds.size) {
+          const ids = [...acceptedIds];
+          if (ids.length) {
+            try {
+              const users = await db.list('users', { in: { id: ids } });
+              users.forEach((u) => (nameOf[u.id] = u.display_name || u.username));
+            } catch {
+              nameOf = {};
+            }
+          }
+        }
         events
-          .filter((e) => friendIds.has(e.user_id) && e.user_id !== profile.id)
+          .filter((e) => acceptedIds.has(e.user_id) && e.user_id !== profile.id)
           .slice(0, 12)
           .forEach((e) => items.push({ id: e.id, text: `${nameOf[e.user_id] || 'A friend'} ${feedTextFor(e)}`, ts: e.created_at }));
       }
-      // FIX 3: demo feed is a LOCAL-MODE thing only. In cloud mode an empty
-      // feed stays empty — no fake activity from bots.
       if (!isRemote() && !items.length) items.push(...demoFeed(todayStr()).map((d) => ({ ...d, text: d.text, demo: true })));
       setFeed(items);
     } finally {
@@ -121,19 +170,22 @@ export function GuildScreen({ navigation }) {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  // HIGH-5: accept / decline incoming requests
+  // accept / decline incoming requests — v1.0.6 J: RLS allows friend_id to update
   const respondRequest = async (row, accept) => {
     try {
       if (accept) {
         await db.update('friends', row.id, { status: 'accepted' });
-        // mirror the friendship so it appears in MY list too
-        await db.insert('friends', {
-          user_id: profile.id,
-          friend_id: row.user_id,
-          friend_name: row.from?.name || 'Player',
-          status: 'accepted',
-          created_at: nowIso(),
-        });
+        // mirror friendship so it appears in MY list too
+        const existingMirror = await db.list('friends', { eq: { user_id: profile.id, friend_id: row.user_id } });
+        if (!existingMirror.length) {
+          await db.insert('friends', {
+            user_id: profile.id,
+            friend_id: row.user_id,
+            friend_name: row.from?.name || 'Player',
+            status: 'accepted',
+            created_at: nowIso(),
+          });
+        }
       } else {
         await db.remove('friends', row.id);
       }
@@ -160,6 +212,12 @@ export function GuildScreen({ navigation }) {
       const already = await db.list('friends', { eq: { user_id: profile.id, friend_id: found[0].id } });
       if (already.length) {
         setAddMsg('Already friends / request pending hai.');
+        return;
+      }
+      // check if they already sent me a request
+      const reverse = await db.list('friends', { eq: { user_id: found[0].id, friend_id: profile.id } });
+      if (reverse.length && reverse[0].status === 'pending') {
+        setAddMsg('Unhone already request bheja hai — incoming requests check karo! 📨');
         return;
       }
       await db.insert('friends', {
@@ -216,7 +274,6 @@ export function GuildScreen({ navigation }) {
         </Pressable>
       </View>
 
-      {/* online / local mode indicator — obvious when bots are hidden (BUG 7) */}
       <View style={{ flexDirection: 'row', marginBottom: 14 }}>
         <View
           style={{
@@ -235,12 +292,11 @@ export function GuildScreen({ navigation }) {
         </View>
       </View>
 
-      {/* arena + battles entry */}
       <View style={{ flexDirection: 'row', marginBottom: 16 }}>
         <EntryCard
           icon="⚔️"
           title="DAILY ARENA"
-          sub="Same 5 Qs · global rank"
+          sub="Same 5 Qs · global rank · once per day"
           onPress={() => navigation.navigate('Arena')}
           color={GAMER.gold}
         />
@@ -267,7 +323,6 @@ export function GuildScreen({ navigation }) {
 
       {loading ? <Loading mode="gamer" text="Gathering the guild…" /> : null}
 
-      {/* ---------------- FEED ---------------- */}
       {tab === 'feed' && !loading ? (
         <View>
           {!feed.length ? (
@@ -302,7 +357,6 @@ export function GuildScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* ---------------- LEADERBOARD ---------------- */}
       {tab === 'leaderboard' && !loading ? (
         <View>
           <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginBottom: 12 }}>
@@ -319,12 +373,10 @@ export function GuildScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* ---------------- FRIENDS ---------------- */}
       {tab === 'friends' && !loading ? (
         <View>
           <Button title="+ Add by username" variant="secondary" size="sm" mode="gamer" onPress={() => setAddOpen(true)} style={{ alignSelf: 'flex-start', marginBottom: 14 }} />
 
-          {/* privacy */}
           <Card mode="gamer" style={{ marginBottom: 14 }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: GAMER.text, marginBottom: 8 }}>
               Privacy — kaun tumhe leaderboard pe dekh sakta hai?
@@ -340,7 +392,6 @@ export function GuildScreen({ navigation }) {
             </View>
           </Card>
 
-          {/* HIGH-5: incoming friend requests — accept/decline */}
           {incoming.length ? (
             <>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: GAMER.secondary, marginBottom: 8 }}>
@@ -380,7 +431,12 @@ export function GuildScreen({ navigation }) {
             </>
           ) : null}
 
-          {friends.map((f, i) => (
+          {friends.filter((f) => !f.pendingSent).length ? (
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: GAMER.subtext, marginBottom: 8, marginTop: incoming.length ? 10 : 0 }}>
+              ✅ Friends ({friends.filter((f) => !f.pendingSent && !f.demo).length})
+            </Text>
+          ) : null}
+          {friends.filter((f) => !f.pendingSent).map((f, i) => (
             <Card key={f.id || i} mode="gamer" style={{ marginBottom: 10 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: 'rgba(124,58,237,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
@@ -391,7 +447,7 @@ export function GuildScreen({ navigation }) {
                     {f.friend?.display_name || f.friend_name || 'Player'}
                   </Text>
                   <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginTop: 2 }}>
-                    @{f.friend?.username || f.friend_name || 'player'} · {f.status === 'accepted' ? '✅ friends' : '⏳ pending'}
+                    @{f.friend?.username || f.friend_name || 'player'} · ✅ friends
                   </Text>
                 </View>
                 <TierBadge
@@ -402,7 +458,33 @@ export function GuildScreen({ navigation }) {
               </View>
             </Card>
           ))}
-          {!friends.length ? (
+
+          {friends.filter((f) => f.pendingSent).length ? (
+            <>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: GAMER.subtext, marginBottom: 8, marginTop: 12 }}>
+                ⏳ Pending sent ({friends.filter((f) => f.pendingSent).length})
+              </Text>
+              {friends.filter((f) => f.pendingSent).map((f, i) => (
+                <Card key={`pend-${f.id || i}`} mode="gamer" style={{ marginBottom: 10, opacity: 0.7 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: 'rgba(100,116,139,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                      <Text style={{ fontSize: 20 }}>⏳</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: GAMER.text }}>
+                        {f.friend?.display_name || f.friend_name || 'Player'}
+                      </Text>
+                      <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginTop: 2 }}>
+                        @{f.friend?.username || f.friend_name || 'player'} · pending
+                      </Text>
+                    </View>
+                  </View>
+                </Card>
+              ))}
+            </>
+          ) : null}
+
+          {!friends.filter((f) => !f.demo).length && !incoming.length ? (
             <Card mode="gamer">
               <Text style={{ fontFamily: fonts.body, fontSize: 13, color: GAMER.subtext, textAlign: 'center', lineHeight: 19 }}>
                 Koi dost nahi. Username se add karo — ya apna QR share karo! 🤝
@@ -412,7 +494,6 @@ export function GuildScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* add friend modal */}
       <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="Add a Friend" mode="gamer">
         <Input label="Username" value={addUsername} onChangeText={setAddUsername} placeholder="arjun_grinds" mode="gamer" />
         {addMsg ? (
@@ -426,7 +507,6 @@ export function GuildScreen({ navigation }) {
         </Text>
       </ModalSheet>
 
-      {/* QR modal */}
       <ModalSheet visible={qrOpen} onClose={() => setQrOpen(false)} title="My Guild QR" mode="gamer">
         <View style={{ alignItems: 'center', paddingVertical: 18 }}>
           <View style={{ backgroundColor: '#FFFFFF', padding: 18, borderRadius: 16 }}>

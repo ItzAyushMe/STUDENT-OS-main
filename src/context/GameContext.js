@@ -64,7 +64,7 @@ export function GameProvider({ children }) {
 
         const { gained, total, level, tier, leveledUp, streak, freezeEarned, freezeUsed } = result;
 
-        if (gained > 0) pushToast({ amount: gained, label: opts.label });
+        if (gained !== 0) pushToast({ amount: gained, label: opts.label || result?.code });
         if (freezeUsed) pushNotice('🧊 Streak freeze used — streak saved!');
         if (freezeEarned) pushNotice('🎁 Streak freeze earned! (max 3)');
         if (streak?.changed && !freezeUsed) {
@@ -77,6 +77,7 @@ export function GameProvider({ children }) {
         return result;
       } catch (e) {
         console.warn('[GameContext] awardXP failed', e?.message);
+        try { pushNotice(`XP save nahi hua: ${e?.message || 'unknown error'}`); } catch {}
         return null;
       }
       };

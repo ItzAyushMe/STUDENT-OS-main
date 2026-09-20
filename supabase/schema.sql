@@ -62,6 +62,12 @@ drop policy if exists "users_update_own" on public.users;
 create policy "users_update_own"
   on public.users for update to authenticated using (auth.uid() = id);
 
+-- v1.0.6 recovery Y audit 1: users table had no delete policy, so direct delete via db.removeWhere would fail RLS.
+-- Minimal correct fix: allow user to delete own row. Auth user deletion via Edge Function uses service-role and bypasses RLS, but direct delete is useful fallback.
+drop policy if exists "users_delete_own" on public.users;
+create policy "users_delete_own"
+  on public.users for delete to authenticated using (auth.uid() = id);
+
 -- ============================================================
 -- SYLLABUS
 -- ============================================================
@@ -79,7 +85,8 @@ create table if not exists public.syllabus (
   progress_percent integer default 0 check (progress_percent between 0 and 100),
   deadline date,
   completed_at timestamptz,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.syllabus enable row level security;
@@ -106,7 +113,8 @@ create table if not exists public.schedule (
   status text default 'pending' check (status in ('pending','completed','skipped')),
   duration_minutes integer default 45,
   priority text default 'normal',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.schedule enable row level security;
@@ -132,7 +140,8 @@ create table if not exists public.focus_sessions (
   reflection text,
   xp_earned integer default 0,
   distractions integer default 0,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.focus_sessions enable row level security;
@@ -155,7 +164,8 @@ create table if not exists public.habits (
   part text default 'morning',            -- morning | afternoon | evening
   target_time text,
   is_active boolean default true,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.habits enable row level security;
@@ -179,7 +189,8 @@ create table if not exists public.habit_logs (
   completed_at timestamptz,
   streak_count integer default 0,
   -- app data layer stamps every inserted row with created_at (BUG #1 fix)
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.habit_logs enable row level security;
@@ -206,7 +217,8 @@ create table if not exists public.flashcards (
   mastery_level integer default 0 check (mastery_level between 0 and 5),
   next_review timestamptz default now(),
   times_reviewed integer default 0,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.flashcards enable row level security;
@@ -232,7 +244,8 @@ create table if not exists public.quiz_results (
   time_taken integer default 0,
   xp_earned integer default 0,
   weak_topics jsonb default '[]',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.quiz_results enable row level security;
@@ -264,7 +277,8 @@ create table if not exists public.content (
   topic text,
   ai_summary text,
   file_size numeric,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.content enable row level security;
@@ -285,6 +299,7 @@ create table if not exists public.friends (
   friend_name text,
   status text default 'pending' check (status in ('pending','accepted','blocked')),
   created_at timestamptz default now(),
+  updated_at timestamptz default now(),
   unique (user_id, friend_id)
 );
 
@@ -322,6 +337,7 @@ create table if not exists public.leaderboard (
   social_xp integer default 0,
   rank integer,
   created_at timestamptz default now(),
+  updated_at timestamptz default now(),
   unique (user_id, week_start)
 );
 
@@ -351,7 +367,8 @@ create table if not exists public.deadlines (
   deadline_date date,
   status text default 'pending' check (status in ('pending','in_progress','completed','missed')),
   priority text default 'normal',
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.deadlines enable row level security;
@@ -373,7 +390,8 @@ create table if not exists public.xp_events (
   amount integer not null default 0,
   label text,
   meta jsonb,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.xp_events enable row level security;
@@ -412,7 +430,8 @@ create table if not exists public.mood_logs (
   mood integer check (mood between 1 and 5),
   note text,
   ai_reply text,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.mood_logs enable row level security;
@@ -433,7 +452,8 @@ create table if not exists public.workout_logs (
   plan_name text,
   exercises jsonb default '[]',           -- [{name, sets, reps, weight}]
   xp_earned integer default 30,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 alter table public.workout_logs enable row level security;
@@ -495,12 +515,54 @@ alter table public.users add column if not exists arc jsonb;
 -- v1.0.2: custom priority tracks / custom gym exercises
 alter table public.users add column if not exists custom_exercises jsonb;
 
--- v1.0.2 audit HIGH-2: allow custom priority tracks (track like 'custom:%')
+-- NEW X R1: missing migrations — schedule/syllabus track + user priority fields + habits.kind + gym_split
+-- Columns BEFORE constraints (fixes abort bug where constraint fails before track column exists)
+alter table public.schedule add column if not exists track text default 'class';
+alter table public.syllabus  add column if not exists track text default 'class';
+alter table public.users     add column if not exists priorities jsonb default null;
+alter table public.users     add column if not exists school_exams jsonb default '[]';
+alter table public.users     add column if not exists olympiad_date date;
+-- arc already migrated above (keep existing statement, do not duplicate per R1 spec)
+alter table public.habits    add column if not exists kind text default 'good';
+alter table public.users     add column if not exists gym_split jsonb default null;
+
+-- v1.0.2 audit HIGH-2 + NEW X R1: allow custom priority tracks (track like 'custom:%')
 -- in schedule/syllabus. Without this, generating a schedule with a custom
 -- track fails on the CHECK constraint in Cloud Mode.
-alter table public.schedule drop constraint if exists schedule_track_check;
-alter table public.schedule add constraint schedule_track_check
-  check (track in ('class','olympiad','exam') or track like 'custom:%');
-alter table public.syllabus drop constraint if exists syllabus_track_check;
-alter table public.syllabus add constraint syllabus_track_check
-  check (track in ('class','olympiad','exam') or track like 'custom:%');
+-- NEW X R1: conditional creation via pg_constraint guard — no blanket EXCEPTION handler
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedule_track_check') THEN
+    ALTER TABLE public.schedule
+      ADD CONSTRAINT schedule_track_check
+      CHECK (track IN ('class','olympiad','exam') OR track LIKE 'custom:%');
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'syllabus_track_check') THEN
+    ALTER TABLE public.syllabus
+      ADD CONSTRAINT syllabus_track_check
+      CHECK (track IN ('class','olympiad','exam') OR track LIKE 'custom:%');
+  END IF;
+END $$;
+
+
+-- v1.0.6 recovery: updated_at column agreement — db.js update() stamps updated_at on every update.
+-- All tables that get updated must have updated_at, otherwise cloud mode fails.
+alter table public.syllabus     add column if not exists updated_at timestamptz default now();
+alter table public.schedule     add column if not exists updated_at timestamptz default now();
+alter table public.focus_sessions add column if not exists updated_at timestamptz default now();
+alter table public.habits       add column if not exists updated_at timestamptz default now();
+alter table public.habit_logs   add column if not exists updated_at timestamptz default now();
+alter table public.flashcards   add column if not exists updated_at timestamptz default now();
+alter table public.quiz_results add column if not exists updated_at timestamptz default now();
+alter table public.content      add column if not exists updated_at timestamptz default now();
+alter table public.friends      add column if not exists updated_at timestamptz default now();
+alter table public.leaderboard  add column if not exists updated_at timestamptz default now();
+alter table public.deadlines    add column if not exists updated_at timestamptz default now();
+alter table public.xp_events    add column if not exists updated_at timestamptz default now();
+alter table public.mood_logs    add column if not exists updated_at timestamptz default now();
+alter table public.workout_logs add column if not exists updated_at timestamptz default now();
+
