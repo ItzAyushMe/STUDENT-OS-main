@@ -421,4 +421,28 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(src.includes('if (seededRef.current) return;'), 'Onboarding checks seededRef before seeding');
 }
 
+// ---------- NEW X R1: schema completion ----------
+{
+  const schema = read('supabase/schema.sql');
+  // must contain add column if not exists for track, priorities, school_exams, olympiad_date, kind, gym_split
+  assert.ok(schema.includes('add column if not exists track'), 'schema has add column if not exists track (schedule/syllabus)');
+  assert.ok(schema.match(/alter table public\.schedule add column if not exists track/i), 'schedule.track migration exists');
+  assert.ok(schema.match(/alter table public\.syllabus\s+add column if not exists track/i), 'syllabus.track migration exists');
+  assert.ok(schema.match(/alter table public\.users\s+add column if not exists priorities/i), 'users.priorities migration exists');
+  assert.ok(schema.match(/alter table public\.users\s+add column if not exists school_exams/i), 'users.school_exams migration exists');
+  assert.ok(schema.match(/alter table public\.users\s+add column if not exists olympiad_date/i), 'users.olympiad_date migration exists');
+  assert.ok(schema.match(/alter table public\.habits\s+add column if not exists kind/i), 'habits.kind migration exists');
+  assert.ok(schema.match(/alter table public\.users\s+add column if not exists gym_split/i), 'users.gym_split migration exists');
+  // constraint blocks use pg_constraint / IF NOT EXISTS guard
+  assert.ok(schema.includes('pg_constraint') && schema.includes("conname = 'schedule_track_check'"), 'schedule_track_check uses pg_constraint guard');
+  assert.ok(schema.includes("conname = 'syllabus_track_check'"), 'syllabus_track_check uses pg_constraint guard');
+  assert.ok(schema.includes('IF NOT EXISTS (SELECT 1 FROM pg_constraint'), 'constraint guard pattern IF NOT EXISTS present');
+  // forbidden blanket swallowing
+  assert.ok(!schema.includes('EXCEPTION WHEN others THEN null') && !schema.includes('EXCEPTION WHEN OTHERS THEN NULL'), 'schema migration has NO blanket EXCEPTION WHEN others THEN null');
+  // columns before constraints — track add must appear before first DO $$ guard
+  const trackIdx = schema.indexOf('alter table public.schedule add column if not exists track');
+  const doIdx = schema.indexOf("conname = 'schedule_track_check'");
+  assert.ok(trackIdx !== -1 && doIdx !== -1 && trackIdx < doIdx, 'columns added BEFORE constraints (fixes abort bug)');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');

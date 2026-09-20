@@ -515,15 +515,38 @@ alter table public.users add column if not exists arc jsonb;
 -- v1.0.2: custom priority tracks / custom gym exercises
 alter table public.users add column if not exists custom_exercises jsonb;
 
--- v1.0.2 audit HIGH-2: allow custom priority tracks (track like 'custom:%')
+-- NEW X R1: missing migrations — schedule/syllabus track + user priority fields + habits.kind + gym_split
+-- Columns BEFORE constraints (fixes abort bug where constraint fails before track column exists)
+alter table public.schedule add column if not exists track text default 'class';
+alter table public.syllabus  add column if not exists track text default 'class';
+alter table public.users     add column if not exists priorities jsonb default null;
+alter table public.users     add column if not exists school_exams jsonb default '[]';
+alter table public.users     add column if not exists olympiad_date date;
+-- arc already migrated above (keep existing statement, do not duplicate per R1 spec)
+alter table public.habits    add column if not exists kind text default 'good';
+alter table public.users     add column if not exists gym_split jsonb default null;
+
+-- v1.0.2 audit HIGH-2 + NEW X R1: allow custom priority tracks (track like 'custom:%')
 -- in schedule/syllabus. Without this, generating a schedule with a custom
 -- track fails on the CHECK constraint in Cloud Mode.
-alter table public.schedule drop constraint if exists schedule_track_check;
-alter table public.schedule add constraint schedule_track_check
-  check (track in ('class','olympiad','exam') or track like 'custom:%');
-alter table public.syllabus drop constraint if exists syllabus_track_check;
-alter table public.syllabus add constraint syllabus_track_check
-  check (track in ('class','olympiad','exam') or track like 'custom:%');
+-- NEW X R1: conditional creation via pg_constraint guard — no blanket EXCEPTION handler
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedule_track_check') THEN
+    ALTER TABLE public.schedule
+      ADD CONSTRAINT schedule_track_check
+      CHECK (track IN ('class','olympiad','exam') OR track LIKE 'custom:%');
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'syllabus_track_check') THEN
+    ALTER TABLE public.syllabus
+      ADD CONSTRAINT syllabus_track_check
+      CHECK (track IN ('class','olympiad','exam') OR track LIKE 'custom:%');
+  END IF;
+END $$;
 
 
 -- v1.0.6 recovery: updated_at column agreement — db.js update() stamps updated_at on every update.
