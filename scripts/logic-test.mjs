@@ -558,7 +558,83 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(constSrc.includes("gemini: 'gemini-flash-latest'") && constSrc.includes("groq: 'openai/gpt-oss-120b'"), 'AI_MODELS constants updated');
 }
 
+
+// ---------- NEW X R5: Test Builder normalizer ----------
+{
+  const { normalizeTestQuestion } = await import('./../src/lib/testQuestionNormalizer.js');
+
+  // Scenario 1: string-form VSAQ/SAQ/LAQ should NOT be dropped (inherits type)
+  const s1 = normalizeTestQuestion("What is photosynthesis?", "vsaq");
+  assert.ok(s1 && s1.q.includes("photosynthesis") && s1.type.includes("vsaq"), "string-form VSAQ kept with type inheritance");
+
+  const s2 = normalizeTestQuestion("Explain Newton's laws", "saq");
+  assert.ok(s2 && s2.type.includes("saq"), "string-form SAQ kept");
+
+  const s3 = normalizeTestQuestion("Derive the equation", "laq");
+  assert.ok(s3 && s3.type.includes("laq"), "string-form LAQ kept");
+
+  // Scenario 2: answers under ans/solution/model_answer are read
+  const qAns = normalizeTestQuestion({ q: "Capital of India?", ans: "New Delhi", type: "saq" });
+  assert.ok(qAns && qAns.answer_text.includes("New Delhi"), "answer from ans key read");
+
+  const qSol = normalizeTestQuestion({ q: "What is 2+2?", solution: "4", type: "vsaq" });
+  assert.ok(qSol && qSol.answer_text.includes("4"), "answer from solution key read");
+
+  const qModel = normalizeTestQuestion({ q: "Define gravity", model_answer: "Force that attracts", type: "saq" });
+  assert.ok(qModel && qModel.answer_text.includes("Force"), "answer from model_answer key read");
+
+  // Scenario 3: unresolved MCQ answers → null, never default A
+  const qNoAns = normalizeTestQuestion({ q: "What is X?", options: ["A","B","C","D"], type: "mcq" });
+  assert.ok(qNoAns && qNoAns.answer === null, "MCQ with no answer → null, not default A");
+
+  const qBadAns = normalizeTestQuestion({ q: "What is Y?", options: ["A","B","C","D"], answer: "Z", type: "mcq" });
+  assert.ok(qBadAns && qBadAns.answer === null, "MCQ with unresolvable answer → null");
+
+  // Scenario 4: blank question text rejected (trim length <3)
+  const qBlank = normalizeTestQuestion({ q: "  ", type: "mcq", options: ["A","B"] });
+  assert.ok(qBlank === null, "blank question rejected");
+
+  const qShort = normalizeTestQuestion({ q: "Q1", type: "saq" });
+  assert.ok(qShort === null, "too short question (len<3) rejected");
+
+  // MCQ with valid answer still works
+  const qMcqValid = normalizeTestQuestion({ q: "Capital?", options: ["Delhi","Mumbai","Kolkata","Chennai"], answer: "Delhi", type: "mcq" });
+  assert.ok(qMcqValid && qMcqValid.answer === 0 && qMcqValid.answer_text === "Delhi", "MCQ valid answer resolved");
+
+  // SAQ with explicit type, no options
+  const qSaq = normalizeTestQuestion({ q: "Explain photosynthesis", answer: "Process by which plants make food", type: "saq" });
+  assert.ok(qSaq && qSaq.type.includes("saq") && qSaq.answer_text.includes("plants"), "SAQ explicit type works");
+
+  // LAQ
+  const qLaq = normalizeTestQuestion({ q: "Discuss climate change", answer: "Long answer about climate", type: "laq" });
+  assert.ok(qLaq && qLaq.type.includes("laq"), "LAQ explicit type works");
+
+  // VSAQ
+  const qVsaq = normalizeTestQuestion({ q: "What is SI unit of force?", answer: "Newton", type: "vsaq" });
+  assert.ok(qVsaq && qVsaq.type.includes("vsaq"), "VSAQ explicit type works");
+
+  // Missing type with options → should infer mcq
+  const qMissingType = normalizeTestQuestion({ q: "What is X?", options: ["A","B","C","D"], answer: "B" });
+  assert.ok(qMissingType && qMissingType.type.includes("mcq"), "missing type with options inferred as mcq");
+}
+
+{
+  // Batching and difficulty bands existence checks
+  const src = read('src/lib/aiFeatures.js');
+  assert.ok(src.includes('BATCH_SIZE') && src.includes('20'), 'Question bank batching ≤20 exists');
+  assert.ok(src.includes('MAX_BATCHES') && src.includes('6'), 'Max 6 batches exists');
+  assert.ok(src.includes('_banner') && src.includes('questions mile'), 'Partial banner honest message exists');
+  assert.ok(src.includes('difficultyBand') && src.includes('foundation recall') && src.includes('olympiad HOTS'), 'Difficulty bands mapped to concrete text');
+  assert.ok(src.includes('answerLengthHint') || src.includes('VSAQ = one line'), 'Answer length hints baked into prompts');
+  assert.ok(src.includes('EMPTY section') || src.includes('stillMissing') || src.includes('VSAQ section nahi bheja'), 'Empty section retry logic exists');
+
+  const builderSrc = read('src/screens/study/TestBuilderScreen.js');
+  assert.ok(builderSrc.includes('elapsed') && builderSrc.includes('Professor Byte soch raha hai'), 'TestBuilder shows elapsed + stage progress UI');
+  assert.ok(builderSrc.includes('difficultyPct: difficulty'), 'Mind map receives difficultyPct');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

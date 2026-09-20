@@ -98,12 +98,23 @@ export function TestBuilderScreen({ navigation }) {
   const [result, setResult] = useState(null); // { kind, data }
   const [setTab, setSetTab] = useState('A');
   const [showAnswers, setShowAnswers] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [stage, setStage] = useState('');
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
     const data = await db.list('syllabus', { eq: { user_id: profile.id } });
     setRows(data.filter((r) => r.status !== 'completed'));
   }, [profile?.id]);
+
+  // NEW X R5: honest progress — elapsed seconds + stage
+  useEffect(() => {
+    if (!busy) { setElapsed(0); setStage(''); return; }
+    setElapsed(0);
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start)/1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const subjects = useMemo(
@@ -131,8 +142,10 @@ export function TestBuilderScreen({ navigation }) {
     setError('');
     setResult(null);
     setBusy(true);
+    setStage(mode === 'test' ? 'Paper bana raha hai…' : mode === 'bank' ? 'Question bank bana raha hai…' : 'Mind map bana raha hai…');
     try {
       if (mode === 'test') {
+        setStage('Professor Byte soch raha hai… Set A/B bana raha hai');
         const data = await aiGenerateTest({
           profile,
           chapters: pickedChapters,
@@ -146,6 +159,7 @@ export function TestBuilderScreen({ navigation }) {
         setResult({ kind: 'test', data });
         setSetTab('A');
       } else if (mode === 'bank') {
+        setStage(`Professor Byte soch raha hai… batch 1/${Math.ceil(num(count,20)/20)}`);
         const data = await aiGenerateQuestionBank({
           profile,
           chapters: pickedChapters,
@@ -156,7 +170,8 @@ export function TestBuilderScreen({ navigation }) {
         if (!data?.questions?.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
         setResult({ kind: 'bank', data });
       } else {
-        const data = await aiGenerateMindMap({ profile, chapters: pickedChapters });
+        setStage('Professor Byte soch raha hai… mind map branches bana raha hai');
+        const data = await aiGenerateMindMap({ profile, chapters: pickedChapters, difficultyPct: difficulty });
         if (!data?.chapters?.length) throw new Error('Mind map nahi bana — dobara try karo.');
         setResult({ kind: 'map', data });
       }
@@ -164,6 +179,7 @@ export function TestBuilderScreen({ navigation }) {
       setError(e instanceof AIUnavailableError ? e.message : e?.message || 'Generate nahi ho paya. Dobara try karo.');
     } finally {
       setBusy(false);
+      setStage('');
     }
   };
 
@@ -353,7 +369,14 @@ export function TestBuilderScreen({ navigation }) {
         style={{ marginBottom: 12 }}
       />
 
-      {busy ? <Loading mode="light" text="Professor Byte paper bana rahe hain…" /> : null}
+      {busy ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#6D28D9', textAlign: 'center' }}>
+            Professor Byte soch raha hai… {elapsed}s{stage ? ` · ${stage}` : ''}{mode==='bank' ? ` · batch` : ''}
+          </Text>
+          <Loading mode="light" text="" />
+        </Card>
+      ) : null}
 
       {error ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
@@ -422,8 +445,13 @@ export function TestBuilderScreen({ navigation }) {
 
       {result?.kind === 'bank' ? (
         <Card mode="light" style={{ marginBottom: 14 }}>
+          {result.data._banner ? (
+            <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
+            </View>
+          ) : null}
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginBottom: 10 }}>
-            Question Bank — {result.data.questions.length} questions
+            Question Bank — {result.data.questions.length} questions{result.data._partial ? ' (partial)' : ''}
           </Text>
           {result.data.questions.map((q, qi) => (
             <View key={qi} style={{ marginBottom: 9 }}>
