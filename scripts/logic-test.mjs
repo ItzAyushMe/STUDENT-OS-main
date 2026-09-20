@@ -633,7 +633,25 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(builderSrc.includes('difficultyPct: difficulty'), 'Mind map receives difficultyPct');
 }
 
+
+// ---------- NEW X R6: Flashcards crash + XP once ----------
+{
+  const deckSrc = read('src/screens/study/DeckScreen.js');
+  assert.ok(deckSrc.includes('if (!card && !done)'), 'DeckScreen crash guard if (!card && !done) exists');
+  assert.ok(deckSrc.includes('hasEarnedToday') && deckSrc.includes('markEarnedToday'), 'DeckScreen uses hasEarnedToday for once-per-day XP');
+  assert.ok(deckSrc.includes('Hard = jaldi dobara'), 'DeckScreen explainer line exists');
+  assert.ok(!deckSrc.includes("await awardXP('FLASHCARD_REVIEW');\n\n    setFlipped"), 'DeckScreen per-rating XP removed');
+
+  const flashSrc = read('src/screens/study/FlashcardsScreen.js');
+  assert.ok(flashSrc.includes('valid') && flashSrc.includes('front_text') && flashSrc.includes('trim().length >=1'), 'FlashcardsScreen filters invalid AI cards');
+  assert.ok(flashSrc.includes('khaali cards bheje'), 'FlashcardsScreen shows honest error for 0 valid cards');
+
+  const aiSrc = read('src/lib/aiFeatures.js');
+  assert.ok(aiSrc.includes('trim().length >=1') && aiSrc.includes('front') && aiSrc.includes('back'), 'aiFeatures flashcard normalization filters empties');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

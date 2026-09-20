@@ -12,6 +12,8 @@ import { Button } from '../../components/ui/Button';
 import { Confetti } from '../../components/gamer/Confetti';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
+import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce';
+import { infoAlert } from '../../lib/alert';
 import { MathText } from '../../components/ui/MathText';
 import { fonts, radius } from '../../config/theme';
 import { subjectColor, nowIso } from '../../lib/utils';
@@ -61,32 +63,42 @@ export function DeckScreen({ navigation, route }) {
 
   const rate = async (level) => {
     if (!card) return;
-    // SM-2 lite
-    let mastery = card.mastery_level || 0;
-    let next;
-    if (level === 'easy') {
-      mastery = Math.min(5, mastery + 1);
-      next = new Date(Date.now() + Math.max(1, 3 * mastery) * 86400000);
-    } else if (level === 'medium') {
-      next = new Date(Date.now() + 1 * 86400000);
-    } else {
-      mastery = Math.max(0, mastery - 1);
-      next = new Date(Date.now() + 4 * 3600000);
-    }
-    await db.update('flashcards', card.id, {
-      mastery_level: mastery,
-      next_review: next.toISOString(),
-      times_reviewed: (card.times_reviewed || 0) + 1,
-    });
-    setReviewed((r) => r + 1);
-    await awardXP('FLASHCARD_REVIEW');
-
-    setFlipped(false);
-    if (idx + 1 >= cards.length) {
-      setDone(true);
-      setConfetti(Date.now());
-    } else {
-      setIdx((i) => i + 1);
+    try {
+      let mastery = card.mastery_level || 0;
+      let next;
+      if (level === 'easy') {
+        mastery = Math.min(5, mastery + 1);
+        next = new Date(Date.now() + Math.max(1, 3 * mastery) * 86400000);
+      } else if (level === 'medium') {
+        next = new Date(Date.now() + 1 * 86400000);
+      } else {
+        mastery = Math.max(0, mastery - 1);
+        next = new Date(Date.now() + 4 * 3600000);
+      }
+      await db.update('flashcards', card.id, {
+        mastery_level: mastery,
+        next_review: next.toISOString(),
+        times_reviewed: (card.times_reviewed || 0) + 1,
+      });
+      setReviewed((r) => r + 1);
+      setFlipped(false);
+      if (idx + 1 >= cards.length) {
+        setDone(true);
+        setConfetti(Date.now());
+        // NEW X R3/R6: XP once per deck per day
+        const deckKey = `deck:${subject}::${topic}`;
+        try {
+          const earned = await hasEarnedToday(profile.id, deckKey);
+          if (!earned) {
+            await awardXP('FLASHCARD_REVIEW', { meta: { deckKey } });
+            await markEarnedToday(profile.id, deckKey, { subject, topic });
+          }
+        } catch {}
+      } else {
+        setIdx((i) => i + 1);
+      }
+    } catch (e) {
+      infoAlert('Review save fail hua', e?.message || 'Flashcard update nahi ho paya');
     }
   };
 
@@ -100,6 +112,16 @@ export function DeckScreen({ navigation, route }) {
     return (
       <Screen mode="light">
         <ScreenHeader title={topic || 'Deck'} onBack={onBack} />
+      </Screen>
+    );
+  }
+
+  // NEW X R6: crash fix — guard before rendering card.front_text
+  if (!card && !done) {
+    return (
+      <Screen mode="light">
+        <ScreenHeader title={topic || 'Deck'} onBack={onBack} />
+        <EmptyState icon="🃏" title="Deck empty or stale" subtitle="No card to show — deck khaali hai ya data purana ho gaya. Wapas jao aur deck reload karo." actionLabel="Back" onAction={() => navigation.goBack()} mode="light" />
       </Screen>
     );
   }
@@ -193,9 +215,13 @@ export function DeckScreen({ navigation, route }) {
           </View>
           {!flipped ? (
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', textAlign: 'center', marginBottom: 8 }}>
-              Flip the card, then rate how it went — +15 XP per card
+              Flip the card, then rate how it went — deck complete pe +15 XP (once per day)
             </Text>
-          ) : null}
+          ) : (
+            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', textAlign: 'center', marginBottom: 8 }}>
+              Hard = jaldi dobara 🕓 · Easy = door wapas 📅
+            </Text>
+          )}
         </View>
       )}
     </Screen>

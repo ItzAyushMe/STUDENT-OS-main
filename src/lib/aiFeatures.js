@@ -287,11 +287,12 @@ Return JSON: {"cards":[{"front":"...","back":"...","type":"qa|definition|formula
     temperature: 0.4,
   });
   const cards = Array.isArray(data?.cards) ? data.cards : [];
-  const clean = cards.filter((c) => c?.front && c?.back);
-  if (!clean.length) throw new AIUnavailableError('AI deck generate nahi ho paya.');
+  // NEW X R6: filter out empties, trim length ≥1
+  const clean = cards.filter((c) => c?.front && c?.back && String(c.front).trim().length >=1 && String(c.back).trim().length >=1);
+  if (!clean.length) throw new AIUnavailableError('AI deck generate nahi ho paya — khaali cards aaye.');
   return clean.map((c) => ({
-    front_text: String(c.front),
-    back_text: String(c.back),
+    front_text: String(c.front).trim(),
+    back_text: String(c.back).trim(),
     card_type: c.type || 'qa',
   }));
 }
