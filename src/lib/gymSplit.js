@@ -1,6 +1,7 @@
-
 // NEW X R8: gym split helper — weekly split from workout logs
+// FIX-C: full split system with pure rotation logic
 import { mondayOf, dateStr, dayjs } from './utils';
+import { GYM_SPLITS, EXERCISE_LIBRARY } from '../config/constants.js';
 
 const MUSCLE_MAP = [
   { keywords: ['bench', 'chest press', 'push-up', 'push up', 'shoulder press', 'overhead press', 'dips', 'tricep', 'chest'], cat: 'push' },
@@ -57,4 +58,87 @@ export function gymSplitBadgeText(profileSplit, weekly) {
     return profileSplit.type || profileSplit.split;
   }
   return weekly?.splitLabel || 'Full Body';
+}
+
+// ============================================================
+// FIX-C: Gym Split System — pure rotation logic
+// ============================================================
+export function getSplitDefinition(type) {
+  if (!type) return null;
+  return GYM_SPLITS[type] || null;
+}
+
+// Mon-first weekday: 0=Mon, 6=Sun
+export function weekdayMonFirst(dStr) {
+  const d = dayjs(dStr);
+  return (d.day() + 6) % 7;
+}
+
+export function mondayOfWeek(dStr) {
+  const d = dayjs(dStr);
+  const diff = weekdayMonFirst(dStr);
+  return dStr ? dayjs(dStr).subtract(diff, 'day').format('YYYY-MM-DD') : null;
+}
+
+// Pure function todayWorkout(split, dateStr) → { label, groups, isRest, dayIndex }
+export function todayWorkout(split, targetDateStr) {
+  if (!split || !targetDateStr) return { isRest: false, label: 'Full Body', groups: [], dayIndex: 0 };
+  const restDays = Array.isArray(split.restDays) ? split.restDays : [];
+  const wday = weekdayMonFirst(targetDateStr);
+  if (restDays.includes(wday)) {
+    return { isRest: true, label: 'Rest & recover 💤', groups: [], dayIndex: -1 };
+  }
+  let dayTypes = [];
+  if (split.type === 'custom' && Array.isArray(split.customDays) && split.customDays.length) {
+    dayTypes = split.customDays.map((d, i) => ({
+      label: d.name || `Day ${i+1}`,
+      groups: Array.isArray(d.groups) ? d.groups : [],
+    }));
+  } else {
+    const def = getSplitDefinition(split.type);
+    dayTypes = def?.dayTypes || [{ label: 'Full Body', groups: [] }];
+  }
+  if (!dayTypes.length) return { isRest: false, label: 'Full Body', groups: [], dayIndex: 0 };
+
+  // Count non-rest days from Monday to target inclusive
+  let nonRestCount = 0;
+  for (let i = 0; i <= wday; i++) {
+    if (!restDays.includes(i)) nonRestCount++;
+  }
+  // Monday is always day-type 1, fresh every week
+  const dayIndex = (nonRestCount - 1) % dayTypes.length;
+  const day = dayTypes[dayIndex];
+  return { isRest: false, label: day.label, groups: day.groups || [], dayIndex };
+}
+
+export function getExercisesForGroups(groups = [], mode = 'gym') {
+  if (!groups.length) return [];
+  const wantGym = mode === 'gym';
+  const wantHome = mode === 'home';
+  const filtered = EXERCISE_LIBRARY.filter((ex) => {
+    if (!groups.includes(ex.group)) return false;
+    if (wantGym && !ex.gym) return false;
+    if (wantHome && !ex.home) return false;
+    return true;
+  });
+  // Sort by group order given
+  const groupOrder = {};
+  groups.forEach((g,i)=> groupOrder[g]=i);
+  filtered.sort((a,b)=> (groupOrder[a.group]||0)-(groupOrder[b.group]||0));
+  return filtered;
+}
+
+export function normalizeGymSplitV2(raw) {
+  if (!raw) return null;
+  let obj = raw;
+  if (typeof raw === 'string') {
+    try { obj = JSON.parse(raw); } catch { return { type: raw, restDays: [] }; }
+  }
+  if (typeof obj !== 'object') return null;
+  return {
+    type: obj.type || 'ppl',
+    restDays: Array.isArray(obj.restDays) ? obj.restDays : [],
+    customDays: Array.isArray(obj.customDays) ? obj.customDays : undefined,
+    mode: obj.mode || 'split',
+  };
 }

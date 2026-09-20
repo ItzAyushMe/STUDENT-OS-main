@@ -274,6 +274,140 @@ export const GYM_PLANS = {
   },
 };
 
+
+// ============================================================
+// GYM — SPLIT SYSTEM (FIX-C)
+// ============================================================
+export const MUSCLE_GROUPS = [
+  'Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms',
+  'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'
+];
+
+export const GYM_SPLITS = {
+  ppl: {
+    id: 'ppl',
+    label: 'Push / Pull / Legs',
+    hint: 'Classic 3-day rotation — most popular',
+    dayTypes: [
+      { label: 'Push Day', groups: ['Chest', 'Shoulders', 'Triceps'] },
+      { label: 'Pull Day', groups: ['Back', 'Biceps', 'Forearms'] },
+      { label: 'Legs Day', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves'] },
+    ],
+  },
+  arnold: {
+    id: 'arnold',
+    label: 'Arnold Split',
+    hint: 'Chest+Back, Shoulders+Arms, Legs+Abs — Golden Era',
+    dayTypes: [
+      { label: 'Chest & Back', groups: ['Chest', 'Back'] },
+      { label: 'Shoulders & Arms', groups: ['Shoulders', 'Biceps', 'Triceps', 'Forearms'] },
+      { label: 'Legs & Abs', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  upper_lower: {
+    id: 'upper_lower',
+    label: 'Upper / Lower',
+    hint: '2-day rotation — upper body, lower body',
+    dayTypes: [
+      { label: 'Upper Body', groups: ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms'] },
+      { label: 'Lower Body', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  full_body: {
+    id: 'full_body',
+    label: 'Full Body',
+    hint: 'All muscle groups every session',
+    dayTypes: [
+      { label: 'Full Body', groups: ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  custom: {
+    id: 'custom',
+    label: 'Custom Split',
+    hint: 'Build your own days with muscle groups',
+    dayTypes: [], // filled by user
+  },
+};
+
+export const EXERCISE_LIBRARY = [
+  // Chest — 6
+  { name: 'Bench Press', group: 'Chest', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Push-ups', group: 'Chest', gym: false, home: true, sets: 3, reps: '12–15' },
+  { name: 'Chest Press', group: 'Chest', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Incline Dumbbell Press', group: 'Chest', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Dips', group: 'Chest', gym: true, home: true, sets: 3, reps: '10–12' },
+  { name: 'Chest Fly', group: 'Chest', gym: true, home: false, sets: 3, reps: '12' },
+
+  // Back — 6
+  { name: 'Pull-ups', group: 'Back', gym: true, home: true, sets: 3, reps: 'Max' },
+  { name: 'Lat Pulldown', group: 'Back', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Barbell Row', group: 'Back', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Deadlift', group: 'Back', gym: true, home: false, sets: 4, reps: '6–8' },
+  { name: 'Seated Row', group: 'Back', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Superman', group: 'Back', gym: false, home: true, sets: 3, reps: '12' },
+
+  // Shoulders — 6
+  { name: 'Overhead Press', group: 'Shoulders', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Dumbbell Shoulder Press', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Lateral Raises', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '12–15' },
+  { name: 'Face Pulls', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Arnold Press', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Pike Push-ups', group: 'Shoulders', gym: false, home: true, sets: 3, reps: '10–12' },
+
+  // Biceps — 5
+  { name: 'Bicep Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Hammer Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Chin-ups', group: 'Biceps', gym: true, home: true, sets: 3, reps: 'Max' },
+  { name: 'Concentration Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Incline Curl', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10' },
+
+  // Triceps — 5
+  { name: 'Tricep Dips', group: 'Triceps', gym: false, home: true, sets: 3, reps: '12' },
+  { name: 'Tricep Pushdown', group: 'Triceps', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Overhead Tricep Extension', group: 'Triceps', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Close-Grip Bench Press', group: 'Triceps', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Skull Crushers', group: 'Triceps', gym: true, home: false, sets: 3, reps: '10' },
+
+  // Forearms — 4
+  { name: 'Wrist Curls', group: 'Forearms', gym: true, home: false, sets: 3, reps: '15' },
+  { name: 'Farmer\'s Walk', group: 'Forearms', gym: true, home: false, sets: 2, reps: '40 sec' },
+  { name: 'Reverse Curls', group: 'Forearms', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Dead Hang', group: 'Forearms', gym: false, home: true, sets: 3, reps: '30 sec' },
+
+  // Quads — 5
+  { name: 'Squat', group: 'Quads', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Bodyweight Squats', group: 'Quads', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Leg Press', group: 'Quads', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Lunges', group: 'Quads', gym: true, home: true, sets: 3, reps: '12 each' },
+  { name: 'Bulgarian Split Squat', group: 'Quads', gym: true, home: true, sets: 3, reps: '10 each' },
+
+  // Hamstrings — 4
+  { name: 'Romanian Deadlift', group: 'Hamstrings', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Leg Curl', group: 'Hamstrings', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Good Mornings', group: 'Hamstrings', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Glute-Ham Raise', group: 'Hamstrings', gym: true, home: true, sets: 3, reps: '8–10' },
+
+  // Glutes — 4
+  { name: 'Hip Thrust', group: 'Glutes', gym: true, home: false, sets: 4, reps: '10' },
+  { name: 'Glute Bridge', group: 'Glutes', gym: false, home: true, sets: 3, reps: '15' },
+  { name: 'Step-ups', group: 'Glutes', gym: false, home: true, sets: 3, reps: '12 each' },
+  { name: 'Cable Kickback', group: 'Glutes', gym: true, home: false, sets: 3, reps: '12 each' },
+
+  // Calves — 3
+  { name: 'Calf Raises', group: 'Calves', gym: true, home: true, sets: 4, reps: '15–20' },
+  { name: 'Seated Calf Raise', group: 'Calves', gym: true, home: false, sets: 3, reps: '15' },
+  { name: 'Jump Rope', group: 'Calves', gym: false, home: true, sets: 2, reps: '60 sec' },
+
+  // Abs/Core — 6
+  { name: 'Plank', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '45 sec' },
+  { name: 'Hanging Leg Raise', group: 'Abs/Core', gym: true, home: false, sets: 3, reps: '12–15' },
+  { name: 'Crunches', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Russian Twists', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Ab Wheel', group: 'Abs/Core', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Mountain Climbers', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '30 sec' },
+];
+
+
 // ============================================================
 // QUOTES (Daily wisdom — works fully offline)
 // ============================================================

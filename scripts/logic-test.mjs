@@ -806,7 +806,79 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(guildSrc.includes('hasEarnedToday') || read('src/screens/guild/ArenaScreen.js').includes('hasEarnedToday'), 'Arena XP once-per-day guard exists');
 }
 
+
+// ---------- FIX-C: Gym Split System ----------
+{
+  const { todayWorkout, getExercisesForGroups, getSplitDefinition } = await import('./../src/lib/gymSplit.js');
+  const { GYM_SPLITS, EXERCISE_LIBRARY, MUSCLE_GROUPS } = await import('./../src/config/constants.js');
+
+  // Muscle groups 11
+  assert.ok(MUSCLE_GROUPS.length === 11, `MUSCLE_GROUPS 11 got ${MUSCLE_GROUPS.length}`);
+  assert.ok(MUSCLE_GROUPS.includes('Chest') && MUSCLE_GROUPS.includes('Abs/Core'), 'MUSCLE_GROUPS has Chest and Abs/Core');
+
+  // Exercise library ~55
+  assert.ok(EXERCISE_LIBRARY.length >= 50, `EXERCISE_LIBRARY >=50 got ${EXERCISE_LIBRARY.length}`);
+  assert.ok(EXERCISE_LIBRARY.every(ex => ex.group && (ex.gym || ex.home)), 'EXERCISE_LIBRARY tagged gym/home + group');
+
+  // GYM_SPLITS definitions
+  assert.ok(GYM_SPLITS.ppl && GYM_SPLITS.arnold && GYM_SPLITS.upper_lower && GYM_SPLITS.full_body && GYM_SPLITS.custom, 'GYM_SPLITS has 5 types');
+  assert.ok(GYM_SPLITS.ppl.dayTypes[0].label === 'Push Day' && GYM_SPLITS.ppl.dayTypes[0].groups.includes('Chest'), 'PPL Push Day = Chest,Shoulders,Triceps');
+  assert.ok(GYM_SPLITS.ppl.dayTypes[1].groups.includes('Back'), 'PPL Pull Day includes Back');
+  assert.ok(GYM_SPLITS.ppl.dayTypes[2].groups.includes('Quads'), 'PPL Legs Day includes Quads');
+  assert.ok(GYM_SPLITS.arnold.dayTypes[0].groups.includes('Chest') && GYM_SPLITS.arnold.dayTypes[0].groups.includes('Back'), 'Arnold Chest+Back');
+  assert.ok(GYM_SPLITS.arnold.dayTypes[2].groups.includes('Abs/Core'), 'Arnold Legs+Abs includes Abs/Core');
+
+  // todayWorkout pure — PPL + Sunday rest → Mon Push, Tue Pull, Wed Legs, next Mon Push
+  const pplSunRest = { type: 'ppl', restDays: [6] }; // Sun rest
+  // Find a Monday date
+  const monDate = '2026-09-21'; // 2026-09-21 is Monday
+  const tueDate = '2026-09-22';
+  const wedDate = '2026-09-23';
+  const thuDate = '2026-09-24';
+  const friDate = '2026-09-25';
+  const satDate = '2026-09-26';
+  const sunDate = '2026-09-27';
+  const nextMon = '2026-09-28';
+
+  const monW = todayWorkout(pplSunRest, monDate);
+  const tueW = todayWorkout(pplSunRest, tueDate);
+  const wedW = todayWorkout(pplSunRest, wedDate);
+  const thuW = todayWorkout(pplSunRest, thuDate);
+  const sunW = todayWorkout(pplSunRest, sunDate);
+  const nextMonW = todayWorkout(pplSunRest, nextMon);
+
+  assert.ok(monW.label === 'Push Day', `Mon Push got ${monW.label}`);
+  assert.ok(tueW.label === 'Pull Day', `Tue Pull got ${tueW.label}`);
+  assert.ok(wedW.label === 'Legs Day', `Wed Legs got ${wedW.label}`);
+  assert.ok(thuW.label === 'Push Day', `Thu Push (rotation) got ${thuW.label}`);
+  assert.ok(sunW.isRest, 'Sun is rest');
+  assert.ok(nextMonW.label === 'Push Day', 'Next Mon fresh Push again');
+
+  // Rest-day edges: Fri+Sun rest case
+  const friSunRest = { type: 'ppl', restDays: [4,6] }; // Fri, Sun
+  const friW = todayWorkout(friSunRest, friDate);
+  const satW = todayWorkout(friSunRest, satDate);
+  assert.ok(friW.isRest, 'Fri rest');
+  assert.ok(satW.label === 'Pull Day', `Sat after Fri rest should be Pull (Mon Push Tue Pull Wed Legs Thu Push Fri Rest Sat Pull) got ${satW.label}`);
+
+  // Week wrap: Monday always day-type 1 even if previous week had different rest
+  const monAlways = todayWorkout({ type: 'upper_lower', restDays: [0,1,2,3,4,5] }, '2026-09-21'); // only Sun non-rest
+  assert.ok(monAlways.isRest, 'Mon rest when restDays includes Mon');
+
+  // Custom builder auto-fill
+  const pushEx = getExercisesForGroups(['Chest','Triceps'], 'gym');
+  assert.ok(pushEx.length >= 3 && pushEx.every(ex => ['Chest','Triceps'].includes(ex.group)), 'getExercisesForGroups Chest+Triceps gym');
+
+  // GymScreen writes gym_split
+  const gymSrc = read('src/screens/life/GymScreen.js');
+  assert.ok(gymSrc.includes('gym_split') && gymSrc.includes('updateProfile'), 'GymScreen writes gym_split');
+  assert.ok(gymSrc.includes('Rest & recover') && gymSrc.includes('Train anyway'), 'GymScreen rest day UI + override');
+  assert.ok(gymSrc.includes('Split Mode') && gymSrc.includes('Classic Plans'), 'GymScreen classic toggle');
+  assert.ok(gymSrc.includes('todayWorkout'), 'GymScreen uses todayWorkout pure');
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 
