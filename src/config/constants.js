@@ -14,8 +14,8 @@ export const APP_VERSION = '1.0.0';
 // the AI service automatically falls back to Gemini.
 export const AI_PROVIDER = (process.env.EXPO_PUBLIC_AI_PROVIDER || 'groq').toLowerCase();
 export const AI_MODELS = {
-  gemini: 'gemini-2.0-flash',
-  groq: 'llama-3.3-70b-versatile',
+  gemini: 'gemini-flash-latest',
+  groq: 'openai/gpt-oss-120b',
 };
 
 // ============================================================
@@ -31,12 +31,16 @@ export const XP_RULES = {
   STUDY_QUEST: { amount: 30, category: 'study', label: 'Quest complete' },
   SYLLABUS_TOPIC: { amount: 15, category: 'study', label: 'Topic done' },
   CHAPTER_COMPLETE: { amount: 100, category: 'study', label: 'Chapter conquered' },
+  CHAPTER_UNDO: { amount: -100, category: 'study', label: 'Chapter un-completed' },
   QUIZ_COMPLETE: { amount: 20, category: 'study', label: 'Quiz complete' },
   QUIZ_EXCELLENT: { amount: 50, category: 'study', label: '90%+ score!' },
   FLASHCARD_CREATE: { amount: 10, category: 'study', label: 'Flashcard created' },
   FLASHCARD_REVIEW: { amount: 15, category: 'study', label: 'Flashcards reviewed' },
   NOTE_CREATE: { amount: 5, category: 'study', label: 'Note saved' },
   HABIT: { amount: 10, category: 'habit', label: 'Habit done' },
+  HABIT_UNDO: { amount: -10, category: 'habit', label: 'Habit unticked' },
+  HABIT_BAD: { amount: -5, category: 'habit', label: 'Bad habit tapped' },
+  HABIT_BAD_UNDO: { amount: 5, category: 'habit', label: 'Bad habit untapped' },
   MOOD_CHECKIN: { amount: 5, category: 'habit', label: 'Mood check-in' },
   WORKOUT: { amount: 30, category: 'gym', label: 'Workout logged' },
   ARENA_CORRECT: { amount: 10, category: 'social', label: 'Arena answer' },
@@ -153,9 +157,8 @@ export const SUBJECT_COLORS = [
 // ============================================================
 // ONBOARDING OPTIONS
 // ============================================================
-// Class 6–8 and College were removed in v1.0.2 — StudentOS now targets
-// board-exam students (Class 9–12), where the scheduler matters most.
-// Existing Class 6–8 profiles keep working; the presets stay in syllabusData.
+// FIX-B: Class 6-8 and College removed per PO PDF — StudentOS targets board-exam students (Class 9-12)
+// Existing 6-8 profiles keep their rows — no DB deletion, but no new lookups
 export const CLASS_GROUPS = [
   { id: 'high', label: 'High School', hint: 'Class 9–10', classes: ['Class 9', 'Class 10'], showBoard: true },
   { id: 'senior', label: 'Senior Secondary', hint: 'Class 11–12', classes: ['Class 11', 'Class 12'], showBoard: true },
@@ -271,6 +274,140 @@ export const GYM_PLANS = {
   },
 };
 
+
+// ============================================================
+// GYM — SPLIT SYSTEM (FIX-C)
+// ============================================================
+export const MUSCLE_GROUPS = [
+  'Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms',
+  'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'
+];
+
+export const GYM_SPLITS = {
+  ppl: {
+    id: 'ppl',
+    label: 'Push / Pull / Legs',
+    hint: 'Classic 3-day rotation — most popular',
+    dayTypes: [
+      { label: 'Push Day', groups: ['Chest', 'Shoulders', 'Triceps'] },
+      { label: 'Pull Day', groups: ['Back', 'Biceps', 'Forearms'] },
+      { label: 'Legs Day', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves'] },
+    ],
+  },
+  arnold: {
+    id: 'arnold',
+    label: 'Arnold Split',
+    hint: 'Chest+Back, Shoulders+Arms, Legs+Abs — Golden Era',
+    dayTypes: [
+      { label: 'Chest & Back', groups: ['Chest', 'Back'] },
+      { label: 'Shoulders & Arms', groups: ['Shoulders', 'Biceps', 'Triceps', 'Forearms'] },
+      { label: 'Legs & Abs', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  upper_lower: {
+    id: 'upper_lower',
+    label: 'Upper / Lower',
+    hint: '2-day rotation — upper body, lower body',
+    dayTypes: [
+      { label: 'Upper Body', groups: ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms'] },
+      { label: 'Lower Body', groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  full_body: {
+    id: 'full_body',
+    label: 'Full Body',
+    hint: 'All muscle groups every session',
+    dayTypes: [
+      { label: 'Full Body', groups: ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs/Core'] },
+    ],
+  },
+  custom: {
+    id: 'custom',
+    label: 'Custom Split',
+    hint: 'Build your own days with muscle groups',
+    dayTypes: [], // filled by user
+  },
+};
+
+export const EXERCISE_LIBRARY = [
+  // Chest — 6
+  { name: 'Bench Press', group: 'Chest', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Push-ups', group: 'Chest', gym: false, home: true, sets: 3, reps: '12–15' },
+  { name: 'Chest Press', group: 'Chest', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Incline Dumbbell Press', group: 'Chest', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Dips', group: 'Chest', gym: true, home: true, sets: 3, reps: '10–12' },
+  { name: 'Chest Fly', group: 'Chest', gym: true, home: false, sets: 3, reps: '12' },
+
+  // Back — 6
+  { name: 'Pull-ups', group: 'Back', gym: true, home: true, sets: 3, reps: 'Max' },
+  { name: 'Lat Pulldown', group: 'Back', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Barbell Row', group: 'Back', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Deadlift', group: 'Back', gym: true, home: false, sets: 4, reps: '6–8' },
+  { name: 'Seated Row', group: 'Back', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Superman', group: 'Back', gym: false, home: true, sets: 3, reps: '12' },
+
+  // Shoulders — 6
+  { name: 'Overhead Press', group: 'Shoulders', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Dumbbell Shoulder Press', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Lateral Raises', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '12–15' },
+  { name: 'Face Pulls', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Arnold Press', group: 'Shoulders', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Pike Push-ups', group: 'Shoulders', gym: false, home: true, sets: 3, reps: '10–12' },
+
+  // Biceps — 5
+  { name: 'Bicep Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Hammer Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Chin-ups', group: 'Biceps', gym: true, home: true, sets: 3, reps: 'Max' },
+  { name: 'Concentration Curls', group: 'Biceps', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Incline Curl', group: 'Biceps', gym: true, home: false, sets: 3, reps: '10' },
+
+  // Triceps — 5
+  { name: 'Tricep Dips', group: 'Triceps', gym: false, home: true, sets: 3, reps: '12' },
+  { name: 'Tricep Pushdown', group: 'Triceps', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Overhead Tricep Extension', group: 'Triceps', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Close-Grip Bench Press', group: 'Triceps', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Skull Crushers', group: 'Triceps', gym: true, home: false, sets: 3, reps: '10' },
+
+  // Forearms — 4
+  { name: 'Wrist Curls', group: 'Forearms', gym: true, home: false, sets: 3, reps: '15' },
+  { name: 'Farmer\'s Walk', group: 'Forearms', gym: true, home: false, sets: 2, reps: '40 sec' },
+  { name: 'Reverse Curls', group: 'Forearms', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Dead Hang', group: 'Forearms', gym: false, home: true, sets: 3, reps: '30 sec' },
+
+  // Quads — 5
+  { name: 'Squat', group: 'Quads', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Bodyweight Squats', group: 'Quads', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Leg Press', group: 'Quads', gym: true, home: false, sets: 3, reps: '10–12' },
+  { name: 'Lunges', group: 'Quads', gym: true, home: true, sets: 3, reps: '12 each' },
+  { name: 'Bulgarian Split Squat', group: 'Quads', gym: true, home: true, sets: 3, reps: '10 each' },
+
+  // Hamstrings — 4
+  { name: 'Romanian Deadlift', group: 'Hamstrings', gym: true, home: false, sets: 4, reps: '8–10' },
+  { name: 'Leg Curl', group: 'Hamstrings', gym: true, home: false, sets: 3, reps: '12' },
+  { name: 'Good Mornings', group: 'Hamstrings', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Glute-Ham Raise', group: 'Hamstrings', gym: true, home: true, sets: 3, reps: '8–10' },
+
+  // Glutes — 4
+  { name: 'Hip Thrust', group: 'Glutes', gym: true, home: false, sets: 4, reps: '10' },
+  { name: 'Glute Bridge', group: 'Glutes', gym: false, home: true, sets: 3, reps: '15' },
+  { name: 'Step-ups', group: 'Glutes', gym: false, home: true, sets: 3, reps: '12 each' },
+  { name: 'Cable Kickback', group: 'Glutes', gym: true, home: false, sets: 3, reps: '12 each' },
+
+  // Calves — 3
+  { name: 'Calf Raises', group: 'Calves', gym: true, home: true, sets: 4, reps: '15–20' },
+  { name: 'Seated Calf Raise', group: 'Calves', gym: true, home: false, sets: 3, reps: '15' },
+  { name: 'Jump Rope', group: 'Calves', gym: false, home: true, sets: 2, reps: '60 sec' },
+
+  // Abs/Core — 6
+  { name: 'Plank', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '45 sec' },
+  { name: 'Hanging Leg Raise', group: 'Abs/Core', gym: true, home: false, sets: 3, reps: '12–15' },
+  { name: 'Crunches', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Russian Twists', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '20' },
+  { name: 'Ab Wheel', group: 'Abs/Core', gym: true, home: false, sets: 3, reps: '10' },
+  { name: 'Mountain Climbers', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '30 sec' },
+];
+
+
 // ============================================================
 // QUOTES (Daily wisdom — works fully offline)
 // ============================================================
@@ -318,95 +455,11 @@ export const QUOTES = [
 // SYLLABUS PRESETS (bundled starter syllabi)
 // Format: rows of { subject, chapter, weightage (0-5), estimated_hours }
 // ============================================================
-export const SYLLABUS_PRESETS = {
-  'class10_cbse': {
-    label: 'Class 10 · CBSE (Science + Maths)',
-    rows: [
-      { subject: 'Science', chapter: 'Chemical Reactions and Equations', weightage: 4, estimated_hours: 6 },
-      { subject: 'Science', chapter: 'Acids, Bases and Salts', weightage: 4, estimated_hours: 7 },
-      { subject: 'Science', chapter: 'Metals and Non-metals', weightage: 4, estimated_hours: 8 },
-      { subject: 'Science', chapter: 'Life Processes', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Control and Coordination', weightage: 3, estimated_hours: 7 },
-      { subject: 'Science', chapter: 'How do Organisms Reproduce?', weightage: 4, estimated_hours: 8 },
-      { subject: 'Science', chapter: 'Light — Reflection and Refraction', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Electricity', weightage: 5, estimated_hours: 10 },
-      { subject: 'Science', chapter: 'Our Environment', weightage: 2, estimated_hours: 4 },
-      { subject: 'Maths', chapter: 'Real Numbers', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Polynomials', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Pair of Linear Equations', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Quadratic Equations', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Arithmetic Progressions', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Triangles', weightage: 4, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Coordinate Geometry', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Trigonometry', weightage: 5, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Statistics and Probability', weightage: 3, estimated_hours: 7 },
-    ],
-  },
-  'class12_pcm': {
-    label: 'Class 11–12 · PCM (JEE base)',
-    rows: [
-      { subject: 'Physics', chapter: 'Units, Dimensions and Errors', weightage: 2, estimated_hours: 5 },
-      { subject: 'Physics', chapter: 'Kinematics', weightage: 4, estimated_hours: 10 },
-      { subject: 'Physics', chapter: 'Laws of Motion', weightage: 4, estimated_hours: 10 },
-      { subject: 'Physics', chapter: 'Work, Energy and Power', weightage: 4, estimated_hours: 9 },
-      { subject: 'Physics', chapter: 'Rotational Motion', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Thermodynamics', weightage: 5, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Electrostatics', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Current Electricity', weightage: 5, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Magnetism and EMI', weightage: 5, estimated_hours: 14 },
-      { subject: 'Physics', chapter: 'Optics', weightage: 4, estimated_hours: 12 },
-      { subject: 'Physics', chapter: 'Modern Physics', weightage: 5, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Mole Concept and Stoichiometry', weightage: 4, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Atomic Structure', weightage: 4, estimated_hours: 8 },
-      { subject: 'Chemistry', chapter: 'Chemical Bonding', weightage: 5, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Thermodynamics and Equilibrium', weightage: 5, estimated_hours: 14 },
-      { subject: 'Chemistry', chapter: 'Electrochemistry', weightage: 4, estimated_hours: 10 },
-      { subject: 'Chemistry', chapter: 'Chemical Kinetics', weightage: 4, estimated_hours: 8 },
-      { subject: 'Chemistry', chapter: 'p-Block Elements', weightage: 4, estimated_hours: 12 },
-      { subject: 'Chemistry', chapter: 'Organic Chemistry — GOC', weightage: 5, estimated_hours: 14 },
-      { subject: 'Chemistry', chapter: 'Organic — Hydrocarbons & Haloalkanes', weightage: 4, estimated_hours: 12 },
-      { subject: 'Maths', chapter: 'Sets, Relations and Functions', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Complex Numbers and Quadratic Equations', weightage: 4, hours: 10, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Sequences and Series', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Permutations and Combinations', weightage: 3, estimated_hours: 8 },
-      { subject: 'Maths', chapter: 'Binomial Theorem', weightage: 3, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Matrices and Determinants', weightage: 5, estimated_hours: 12 },
-      { subject: 'Maths', chapter: 'Limits, Continuity and Differentiability', weightage: 5, estimated_hours: 14 },
-      { subject: 'Maths', chapter: 'Applications of Derivatives & Integrals', weightage: 5, hours: 16, estimated_hours: 16 },
-      { subject: 'Maths', chapter: 'Probability', weightage: 4, estimated_hours: 10 },
-      { subject: 'Maths', chapter: 'Vectors and 3D Geometry', weightage: 5, estimated_hours: 12 },
-    ],
-  },
-  'neet_bio': {
-    label: 'NEET · Biology (NCERT)',
-    rows: [
-      { subject: 'Biology', chapter: 'Cell — The Unit of Life', weightage: 5, estimated_hours: 10 },
-      { subject: 'Biology', chapter: 'Biomolecules', weightage: 4, estimated_hours: 8 },
-      { subject: 'Biology', chapter: 'Plant Physiology', weightage: 5, estimated_hours: 14 },
-      { subject: 'Biology', chapter: 'Human Physiology', weightage: 5, estimated_hours: 18 },
-      { subject: 'Biology', chapter: 'Reproduction', weightage: 5, estimated_hours: 14 },
-      { subject: 'Biology', chapter: 'Genetics and Evolution', weightage: 5, estimated_hours: 16 },
-      { subject: 'Biology', chapter: 'Biology and Human Welfare', weightage: 3, estimated_hours: 8 },
-      { subject: 'Biology', chapter: 'Biotechnology', weightage: 4, estimated_hours: 10 },
-      { subject: 'Biology', chapter: 'Ecology and Environment', weightage: 5, estimated_hours: 12 },
-    ],
-  },
-  'foundation': {
-    label: 'Class 6–8 · Foundation (Science + Maths)',
-    rows: [
-      { subject: 'Science', chapter: 'Food and Nutrition', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Acids, Bases and Salts (basics)', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Motion and Time', weightage: 4, estimated_hours: 6 },
-      { subject: 'Science', chapter: 'Light and Shadow', weightage: 3, estimated_hours: 4 },
-      { subject: 'Science', chapter: 'Cell Structure', weightage: 4, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Integers and Fractions', weightage: 4, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Algebraic Expressions', weightage: 4, estimated_hours: 6 },
-      { subject: 'Maths', chapter: 'Ratio and Proportion', weightage: 3, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Geometry — Lines and Angles', weightage: 3, estimated_hours: 5 },
-      { subject: 'Maths', chapter: 'Data Handling', weightage: 2, estimated_hours: 4 },
-    ],
-  },
-};
+// ============================================================
+// SYLLABUS PRESETS — v1.0.6 recovery M: legacy presets cleaned up
+// Old bundled presets removed. Source of truth is now src/data/syllabusData.js
+// ============================================================
+export const SYLLABUS_PRESETS = {};
 
 // ============================================================
 // MISC

@@ -18,6 +18,7 @@ import { ModalSheet } from '../../components/ui/ModalSheet';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
+import { infoAlert } from '../../lib/alert';
 import { seedSyllabusTrack } from '../../lib/starterData';
 import { aiGenerateSyllabus, AIUnavailableError } from '../../lib/aiFeatures';
 import { TRACKS, pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI } from '../../data/syllabusData';
@@ -97,54 +98,64 @@ export function SyllabusScreen({ navigation }) {
     const subject = (newSubject || '').trim();
     const chapter = (newChapter || '').trim();
     if (!subject || !chapter) return;
-    await db.insert('syllabus', {
-      user_id: profile.id,
-      subject,
-      chapter,
-      topic: null,
-      subtopic: null,
-      track: activeTrack,
-      weightage: Math.max(1, Math.min(5, Number(newWeight) || 3)),
-      estimated_hours: Math.max(0.5, Number(newHours) || 4),
-      status: 'locked',
-      progress_percent: 0,
-      deadline: null,
-      completed_at: null,
-      created_at: nowIso(),
-    });
-    setNewChapter('');
-    setAddOpen(false);
-    await load();
+    try {
+      await db.insert('syllabus', {
+        user_id: profile.id,
+        subject,
+        chapter,
+        topic: null,
+        subtopic: null,
+        track: activeTrack,
+        weightage: Math.max(1, Math.min(5, Number(newWeight) || 3)),
+        estimated_hours: Math.max(0.5, Number(newHours) || 4),
+        status: 'locked',
+        progress_percent: 0,
+        deadline: null,
+        completed_at: null,
+        created_at: nowIso(),
+      });
+      setNewChapter('');
+      setAddOpen(false);
+      await load();
+    } catch (e) {
+      infoAlert('Syllabus save fail hua', e?.message || 'Chapter add nahi ho paya — dobara try karo');
+    }
   };
 
   const importPreset = async (preset, track) => {
-    const rowsToInsert = preset.rows.map((r) => ({
-      user_id: profile.id,
-      subject: r.subject,
-      chapter: r.chapter,
-      topic: null,
-      subtopic: null,
-      track,
-      weightage: r.weightage || 3,
-      estimated_hours: r.estimated_hours || 4,
-      status: 'locked',
-      progress_percent: 0,
-      deadline: null,
-      completed_at: null,
-      created_at: nowIso(),
-    }));
-    // avoid duplicate chapters for the same subject+track
-    const existing = new Set(rows.filter((r) => rowTrack(r) === track).map((r) => `${r.subject}::${r.chapter}`));
-    const fresh = rowsToInsert.filter((r) => !existing.has(`${r.subject}::${r.chapter}`));
-    if (fresh.length) await db.insertMany('syllabus', fresh);
-    setPresetOpen(false);
-    await load();
+    try {
+      const rowsToInsert = preset.rows.map((r) => ({
+        user_id: profile.id,
+        subject: r.subject,
+        chapter: r.chapter,
+        topic: null,
+        subtopic: null,
+        track,
+        weightage: r.weightage || 3,
+        estimated_hours: r.estimated_hours || 4,
+        status: 'locked',
+        progress_percent: 0,
+        deadline: null,
+        completed_at: null,
+        created_at: nowIso(),
+      }));
+      const existing = new Set(rows.filter((r) => rowTrack(r) === track).map((r) => `${r.subject}::${r.chapter}`));
+      const fresh = rowsToInsert.filter((r) => !existing.has(`${r.subject}::${r.chapter}`));
+      if (fresh.length) await db.insertMany('syllabus', fresh);
+      setPresetOpen(false);
+      await load();
+    } catch (e) {
+      infoAlert('Syllabus import fail hua', e?.message || 'Preset import nahi ho paya — dobara try karo');
+    }
   };
 
-  // one-tap import of the student's OWN track (class-first!)
   const importMyTrack = async () => {
-    await seedSyllabusTrack(profile.id, profile || {}, activeTrack);
-    await load();
+    try {
+      await seedSyllabusTrack(profile.id, profile || {}, activeTrack);
+      await load();
+    } catch (e) {
+      infoAlert('Syllabus import fail hua', e?.message || 'My track import nahi ho paya');
+    }
   };
 
   const generateWithAI = async () => {
@@ -157,7 +168,7 @@ export function SyllabusScreen({ navigation }) {
         exam: activeTrack === 'exam' ? profile?.competitive_exam || '' : '',
         subjects: '',
       });
-      const existing = new Set(rows.map((r) => `${r.subject}::${r.chapter}`));
+      const existing = new Set(rows.filter((r) => rowTrack(r) === activeTrack).map((r) => `${r.subject}::${r.chapter}`));
       const fresh = gen
         .filter((r) => !existing.has(`${r.subject}::${r.chapter}`))
         .map((r) => ({
@@ -180,7 +191,9 @@ export function SyllabusScreen({ navigation }) {
       setPresetOpen(false);
       await load();
     } catch (e) {
-      setAiMsg(e instanceof AIUnavailableError ? e.message : 'AI syllabus nahi bana — presets try karo!');
+      const msg = e instanceof AIUnavailableError ? e.message : e?.message || 'AI syllabus nahi bana — presets try karo!';
+      setAiMsg(msg);
+      infoAlert('AI syllabus fail hua', msg);
     } finally {
       setAiBusy(false);
     }
@@ -191,7 +204,7 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
-  const trackMeta = TRACKS[activeTrack];
+  const trackMeta = TRACKS[activeTrack] || TRACKS.class;
   const trackDone = trackRows.filter((r) => r.status === 'completed').length;
 
   return (
@@ -211,7 +224,7 @@ export function SyllabusScreen({ navigation }) {
       {/* Track switcher — CLASS is the default map */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 10 }}>
         {availableTracks.map((t) => {
-          const meta = TRACKS[t];
+          const meta = TRACKS[t] || TRACKS.class;
           const active = activeTrack === t;
           const count = rows.filter((r) => rowTrack(r) === t).length;
           return (
@@ -268,10 +281,10 @@ export function SyllabusScreen({ navigation }) {
             title={`${trackMeta.label} khali hai`}
             subtitle={
               set[activeTrack]
-                ? `${set[activeTrack].label} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
+                ? `${(set[activeTrack].label || trackMeta.label)} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
                 : 'Apna khud ka chapter add karo, ya AI se generate karao.'
             }
-            actionLabel={set[activeTrack] ? `Import ${set[activeTrack].label.split('·')[0].trim()}` : 'Add chapter'}
+            actionLabel={set[activeTrack] ? `Import ${(set[activeTrack].label || trackMeta.label).split('·')[0].trim()}` : 'Add chapter'}
             onAction={() => (set[activeTrack] ? importMyTrack() : setAddOpen(true))}
           />
         </Card>
@@ -473,7 +486,7 @@ function ChapterRow({ row, onOpen, onDelete }) {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text
-            numberOfLines={1}
+            numberOfLines={2}
             style={{
               fontFamily: fonts.bodyMedium,
               fontSize: 14,

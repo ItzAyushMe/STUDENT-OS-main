@@ -10,6 +10,8 @@ import { useGame } from '../../context/GameContext';
 import { useTheme } from '../../context/ThemeContext';
 import { GAMER, fonts, radius } from '../../config/theme';
 import { db, isRemote } from '../../lib/db';
+import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce';
+import { todayStr } from '../../lib/utils';
 import { DEMO_RIVALS } from '../../lib/guildData';
 import { QUIZ_BANK } from '../../lib/quizBank';
 import { aiChallengeQuestions } from '../../lib/aiFeatures';
@@ -42,6 +44,7 @@ export function BattleScreen({ navigation }) {
   const [totalTime, setTotalTime] = useState(0);
   const [rivalScore, setRivalScore] = useState(null);
   const [confetti, setConfetti] = useState(0);
+  const [saveMsg, setSaveMsg] = useState(''); // FIX-F7: result save fail banner
 
   const loadFriends = useCallback(async () => {
     if (!profile?.id) return;
@@ -138,26 +141,47 @@ export function BattleScreen({ navigation }) {
     }
   };
 
+  // FIX-F7: battle XP independent, anti-retry, daily cap via xpOnce key 'battle' using todayStr()
   const finish = async () => {
     const won = correct > rivalScore;
     const tie = correct === rivalScore;
     setPhase('result');
     if (won) setConfetti(Date.now());
-    await db.insert('quiz_results', {
-      user_id: profile.id,
-      subject: null,
-      topic: opponent?.name,
-      mode: 'battle',
-      total_questions: questions.length,
-      correct_answers: correct,
-      accuracy: Math.round((correct / questions.length) * 100),
-      time_taken: totalTime,
-      xp_earned: 25 + (won ? 60 : 0),
-      weak_topics: [],
-      created_at: nowIso(),
-    });
-    await awardXP('BATTLE_COMPLETE', { amount: 25, label: 'Battle fought' });
-    if (won) await awardXP('BATTLE_WIN');
+    let battleAlreadyEarned = false;
+    try { battleAlreadyEarned = await hasEarnedToday(profile.id, 'battle'); } catch { battleAlreadyEarned = false; }
+    const xpForBattle = battleAlreadyEarned ? 0 : 25;
+    const xpForWin = battleAlreadyEarned ? 0 : (won ? 60 : 0);
+    // XP and persistence independent — result save in its own try/catch (fail -> banner, XP secured)
+    // Order: guard -> XP -> save (per spec sequence diagram guard -> XP -> save)
+    if (!battleAlreadyEarned) {
+      try {
+        const res = await awardXP('BATTLE_COMPLETE', { amount: xpForBattle, label: 'Battle fought' });
+        if (res) await markEarnedToday(profile.id, 'battle');
+        if (won && xpForWin) await awardXP('BATTLE_WIN');
+      } catch (e) {
+        console.warn('[F7] battle XP failed', e?.message);
+      }
+    } else {
+      setSaveMsg('Aaj ka battle XP le liya ⚔️ — 0 XP, game still counts');
+    }
+    try {
+      await db.insert('quiz_results', {
+        user_id: profile.id,
+        subject: null,
+        topic: opponent?.name,
+        mode: 'battle',
+        total_questions: questions.length,
+        correct_answers: correct,
+        accuracy: Math.round((correct / questions.length) * 100),
+        time_taken: totalTime,
+        xp_earned: xpForBattle + xpForWin,
+        weak_topics: [],
+        created_at: nowIso(),
+      });
+    } catch (e) {
+      console.warn('[F7] quiz_results save failed', e?.message);
+      setSaveMsg('Result save fail — XP secured ✅ (F5 is its fix, not RLS weakening)');
+    }
   };
 
   const q = questions[qIndex];
@@ -283,6 +307,11 @@ export function BattleScreen({ navigation }) {
       {/* ---------------- RESULT ---------------- */}
       {phase === 'result' ? (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
+          {saveMsg ? (
+            <Card mode="gamer" style={{ marginBottom: 10, backgroundColor: 'rgba(251,191,36,0.12)', borderColor: '#F59E0B' }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{saveMsg}</Text>
+            </Card>
+          ) : null}
           <Card mode="gamer" style={{ alignItems: 'center', marginBottom: 16 }}>
             <Text style={{ fontSize: 48 }}>{correct > rivalScore ? '🏆' : correct === rivalScore ? '🤝' : '😤'}</Text>
             <PixelText size={13} color={correct > rivalScore ? GAMER.gold : GAMER.text} glow style={{ marginTop: 12 }}>

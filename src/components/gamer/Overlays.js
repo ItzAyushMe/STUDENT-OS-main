@@ -106,6 +106,7 @@ function XPToast({ toast }) {
   }, [rise]);
   const opacity = rise.interpolate({ inputRange: [0, 0.25, 0.75, 1], outputRange: [0, 1, 1, 0] });
   const translateY = rise.interpolate({ inputRange: [0, 1], outputRange: [14, -18] });
+  const isNeg = Number(toast.amount) < 0;
   return (
     <Animated.View
       style={{
@@ -113,15 +114,15 @@ function XPToast({ toast }) {
         transform: [{ translateY }],
         backgroundColor: 'rgba(13,17,23,0.92)',
         borderWidth: 1,
-        borderColor: GAMER.gold + '77',
+        borderColor: isNeg ? 'rgba(239,68,68,0.5)' : GAMER.gold + '77',
         borderRadius: 999,
         paddingVertical: 7,
         paddingHorizontal: 16,
         marginBottom: 8,
       }}
     >
-      <Text style={{ fontFamily: fonts.pixel, fontSize: 11, color: GAMER.gold }}>
-        +{toast.amount} XP
+      <Text style={{ fontFamily: fonts.pixel, fontSize: 11, color: isNeg ? '#EF4444' : GAMER.gold }}>
+        {isNeg ? `${toast.amount}` : `+${toast.amount}`} XP
         {toast.label ? <Text style={{ color: GAMER.subtext, fontFamily: fonts.body }}> · {toast.label}</Text> : null}
       </Text>
     </Animated.View>

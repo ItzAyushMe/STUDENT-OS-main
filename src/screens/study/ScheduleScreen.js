@@ -1,7 +1,7 @@
 // Smart Schedule — daily time-blocks, weekly grid, monthly calendar.
 // Generates plans offline (scheduleGenerator) with revision cycles,
 // mock days and buffer days; missed quests auto-reschedule.
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,6 +42,8 @@ export function ScheduleScreen({ navigation, route }) {
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
   const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
   const [genError, setGenError] = useState('');
+  const [autoRollMsg, setAutoRollMsg] = useState('');
+  const autoRolledRef = useRef(false); // FIX-E: guard to auto-roll only once per screen load session
 
   // human-readable priority line for the generate modal (reads the
   // student's own priority settings — FIX B)
@@ -72,7 +74,8 @@ export function ScheduleScreen({ navigation, route }) {
     setLoading(true);
     try {
       const from = dateStr(dayjs().subtract(30, 'day'));
-      const to = dateStr(dayjs().add(180, 'day'));
+      // v1.0.6 recovery: load up to 365 days to support long-horizon schedules
+      const to = dateStr(dayjs().add(365, 'day'));
       const data = await db.list('schedule', {
         eq: { user_id: profile.id },
         gte: { date: from },
@@ -97,8 +100,43 @@ export function ScheduleScreen({ navigation, route }) {
     }
   }, [route.params?.autoRegen]);
 
+  // FIX-E: auto rollover on schedule load — skipped/pending past due auto-moves without button press
+  useEffect(() => {
+    if (loading) return;
+    if (!sessions.length) return;
+    if (autoRolledRef.current) return;
+    const pastDue = sessions.filter((s) => (s.status === 'pending' || s.status === 'skipped') && s.date < todayStr());
+    if (!pastDue.length) return;
+    // auto-roll once per screen focus session
+    autoRolledRef.current = true;
+    (async () => {
+      try {
+        const schoolExams = Array.isArray(profile?.school_exams) ? profile.school_exams : [];
+        const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile?.daily_study_hours || 3, schoolExams });
+        if (moved.length) {
+          for (const m of moved) {
+            try { await db.update('schedule', m.id, { date: m.date, status: 'pending' }); } catch {}
+          }
+          setSessions((prev) => prev.map((s) => {
+            const mv = moved.find((x) => x.id === s.id);
+            return mv ? { ...s, date: mv.date, status: 'pending' } : s;
+          }));
+          setAutoRollMsg(`Auto-rolled ${moved.length} missed/skipped quest${moved.length>1?'s':''} to upcoming days — no button needed ✅`);
+        }
+      } catch (e) {
+        console.warn('[FIX-E] auto rollover failed', e?.message);
+      }
+    })();
+  }, [sessions, loading, profile?.school_exams, profile?.daily_study_hours]);
+
+  // Reset guard when screen refocuses (so next visit can auto-roll again)
+  useFocusEffect(useCallback(() => {
+    autoRolledRef.current = false;
+    setAutoRollMsg('');
+  }, []));
+
   const missed = useMemo(
-    () => sessions.filter((s) => s.status === 'pending' && s.date < todayStr()),
+    () => sessions.filter((s) => (s.status === 'pending' || s.status === 'skipped') && s.date < todayStr()),
     [sessions]
   );
 
@@ -153,11 +191,37 @@ export function ScheduleScreen({ navigation, route }) {
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
-        weeks: 6,
+        // v1.0.6 recovery: dynamic weeks to cover exam horizon up to 365 days
+        // Previously hardcoded 6 weeks (42 days) stopped early for 249-day exams
+        weeks: (() => {
+          const today = dayjs();
+          const exam = profile.exam_date ? dayjs(profile.exam_date) : null;
+          const olymp = profile.olympiad_date ? dayjs(profile.olympiad_date) : null;
+          let maxDate = today.add(6 * 7, 'day');
+          if (exam && exam.isAfter(maxDate)) maxDate = exam;
+          if (olymp && olymp.isAfter(maxDate)) maxDate = olymp;
+          if (Array.isArray(profile.school_exams) && profile.school_exams.length) {
+            for (const e of profile.school_exams) {
+              const d = e.end_date || e.start_date || e.date;
+              if (d) {
+                const sd = dayjs(d);
+                if (sd.isAfter(maxDate)) maxDate = sd;
+              }
+            }
+          }
+          const diffDays = Math.max(42, maxDate.diff(today, 'day'));
+          const weeksNeeded = Math.ceil(diffDays / 7);
+          return Math.min(52, Math.max(6, weeksNeeded)); // cap 52 weeks = 365 days
+        })(),
         userId: profile.id,
       });
       setCoverage(rows.coverage || null);
-      if (rows.length) await db.insertMany('schedule', rows);
+      // v1.0.6 Y Round2: chunk insert — 383 sessions for 248-day exam would fail wholesale in one batch
+      if (rows.length) {
+        for (let i = 0; i < rows.length; i += 100) {
+          await db.insertMany('schedule', rows.slice(i, i + 100));
+        }
+      }
       if (syllabus.length) {
         const deadlines = autoSetDeadlines(
           syllabus,
@@ -181,13 +245,15 @@ export function ScheduleScreen({ navigation, route }) {
 
   // AI-assisted catch-up: heuristic moves first, then Professor Byte
   // explains what to prioritise / drop (graceful if AI is offline).
+  // FIX-D4: school exam awareness — heuristic skips exam days, AI prompt includes ranges
   const rescheduleMissed = async () => {
     setAiPlanBusy(true);
     try {
-      const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours });
+      const schoolExams = Array.isArray(profile.school_exams) ? profile.school_exams : [];
+      const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours, schoolExams });
       for (const m of moved) await db.update('schedule', m.id, { date: m.date, status: 'pending' });
       await load();
-      // AI advice on what to prioritise / drop (best-effort)
+      // AI advice on what to prioritise / drop (best-effort) — FIX-D4 includes school exams
       try {
         const behindTopics = missed.map((m) => m.topic || m.subject).filter(Boolean);
         const plan = await aiReschedule({
@@ -196,6 +262,7 @@ export function ScheduleScreen({ navigation, route }) {
           examDate: profile.exam_date,
           dailyHours: profile.daily_study_hours,
           behindTopics,
+          schoolExams,
         });
         if (plan?.advice) setAiPlanMsg(plan.advice);
       } catch {
@@ -265,11 +332,11 @@ export function ScheduleScreen({ navigation, route }) {
             </View>
           );
         })}
-        {arcOf(profile) ? (
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: arcOf(profile).theme, marginLeft: 8 }}>
-            {arcOf(profile).emoji} {arcOf(profile).label} — {effectiveDailyHours(profile)}h/day
+        {(() => { const arc = arcOf(profile); return arc ? (
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: arc.theme, marginLeft: 8 }}>
+            {arc.emoji} {arc.label} — {effectiveDailyHours(profile)}h/day
           </Text>
-        ) : null}
+        ) : null; })()}
       </View>
 
       {genError ? (
@@ -279,14 +346,19 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
+      {autoRollMsg ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#065F46', lineHeight: 17 }}>{autoRollMsg}</Text>
+        </Card>
+      ) : null}
       {missed.length > 0 ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#92400E', flex: 1 }}>
-            {missed.length} quest{missed.length > 1 ? 's' : ''} miss ho gaye. Chinta mat karo — ek tap mein aage shift karo.
-            Class-track quests pehle shift honge 🏫
+            {missed.length} quest{missed.length > 1 ? 's' : ''} miss/skipped ho gaye. FIX-E: auto-roll on load already tried — if still here, tap to shift again.
+            Class-track quests pehle shift honge 🏫 Skipped = kal auto-roll forward ⏭️ (now automatic on load)
           </Text>
           <Button
-            title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule (AI catch-up plan)'}
+            title={aiPlanBusy ? 'Rescheduling…' : 'Auto-reschedule missed + skipped (AI catch-up)'}
             size="sm"
             mode="light"
             onPress={rescheduleMissed}
@@ -298,23 +370,40 @@ export function ScheduleScreen({ navigation, route }) {
               Professor Byte: {aiPlanMsg}
             </Text>
           ) : null}
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#92400E', marginTop: 8, lineHeight: 15 }}>
+            ℹ️ Skip = is quest ko kal shift karna, delete nahi. Missed/skipped auto-roll on screen load (FIX-E) + manual button still available.
+          </Text>
         </Card>
       ) : null}
 
-      {/* Priority coverage banner — class first, olympiad second, exam last */}
+      {/* Priority coverage banner — class first, olympiad second, exam last + v1.0.6 honest warning */}
       {coverage ? (
-        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
-            🏫 Class {coverage.classPlanned}/{coverage.classTotal} planned
-            {coverage.olympiadTotal ? ` · 🏅 Olympiad ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
-            {coverage.examTotal ? ` · 🎯 ${profile.competitive_exam || 'Exam'} ${coverage.examPlanned}/${coverage.examTotal}` : ''}
-          </Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
-            {coverage.classDoneBy && coverage.nextSchoolExam
-              ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label}" (${coverage.nextSchoolExam.start}) 📅`
-              : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
-          </Text>
-        </Card>
+        <>
+          <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
+              🏫 Class {coverage.classPlanned}/{coverage.classTotal} planned
+              {coverage.olympiadTotal ? ` · 🏅 Olympiad ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
+              {coverage.examTotal ? ` · 🎯 ${profile.competitive_exam || 'Exam'} ${coverage.examPlanned}/${coverage.examTotal}` : ''}
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
+              {coverage.classDoneBy && coverage.nextSchoolExam
+                ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label || coverage.nextSchoolExam.start || 'School Exam'}" (${coverage.nextSchoolExam.start || ''}) 📅`
+                : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
+            </Text>
+            {coverage.totalRequiredHours ? (
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed
+              </Text>
+            ) : null}
+          </Card>
+          {coverage.coverageWarning ? (
+            <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
+                {coverage.coverageWarning}
+              </Text>
+            </Card>
+          ) : null}
+        </>
       ) : null}
 
       {loading ? <Loading mode="light" /> : null}
@@ -486,7 +575,7 @@ function DailyView({ selected, setSelected, sessions, onComplete, onSkip, onGene
 const TRACK_BADGE = { class: { icon: '🏫', label: 'Class' }, olympiad: { icon: '🏅', label: 'Olympiad' }, exam: { icon: '🎯', label: 'Exam' } };
 
 const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
-  const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study;
+  const type = SESSION_TYPES[s.session_type] || SESSION_TYPES.study || { icon: '📚', label: 'Study', color: '#6D28D9' };
   const color = type.color;
   const completed = s.status === 'completed';
   const skipped = s.status === 'skipped';
@@ -535,8 +624,9 @@ const SessionBlock = memo(function SessionBlock({ s, onComplete, onSkip }) {
       </View>
       {!completed && !skipped ? (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Pressable onPress={() => onSkip(s)} hitSlop={8} style={{ padding: 8 }}>
-            <Ionicons name="flash-outline" size={19} color="#CBD5E1" />
+          <Pressable onPress={() => onSkip(s)} hitSlop={8} style={{ padding: 8, alignItems: 'center' }}>
+            <Ionicons name="time-outline" size={19} color="#94A3B8" />
+            <Text style={{ fontFamily: fonts.body, fontSize: 9, color: '#94A3B8', marginTop: 1 }}>Kal</Text>
           </Pressable>
           <Pressable
             onPress={() => onComplete(s)}

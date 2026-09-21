@@ -20,6 +20,79 @@ import { nowIso, uuid } from './utils';
 
 export const isRemote = () => isSupabaseConfigured;
 
+// ---------- FIX-F5: identity safety — authenticated session is authoritative ----------
+// Client correctness is fix path, never DB rules. Never rewrite user_id to force RLS.
+// Guard: before any cloud write, get session.user.id, compare with profile.id / row user_id.
+// If mismatch -> reload profile belonging to session.user.id, only continue if state matches.
+// If no session -> no write + friendly message. On auth/token failure -> refresh once, retry once.
+let _currentUserId = null;
+let _reloadProfileCb = null;
+let _cachedSessionUid = null;
+let _cachedAt = 0;
+
+export function setCurrentUserId(id) { _currentUserId = id; }
+export function setReloadProfileCallback(cb) { _reloadProfileCb = cb; }
+
+async function getSessionUid() {
+  const now = Date.now();
+  if (_cachedSessionUid && now - _cachedAt < 2000) return _cachedSessionUid;
+  try {
+    if (!isRemote()) return null;
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    const uid = data?.session?.user?.id || null;
+    _cachedSessionUid = uid;
+    _cachedAt = now;
+    return uid;
+  } catch (e) {
+    // FIX-F5: on auth/token failure -> refresh once
+    try {
+      const { data } = await supabase.auth.refreshSession();
+      const uid = data?.session?.user?.id || data?.user?.id || null;
+      _cachedSessionUid = uid;
+      _cachedAt = Date.now();
+      return uid;
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function ensureIdentity(table, rowOrId, rowUserId) {
+  if (!isRemote()) return; // local mode bypass
+  const sessionUid = await getSessionUid();
+  if (!sessionUid) {
+    throw new Error('Session expired — please login again');
+  }
+  // If currentUserId mismatch with session, reload profile
+  if (_currentUserId && _currentUserId !== sessionUid) {
+    if (typeof _reloadProfileCb === 'function') {
+      try { await _reloadProfileCb(); } catch {}
+      // after reload, check again
+      if (_currentUserId && _currentUserId !== sessionUid) {
+        throw new Error('Session mismatch — reloading profile, please try again');
+      }
+    } else {
+      throw new Error('Session mismatch — profile id does not match session, please re-login');
+    }
+  }
+  // For users table, id must equal sessionUid
+  if (table === 'users') {
+    const idToCheck = typeof rowOrId === 'string' ? rowOrId : rowOrId?.id;
+    if (idToCheck && idToCheck !== sessionUid) {
+      throw new Error('Session mismatch — users.id must equal session uid, not stale profile id');
+    }
+  }
+  // For tables with user_id, must equal sessionUid
+  if (rowUserId && rowUserId !== sessionUid) {
+    throw new Error('Session mismatch — user_id does not match session uid, reloading profile');
+  }
+  if (rowOrId && typeof rowOrId === 'object' && rowOrId.user_id && rowOrId.user_id !== sessionUid) {
+    throw new Error('Session mismatch — row.user_id does not match session uid');
+  }
+}
+
+
 // ---------------- local store ----------------
 const KEY = (table) => `sos.db.${table}`;
 
@@ -146,9 +219,15 @@ function sortRows(rows, order) {
 export const db = {
   async list(table, opts = {}) {
     if (isRemote()) {
+      // v1.0.6 J: guard empty in() — Supabase errors on empty array
+      for (const [col, vals] of Object.entries(opts.in || {})) {
+        if (!Array.isArray(vals) || vals.length === 0) {
+          return [];
+        }
+      }
       let q = supabase.from(table).select('*');
       for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
-      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val); // L-8 (audit): was silently ignored in cloud mode
+      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
       for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
       for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
       for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
@@ -169,9 +248,28 @@ export const db = {
   async insert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).insert(full).select().single();
-      if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
-      return data;
+      try {
+        await ensureIdentity(table, full, full.user_id);
+        const { data, error } = await supabase.from(table).insert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        // v1.0.6 Y Round1: fallback if updated_at / created_at column missing in live DB (old deployments)
+        if (msg.includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        if (msg.includes('created_at') && full.created_at) {
+          const { created_at: _c, ...without } = full;
+          const { data, error } = await supabase.from(table).insert(without).select().single();
+          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.insert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     rows.push(full);
@@ -183,9 +281,26 @@ export const db = {
     if (!list || !list.length) return [];
     if (isRemote()) {
       const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
-      const { data, error } = await supabase.from(table).insert(full).select();
-      if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-      return data || full;
+      try {
+        const { data, error } = await supabase.from(table).insert(full).select();
+        if (error) throw error;
+        return data || full;
+      } catch (e) {
+        const msg = String(e?.message || '').toLowerCase();
+        if (msg.includes('updated_at')) {
+          const without = full.map(({ updated_at: _u, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        if (msg.includes('created_at')) {
+          const without = full.map(({ created_at: _c, ...r }) => r);
+          const { data, error } = await supabase.from(table).insert(without).select();
+          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+          return data || without;
+        }
+        throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
@@ -196,9 +311,20 @@ export const db = {
   async update(table, id, patch) {
     const full = { ...patch, updated_at: nowIso() };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
-      if (error) throw new Error(`[db.update ${table}] ${error.message}`);
-      return data;
+      try {
+        await ensureIdentity(table, id, patch.user_id || null);
+        const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // v1.0.6 recovery: fallback if updated_at column missing in remote DB (old deployments)
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
+          if (error) throw new Error(`[db.update ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.update ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     let updated = null;
@@ -216,9 +342,21 @@ export const db = {
   async upsert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      const { data, error } = await supabase.from(table).upsert(full).select().single();
-      if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
-      return data;
+      try {
+        await ensureIdentity(table, full, full.user_id);
+        const { data, error } = await supabase.from(table).upsert(full).select().single();
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        // fallback without updated_at if column missing
+        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+          const { updated_at: _u, ...without } = full;
+          const { data, error } = await supabase.from(table).upsert(without).select().single();
+          if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
+          return data;
+        }
+        throw new Error(`[db.upsert ${table}] ${e.message || e}`);
+      }
     }
     const rows = await localAll(table);
     const i = rows.findIndex((r) => r.id === full.id);
@@ -245,6 +383,10 @@ export const db = {
 
   async removeWhere(table, eq) {
     if (isRemote()) {
+      // FIX-F5: if eq contains user_id, ensure it matches session
+      if (eq && eq.user_id) {
+        await ensureIdentity(table, null, eq.user_id);
+      }
       let q = supabase.from(table).delete();
       for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
       const { error } = await q;
@@ -270,6 +412,8 @@ export const db = {
 };
 
 // Wipe all local-mode data (used by "Reset local data" in Settings)
+export { getWeeklyGymSplit } from './gymSplit.js';
+
 export async function wipeLocalData() {
   const keys = await AsyncStorage.getAllKeys();
   const ours = keys.filter((k) => k.startsWith('sos.'));
