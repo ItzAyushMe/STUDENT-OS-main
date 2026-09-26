@@ -3,7 +3,7 @@ import { levelForXp, tierForXp, levelProgress, streakOnActivity, xpForCode } fro
 import { generateSchedule, autoSetDeadlines, autoRescheduleMissed, normalizePriorities } from './../src/lib/scheduleGenerator.js';
 import { pickDailyArena, pickBankQuiz, QUIZ_BANK } from './../src/lib/quizBank.js';
 import { uuid, mondayOf, daysBetween, seededShuffle, hashString, todayStr } from './../src/lib/utils.js';
-import { XP_RULES, TIERS } from './../src/config/constants.js';
+import { XP_RULES, TIERS, effectiveDailyHours } from './../src/config/constants.js';
 
 // ---- utils ----
 assert.ok(uuid().length >= 30, 'uuid');
@@ -1487,6 +1487,434 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const failed = results.filter((r) => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failed.length, 0, `FIX-G: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
+}
+
+// ---------- FIX-H: full scheduler redesign — real data, urgency, completed work, duplicates, overload, rollover ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  const sgSrc = read('src/lib/scheduleGenerator.js');
+  const ssSrc = read('src/screens/study/ScheduleScreen.js');
+
+  // Fixed "today" so every assertion is deterministic and independent of the wall clock.
+  // The scheduler must accept it (requirement 6) instead of reading the clock internally.
+  const H_TODAY = '2026-03-02';                       // a Monday
+  const H_CREATED = '2026-03-02T00:00:00.000Z';
+  const addDays = (iso, n) =>
+    new Date(new Date(`${iso}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
+  const mkRow = (id, subject, chapter, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 6,
+    status: 'locked', track: 'class', progress_percent: 0, ...over,
+  });
+  const sumMin = (rows, pred = () => true) =>
+    rows.filter(pred).reduce((a, r) => a + (Number(r.duration_minutes) || 0), 0);
+  const minutesByDate = (rows) => {
+    const m = {};
+    for (const r of rows) m[r.date] = (m[r.date] || 0) + (Number(r.duration_minutes) || 0);
+    return m;
+  };
+  const rowKey = (r) =>
+    [r.date, r.start_time, String(r.subject || ''), String(r.topic || ''), String(r.session_type || 'study')].join('|');
+
+  // ================= a) normal workload =================
+  const normalSyllabus = [
+    mkRow('s1', 'Science', 'Life Processes', { weightage: 5, estimated_hours: 6 }),
+    mkRow('s2', 'Maths', 'Trigonometry', { weightage: 4, estimated_hours: 10 }),
+    mkRow('s3', 'English', 'The Road Not Taken', { weightage: 2, estimated_hours: 3 }),
+  ];
+  const normalOpts = {
+    syllabus: normalSyllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [],
+    prepLevel: 'Intermediate', weeks: 3, userId: 'u-h', today: H_TODAY, createdAt: H_CREATED,
+  };
+  const pNormal = generateSchedule(normalOpts);
+
+  check('H1', 'normal workload: a real plan from the real syllabus, honouring the injected date', () => {
+    assert.ok(Array.isArray(pNormal) && pNormal.length > 3, `expected rows, got ${pNormal && pNormal.length}`);
+    assert.ok(pNormal.every((r) => r.user_id === 'u-h'), 'user_id set on every row');
+    assert.ok(pNormal.every((r) => r.status === 'pending'), 'every generated row is pending');
+    assert.ok(pNormal.every((r) => /^\d{2}:\d{2}$/.test(r.start_time) && /^\d{2}:\d{2}$/.test(r.end_time)), 'times are HH:MM');
+    assert.ok(pNormal.every((r) => Number(r.duration_minutes) > 0), 'no zero-minute blocks');
+    // every real chapter from the syllabus must appear — nothing invented, nothing dropped
+    for (const row of normalSyllabus) {
+      assert.ok(pNormal.some((r) => r.topic === row.chapter), `syllabus chapter missing from the plan: ${row.chapter}`);
+    }
+    assert.ok(!pNormal.some((r) => r.date < H_TODAY), 'nothing scheduled in the past');
+    // the injected date must be the plan's day 0 (a hidden clock read breaks determinism)
+    assert.equal(pNormal.map((r) => r.date).sort()[0], H_TODAY, 'plan starts on the injected today, not the wall clock');
+    assert.ok(pNormal.every((r) => r.created_at === H_CREATED), 'created_at is the injected value, not new Date()');
+    // never exceed the real daily capacity (3h = 180 min)
+    const perDay = minutesByDate(pNormal);
+    for (const [d, m] of Object.entries(perDay)) {
+      assert.ok(m <= 180, `day ${d} over-allocated: ${m} min > 180 available`);
+    }
+  });
+
+  // ================= requirement 6: determinism =================
+  check('H2', 'deterministic: identical input state produces an identical schedule', () => {
+    const a = generateSchedule({ ...normalOpts });
+    const b = generateSchedule({ ...normalOpts });
+    assert.deepEqual(a.map((r) => ({ ...r })), b.map((r) => ({ ...r })), 'same input -> byte-identical rows');
+    assert.ok(a.coverage, 'coverage summary present');
+    assert.equal(a.coverage.today, H_TODAY, 'coverage reports the date the plan was built for');
+    assert.deepEqual({ ...a.coverage }, { ...b.coverage }, 'coverage is deterministic too');
+  });
+
+  // ================= b) priorities: share respected, no starvation, no waste =================
+  check('H3', 'priorities: track split is respected, unused track budget is redistributed instead of wasted', () => {
+    const classOnly = [
+      mkRow('c1', 'Science', 'Life Processes', { estimated_hours: 12 }),
+      mkRow('c2', 'Maths', 'Trigonometry', { estimated_hours: 12 }),
+    ];
+    const p = generateSchedule({
+      syllabus: classOnly, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h3', today: H_TODAY, createdAt: H_CREATED,
+      priorities: {
+        order: ['class', 'exam', 'olympiad'],
+        enabled: { class: true, exam: true, olympiad: true },
+        timeSplit: { class: 50, exam: 30, olympiad: 20 },
+      },
+    });
+    assert.ok(p.length > 0, 'plan produced');
+    assert.ok(!p.some((r) => r.track === 'exam' || r.track === 'olympiad'), 'tracks with no work get no rows');
+    // exam+olympiad have zero work, so their 50% of the day must flow to class work
+    const day1 = sumMin(p, (r) => r.date === H_TODAY);
+    assert.ok(day1 >= 0.8 * 180, `available time wasted: only ${day1} of 180 min used on day 1`);
+    // a small split must still surface (no starvation of a real track)
+    const p2 = generateSchedule({
+      syllabus: [
+        mkRow('c1', 'Science', 'Life Processes', { track: 'class', estimated_hours: 8 }),
+        mkRow('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 8 }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2, userId: 'u-h3',
+      today: H_TODAY, createdAt: H_CREATED,
+      priorities: {
+        order: ['class', 'olympiad'],
+        enabled: { class: true, olympiad: true, exam: false },
+        timeSplit: { class: 90, olympiad: 10 },
+      },
+    });
+    const olyMin = sumMin(p2, (r) => r.track === 'olympiad' && r.session_type === 'study');
+    const clsMin = sumMin(p2, (r) => r.track === 'class' && r.session_type === 'study');
+    assert.ok(olyMin > 0, `10% track starved to zero (${olyMin} min)`);
+    assert.ok(clsMin > olyMin, `90/10 split honoured (class ${clsMin} vs olympiad ${olyMin})`);
+  });
+
+  // ================= c) school exam urgency =================
+  check('H4', 'school exams: no NEW class study inside the protected exam window, overload named', () => {
+    const examStart = addDays(H_TODAY, 20);
+    const examEnd = addDays(H_TODAY, 23);
+    const heavy = Array.from({ length: 12 }, (_, i) =>
+      mkRow(`x${i}`, 'Science', `Chapter ${i}`, { estimated_hours: 10, weightage: 1 + (i % 5) }));
+    const p = generateSchedule({
+      syllabus: heavy, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 5,
+      userId: 'u-h4', today: H_TODAY, createdAt: H_CREATED,
+      schoolExams: [{ label: 'Mid-Terms', start_date: examStart, end_date: examEnd }],
+    });
+    assert.ok(p.length > 0, 'plan produced');
+    const winStart = addDays(examStart, -14);
+    const inside = p.filter(
+      (r) => r.track === 'class' && r.session_type === 'study' && r.date >= winStart && r.date <= examEnd
+    );
+    assert.equal(inside.length, 0, `new class study inside the exam window: ${inside.map((r) => r.date).join(',')}`);
+    // exam days themselves stay light revision only
+    const examDayRows = p.filter((r) => r.date >= examStart && r.date <= examEnd);
+    assert.ok(examDayRows.every((r) => r.session_type !== 'study'), 'exam days carry no new study blocks');
+    // 120h of work vs 105h of capacity => overloaded, and the plan must SAY so
+    assert.equal(p.coverage.overloaded, true, 'overload must be exposed, not hidden');
+    assert.ok(Array.isArray(p.coverage.unscheduled) && p.coverage.unscheduled.length > 0, 'chapters that cannot fit are named');
+  });
+
+  // ================= d) olympiad date =================
+  check('H5', 'olympiad date: olympiad work is bound to finish before the date', () => {
+    const olyDate = addDays(H_TODAY, 25);
+    const p = generateSchedule({
+      syllabus: [
+        mkRow('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 12, weightage: 5 }),
+        mkRow('o2', 'Maths Olympiad', 'Combinatorics', { track: 'olympiad', estimated_hours: 12, weightage: 4 }),
+        mkRow('c1', 'Science', 'Life Processes', { track: 'class', estimated_hours: 6 }),
+      ],
+      olympiadDate: olyDate, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 8,
+      userId: 'u-h5', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const olyStudy = p.filter((r) => r.track === 'olympiad' && r.session_type === 'study');
+    assert.ok(olyStudy.length > 0, 'olympiad work is scheduled');
+    assert.ok(
+      olyStudy.every((r) => r.date < olyDate),
+      `olympiad work scheduled after the olympiad date ${olyDate}: ${olyStudy.filter((r) => r.date >= olyDate).map((r) => r.date).join(',')}`
+    );
+    assert.equal(p.coverage.olympiadDoneBy, addDays(olyDate, -1), 'coverage reports the olympiad target date');
+  });
+
+  // ================= e) deadlines (incl. past deadlines) =================
+  check('H6', 'deadlines: earlier deadline outranks higher weightage; overdue work goes first and is counted', () => {
+    const soon = addDays(H_TODAY, 2);
+    const later = addDays(H_TODAY, 25);
+    const past = addDays(H_TODAY, -5);
+    const p = generateSchedule({
+      syllabus: [
+        mkRow('u1', 'Maths', 'Quadratic Equations', { weightage: 2, estimated_hours: 4, deadline: soon }),
+        mkRow('u2', 'Maths', 'Circles', { weightage: 5, estimated_hours: 4, deadline: later }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-h6', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const firstStudy = p.find((r) => r.session_type === 'study');
+    assert.ok(firstStudy, 'study block exists');
+    assert.equal(firstStudy.topic, 'Quadratic Equations', 'the earlier deadline is scheduled first, not the heavier weightage');
+
+    const pPast = generateSchedule({
+      syllabus: [
+        mkRow('o1', 'Maths', 'Overdue Chapter', { weightage: 1, estimated_hours: 4, deadline: past }),
+        mkRow('o2', 'Maths', 'Future Chapter', { weightage: 5, estimated_hours: 4, deadline: later }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-h6', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const firstPast = pPast.find((r) => r.session_type === 'study');
+    assert.equal(firstPast.topic, 'Overdue Chapter', 'a past deadline is urgent, not ignored');
+    assert.ok(pPast.coverage.overdueCount >= 1, `overdue items exposed (got ${pPast.coverage.overdueCount})`);
+    assert.ok(pPast.some((r) => r.priority === 'high'), 'overdue work is marked high priority');
+  });
+
+  // ================= f) completed work exclusion =================
+  check('H7', 'completed work: finished chapters never re-scheduled, partial progress and session credit reduce the remainder', () => {
+    const p = generateSchedule({
+      syllabus: [
+        mkRow('d1', 'Science', 'Done Chapter', { status: 'completed', progress_percent: 100, estimated_hours: 10 }),
+        mkRow('d2', 'Science', 'Half Chapter', { status: 'in_progress', progress_percent: 50, estimated_hours: 10 }),
+        mkRow('d3', 'Science', 'Fresh Chapter', { status: 'locked', progress_percent: 0, estimated_hours: 10 }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-h7', today: H_TODAY, createdAt: H_CREATED,
+    });
+    assert.ok(!p.some((r) => r.topic === 'Done Chapter'), 'a completed chapter is never scheduled again');
+    const half = sumMin(p, (r) => r.topic === 'Half Chapter' && r.session_type === 'study');
+    const fresh = sumMin(p, (r) => r.topic === 'Fresh Chapter' && r.session_type === 'study');
+    assert.ok(half > 0 && fresh > 0, `both incomplete chapters scheduled (half ${half}, fresh ${fresh})`);
+    assert.ok(half < fresh, `50% progress must halve the remaining work (half ${half} vs fresh ${fresh})`);
+    assert.ok(p.coverage.completedExcluded >= 1, `coverage counts excluded completed work (${p.coverage.completedExcluded})`);
+
+    // credit from EXISTING completed sessions on the same chapter
+    const pCredit = generateSchedule({
+      syllabus: [mkRow('d3', 'Science', 'Fresh Chapter', { estimated_hours: 10 })],
+      existing: [{
+        id: 'x1', user_id: 'u-h7', date: H_TODAY, start_time: '08:00', end_time: '09:00',
+        subject: 'Science', topic: 'Fresh Chapter', session_type: 'study', track: 'class',
+        status: 'completed', duration_minutes: 600,
+      }],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h7', today: H_TODAY, createdAt: H_CREATED,
+    });
+    assert.ok(
+      !pCredit.some((r) => r.topic === 'Fresh Chapter' && r.session_type === 'study'),
+      'a chapter already covered by completed sessions is not scheduled again'
+    );
+  });
+
+  // ================= g) duplicate-generation protection =================
+  check('H8', 'existing entries: never blindly duplicated, and they count toward that day capacity', () => {
+    const existing = [
+      { id: 'e1', user_id: 'u-h8', date: H_TODAY, start_time: '08:00', end_time: '08:50', subject: 'Science', topic: 'Life Processes', session_type: 'study', track: 'class', status: 'pending', duration_minutes: 50 },
+      { id: 'e2', user_id: 'u-h8', date: H_TODAY, start_time: '09:00', end_time: '09:45', subject: 'Maths', topic: 'Trigonometry', session_type: 'practice', track: 'class', status: 'pending', duration_minutes: 45 },
+    ];
+    const p = generateSchedule({
+      syllabus: [mkRow('s1', 'Science', 'Life Processes'), mkRow('s2', 'Maths', 'Trigonometry')],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h8', today: H_TODAY, createdAt: H_CREATED, existing,
+    });
+    const newKeys = new Set(p.map(rowKey));
+    for (const e of existing) {
+      assert.ok(!newKeys.has(rowKey(e)), `existing entry re-created (blind duplicate): ${rowKey(e)}`);
+    }
+    const dayTotal = sumMin(p, (r) => r.date === H_TODAY) + sumMin(existing, (e) => e.date === H_TODAY);
+    assert.ok(dayTotal <= 180, `existing load ignored: ${dayTotal} min scheduled into a 180 min day`);
+    assert.equal(p.coverage.existingCount, 2, 'coverage reports how many existing entries were respected');
+    // running the generator twice over its own output must not grow the day
+    const p2 = generateSchedule({
+      syllabus: [mkRow('s1', 'Science', 'Life Processes'), mkRow('s2', 'Maths', 'Trigonometry')],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h8', today: H_TODAY, createdAt: H_CREATED, existing: [...existing, ...p],
+    });
+    const dupes = p2.filter((r) => newKeys.has(rowKey(r)));
+    assert.equal(dupes.length, 0, `second run duplicated ${dupes.length} entries`);
+  });
+
+  // ================= h) rollover interplay (FIX-E preserved) =================
+  check('H9', 'rollover: autoRescheduleMissed honours the plan date and rolled rows are not re-created', () => {
+    const pastRow = {
+      id: 'r1', user_id: 'u-h9', date: addDays(H_TODAY, -3), start_time: '18:00', end_time: '18:45',
+      subject: 'Science', topic: 'Life Processes', session_type: 'study', track: 'class',
+      status: 'pending', duration_minutes: 45,
+    };
+    const rolled = autoRescheduleMissed([pastRow], { dailyHours: 3, schoolExams: [], today: H_TODAY });
+    assert.equal(rolled.moved.length, 1, 'the past-due row is rolled');
+    assert.ok(
+      rolled.moved.every((m) => m.date >= H_TODAY && m.date <= addDays(H_TODAY, 28)),
+      `rolled relative to the plan date, not the wall clock: ${rolled.moved.map((m) => m.date).join(',')}`
+    );
+    assert.ok(rolled.moved.every((m) => m.status === 'pending'), 'rolled rows stay pending');
+    // a generate that sees the rolled rows must not recreate them
+    const p = generateSchedule({
+      syllabus: [mkRow('s1', 'Science', 'Life Processes')],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h9', today: H_TODAY, createdAt: H_CREATED, existing: rolled.moved,
+    });
+    const keys = new Set(p.map(rowKey));
+    assert.ok(
+      !rolled.moved.some((m) => keys.has(rowKey({ ...m, session_type: m.session_type || 'study' }))),
+      'rolled rows were duplicated by the generator'
+    );
+  });
+
+  // ================= i) overloaded workload =================
+  check('H10', 'overload: the most urgent work is kept, the rest is named, and no impossible allocation is invented', () => {
+    const heavy = Array.from({ length: 24 }, (_, i) =>
+      mkRow(`h${i}`, 'Science', `Chapter ${i}`, {
+        estimated_hours: 20,
+        weightage: 1 + (i % 5),
+        deadline: i < 4 ? addDays(H_TODAY, 3) : addDays(H_TODAY, 60),
+      }));
+    const p = generateSchedule({
+      syllabus: heavy, dailyHours: 1, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-h10', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const cov = p.coverage;
+    assert.equal(cov.overloaded, true, 'overload stated plainly');
+    assert.ok(cov.shortfallHours > 0, `shortfall quantified (got ${cov.shortfallHours})`);
+    assert.ok(Array.isArray(cov.unscheduled) && cov.unscheduled.length > 0, 'unscheduled work is listed');
+    assert.ok(cov.requiredPerDay > 1, `requiredPerDay reported (${cov.requiredPerDay})`);
+    // the most urgent + heaviest chapter is preserved WHOLE-HEARTEDLY; far-off
+    // work is deferred and named, never silently sprinkled over everything
+    const plannedTopics = new Set(p.filter((r) => r.session_type === 'study').map((r) => r.topic));
+    assert.ok(plannedTopics.has('Chapter 3'), 'the most urgent, heaviest chapter (due in 3 days) is preserved');
+    assert.ok(!plannedTopics.has('Chapter 20'), 'far-deadline work is deferred while urgent work is unfinished');
+    assert.ok(Array.isArray(cov.planned) && cov.planned.length > 0, 'coverage lists what the plan did schedule');
+    // nothing less urgent may be kept while something more urgent went unscheduled
+    for (const pl of cov.planned) {
+      for (const un of cov.unscheduled) {
+        const moreUrgent =
+          (!!un.deadline && (!pl.deadline || un.deadline < pl.deadline)) ||
+          (!!un.deadline && !!pl.deadline && un.deadline === pl.deadline && un.weightage > pl.weightage);
+        assert.ok(!moreUrgent, `less urgent "${un.chapter}" kept over more urgent "${pl.chapter}"`);
+      }
+    }
+    assert.ok(
+      cov.unscheduled.every((u) => u.chapter && u.remainingHours > 0),
+      'unscheduled entries name the chapter and the hours still needed'
+    );
+    // never invent time: 1h/day cap respected on every day
+    for (const [d, m] of Object.entries(minutesByDate(p))) {
+      assert.ok(m <= 60, `day ${d} allocated ${m} min with only 60 min available`);
+    }
+  });
+
+  // ================= j) missing / empty / zero inputs =================
+  check('H11', 'graceful degradation: no syllabus, no deadlines, no priorities, no olympiad, zero or tiny time', () => {
+    const empty = generateSchedule({ today: H_TODAY, createdAt: H_CREATED, userId: 'u-h11' });
+    assert.ok(Array.isArray(empty), 'no syllabus -> still returns an array, no crash');
+    assert.equal(empty.length, 0, 'no syllabus -> no invented rows');
+    assert.ok(empty.coverage, 'coverage still reported');
+    assert.ok(
+      Array.isArray(empty.coverage.reasons) && empty.coverage.reasons.includes('no-syllabus'),
+      `honest reason recorded (got ${JSON.stringify(empty.coverage.reasons)})`
+    );
+
+    const noDates = generateSchedule({
+      syllabus: [mkRow('n1', 'Science', 'Life Processes')], dailyHours: 2, weeks: 2,
+      userId: 'u-h11', today: H_TODAY, createdAt: H_CREATED,
+    });
+    assert.ok(noDates.length > 0, 'no exam/olympiad/deadlines/priorities still produces a real plan');
+    assert.ok(noDates.coverage.priorityOrder.length > 0, 'default priorities applied');
+
+    const zero = generateSchedule({
+      syllabus: [mkRow('z1', 'Science', 'Life Processes')], dailyHours: 0, weeks: 2,
+      userId: 'u-h11', today: H_TODAY, createdAt: H_CREATED,
+    });
+    assert.ok(!zero.some((r) => r.session_type === 'study'), 'zero available time must not invent study blocks');
+    assert.equal(zero.coverage.noCapacity, true, 'zero time is reported instead of padded to 30 min');
+    assert.ok(/time|capacity|hrs/i.test(String(zero.coverage.coverageWarning || '')), 'warning explains the zero-time case');
+
+    const tiny = generateSchedule({
+      syllabus: [mkRow('t1', 'Science', 'Life Processes')], dailyHours: 0.25, weeks: 2,
+      userId: 'u-h11', today: H_TODAY, createdAt: H_CREATED,
+    });
+    for (const [d, m] of Object.entries(minutesByDate(tiny))) {
+      assert.ok(m <= 15, `0.25h/day is 15 min — day ${d} got ${m} min (impossible allocation)`);
+    }
+  });
+
+  // ================= no fake data, FIX-D4/FIX-E preserved, deadlines before planning =================
+  check('H12', 'no demo data, single date system, FIX-D4 exam guard and FIX-E rollover preserved, deadlines computed before planning', () => {
+    assert.ok(!/DEMO_SCHEDULE|demoSchedule|fakeSchedule|sampleSchedule|dummySchedule/i.test(sgSrc), 'no demo/fake schedule data in the scheduler');
+    assert.ok(/todayStr\(\)/.test(sgSrc), 'still uses the one existing date system (todayStr -> FIX-F dev offset)');
+    assert.ok(!/setDevDateOffset|devOffsetDays\s*=/.test(sgSrc), 'scheduler does not introduce a second date system');
+    assert.ok(sgSrc.includes('examDates') && sgSrc.includes('isExamDay') && sgSrc.includes('FIX-D4'), 'FIX-D4 exam-day guard preserved');
+    assert.ok(ssSrc.includes('autoRolledRef') && ssSrc.includes('Auto-rolled') && ssSrc.includes('pastDue'), 'FIX-E auto rollover preserved in the screen');
+    assert.ok(ssSrc.includes('autoRescheduleMissed') && ssSrc.includes('aiReschedule') && ssSrc.includes('schoolExams'), 'FIX-D4/FIX-E wiring preserved');
+    // the screen must feed real existing entries into the generator (duplicate protection)
+    assert.ok(/existing\s*:/.test(ssSrc), 'ScheduleScreen passes existing schedule entries to the generator');
+    // deadlines must be known BEFORE planning — previously they were written after, so the plan never used them
+    const genIdx = ssSrc.indexOf('generateSchedule({');
+    const dlIdx = ssSrc.indexOf('autoSetDeadlines(');
+    assert.ok(genIdx > 0 && dlIdx > 0, 'both calls present');
+    assert.ok(dlIdx < genIdx, 'deadlines are computed BEFORE the schedule is generated');
+    // and the screen must surface overload honestly
+    assert.ok(/overloaded|unscheduled/.test(ssSrc), 'ScheduleScreen surfaces overload instead of pretending everything fits');
+  });
+
+  // ================= zero available time must survive the trip into the planner =================
+  check('H13', 'zero available time is never inflated before it reaches the planner', () => {
+    assert.equal(effectiveDailyHours({ daily_study_hours: 0 }), 0, 'an explicit 0 hrs/day must stay 0, not become 2');
+    assert.equal(effectiveDailyHours({}), 2, 'an unset value keeps the app default');
+    assert.equal(effectiveDailyHours({ daily_study_hours: null }), 2, 'null keeps the app default');
+    assert.equal(effectiveDailyHours({ daily_study_hours: 3 }), 3, 'a real value passes through unchanged');
+    const p = generateSchedule({
+      syllabus: [mkRow('z9', 'Science', 'Life Processes')],
+      dailyHours: effectiveDailyHours({ daily_study_hours: 0 }),
+      weeks: 2, userId: 'u-h13', today: H_TODAY, createdAt: H_CREATED,
+    });
+    assert.equal(p.length, 0, 'a 0 hrs/day profile must not produce invented sessions');
+    assert.equal(p.coverage.noCapacity, true, 'the plan says plainly that there is no time');
+  });
+
+  // ================= one-shot dates: work stops at the event, backlog is named =================
+  check('H14', 'exam-bound work stops at its date — an impossible backlog is reported, never scheduled after the event', () => {
+    const olyDate = addDays(H_TODAY, 30);
+    const heavy = Array.from({ length: 8 }, (_, i) =>
+      mkRow(`ho${i}`, 'Maths Olympiad', `Oly Chapter ${i}`, { track: 'olympiad', estimated_hours: 20, weightage: 3 }));
+    const p = generateSchedule({
+      syllabus: heavy, olympiadDate: olyDate, dailyHours: 2, preferredTime: 'Morning',
+      daysOff: [], weeks: 4, userId: 'u-h14', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const oly = p.filter((r) => r.track === 'olympiad' && r.session_type === 'study');
+    assert.ok(oly.length > 0, 'olympiad work is scheduled before the date');
+    assert.ok(oly.every((r) => r.date < olyDate), `olympiad prep scheduled on/after the date ${olyDate}`);
+    assert.ok(Array.isArray(p.coverage.tooLate) && p.coverage.tooLate.length > 0, 'chapters that cannot be prepared in time are named');
+    assert.ok(p.coverage.tooLate.every((t) => t.reason === 'date-passed' && t.remainingHours > 0), 'the reason and the unfinished hours are explicit');
+    assert.equal(p.coverage.overloaded, true, 'the overload is flagged, not hidden');
+    // the same rule protects the main exam date
+    const examDay = addDays(H_TODAY, 20);
+    const pExam = generateSchedule({
+      syllabus: Array.from({ length: 6 }, (_, i) => mkRow(`he${i}`, 'JEE', `Exam Chapter ${i}`, { track: 'exam', estimated_hours: 25 })),
+      examDate: examDay, dailyHours: 2, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-h14', today: H_TODAY, createdAt: H_CREATED,
+    });
+    const examStudy = pExam.filter((r) => r.track === 'exam' && r.session_type === 'study');
+    assert.ok(examStudy.every((r) => r.date < examDay), 'no exam-track prep scheduled on/after the main exam date');
+    assert.ok(pExam.coverage.tooLate.length > 0, 'unfinishable exam backlog is reported');
+  });
+
+  const failed = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-H: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
 }
 
 console.log('ALL LOGIC TESTS PASSED ✅');

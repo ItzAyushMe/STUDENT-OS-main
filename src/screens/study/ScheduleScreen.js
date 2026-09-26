@@ -172,6 +172,17 @@ export function ScheduleScreen({ navigation, route }) {
     setGenError('');
     try {
       const syllabus = await db.list('syllabus', { eq: { user_id: profile.id } });
+      // FIX-H: what already exists is an INPUT to the planner, not an afterthought.
+      // Kept entries are never re-created, and their minutes count toward each day,
+      // so re-running generate cannot pile duplicate blocks on the same slots.
+      const planToday = todayStr();
+      const allExisting = await db.list('schedule', {
+        eq: { user_id: profile.id },
+        gte: { date: dateStr(dayjs(planToday).subtract(30, 'day')) },
+        lte: { date: dateStr(dayjs(planToday).add(365, 'day')) },
+        order: { col: 'date', asc: true },
+        limit: 1000,
+      });
       if (mode === 'fresh') {
         // wipe ALL schedule entries (fresh start). Syllabus progress
         // (completed topics/deadlines) is untouched — only slots rebuild.
@@ -180,8 +191,28 @@ export function ScheduleScreen({ navigation, route }) {
         // keep completed/skipped history; replace only pending entries
         await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
       }
+      const kept = mode === 'fresh' ? [] : allExisting.filter((r) => r.status !== 'pending');
+
+      // FIX-H: deadlines are computed BEFORE planning. They used to be written
+      // after generateSchedule(), so the plan that was just created never knew
+      // about them and urgency ordering was impossible.
+      const computedDeadlines = syllabus.length
+        ? autoSetDeadlines(
+            syllabus,
+            profile.exam_date,
+            profile.daily_study_hours,
+            Array.isArray(profile.school_exams) ? profile.school_exams : []
+          )
+        : {};
+      const plannedSyllabus = syllabus.map((r) =>
+        !r.deadline && computedDeadlines[r.id] ? { ...r, deadline: computedDeadlines[r.id] } : r
+      );
+
       const rows = generateSchedule({
-        syllabus,
+        syllabus: plannedSyllabus,
+        deadlines: computedDeadlines,
+        existing: kept,
+        today: planToday, // one date system — honours the FIX-F dev-date offset
         examDate: profile.exam_date,
         olympiadDate: profile.olympiad_date || null,
         schoolExams: Array.isArray(profile.school_exams) ? profile.school_exams : [],
@@ -223,13 +254,8 @@ export function ScheduleScreen({ navigation, route }) {
         }
       }
       if (syllabus.length) {
-        const deadlines = autoSetDeadlines(
-          syllabus,
-          profile.exam_date,
-          profile.daily_study_hours,
-          Array.isArray(profile.school_exams) ? profile.school_exams : []
-        );
-        for (const [id, deadline] of Object.entries(deadlines)) {
+        // same deadlines the planner used — computed once, above, not twice
+        for (const [id, deadline] of Object.entries(computedDeadlines)) {
           await db.update('syllabus', id, { deadline });
         }
       }
@@ -401,6 +427,27 @@ export function ScheduleScreen({ navigation, route }) {
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
                 {coverage.coverageWarning}
               </Text>
+              {/* FIX-H: when the workload genuinely does not fit, name what was left out */}
+              {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
+                <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 6, lineHeight: 16 }}>
+                  Not scheduled yet:{' '}
+                  {coverage.unscheduled
+                    .slice(0, 4)
+                    .map((u) => `${u.chapter} (${u.remainingHours}h${u.deadline ? `, due ${u.deadline}` : ''})`)
+                    .join(', ')}
+                  {coverage.unscheduled.length > 4 ? ` +${coverage.unscheduled.length - 4} more` : ''}
+                </Text>
+              ) : null}
+              {Array.isArray(coverage.partial) && coverage.partial.length ? (
+                <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 4, lineHeight: 16 }}>
+                  Started but unfinished: {coverage.partial.length} chapter(s) —{' '}
+                  {coverage.partial
+                    .slice(0, 3)
+                    .map((u) => `${u.chapter} (${u.plannedHours}h of ${(u.plannedHours + u.remainingHours).toFixed(1)}h)`)
+                    .join(', ')}
+                  {coverage.partial.length > 3 ? ` +${coverage.partial.length - 3} more` : ''}
+                </Text>
+              ) : null}
             </Card>
           ) : null}
         </>
