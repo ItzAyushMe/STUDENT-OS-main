@@ -1506,8 +1506,13 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
   // Fixed "today" so every assertion is deterministic and independent of the wall clock.
   // The scheduler must accept it (requirement 6) instead of reading the clock internally.
-  const H_TODAY = '2026-03-02';                       // a Monday
-  const H_CREATED = '2026-03-02T00:00:00.000Z';
+  // FIX-S note: the fixture date moved from 2026-03-02 to 2026-01-05 — SAME weekday
+  // (Monday), so every relative assertion below is unchanged. 2 March sits after the
+  // FIX-S S4 class-session cutoff (25 Feb), i.e. in the gap where the class track is
+  // legitimately closed; these checks exercise class-track PLANNING, so they need a
+  // date inside the session. No assertion text was altered.
+  const H_TODAY = '2026-01-05';                       // a Monday, inside session 2025-26
+  const H_CREATED = '2026-01-05T00:00:00.000Z';
   const addDays = (iso, n) =>
     new Date(new Date(`${iso}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
   const mkRow = (id, subject, chapter, over = {}) => ({
@@ -1915,6 +1920,639 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const failed = results.filter((r) => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failed.length, 0, `FIX-H: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
+}
+
+// ---------- FIX-S: S1 subject-pair interleave, S2 exam run-up, S3 conquered-chapter ladder, S4 Feb-25 class cutoff ----------
+// S5 (April-1 transition / Class 10 -> 11 promotion) is NOT tested here: it is blocked on a
+// schema gate (a new users column + a syllabus.status CHECK value). It is STOPPED and reported
+// with the exact SQL instead of being hacked around — see FIX-S-REPORT.md.
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  // FIX-S exports live in the SAME planner module (no parallel scheduler). Imported
+  // dynamically so a missing export is a recorded failure, not a suite crash.
+  let SG = null; let sgErr = '';
+  try { SG = await import('./../src/lib/scheduleGenerator.js'); }
+  catch (e) { sgErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  let U = null; let uErr = '';
+  try { U = await import('./../src/lib/utils.js'); }
+  catch (e) { uErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+
+  const sgSrcS = read('src/lib/scheduleGenerator.js');
+  const constSrcS = read('src/config/constants.js');
+  const ssSrcS = read('src/screens/study/ScheduleScreen.js');
+
+  // a Monday INSIDE session 2025-26 (before the 25 Feb class cutoff), so the class
+  // track is legitimately open for S1-S3; S4 moves the date with the dev offset
+  const S_TODAY = '2026-01-05';
+  const S_CREATED = '2026-01-05T00:00:00.000Z';
+  const sadd = (iso, n) =>
+    new Date(new Date(`${iso}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
+  const mkS = (id, subject, chapter, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 6,
+    status: 'locked', track: 'class', progress_percent: 0, ...over,
+  });
+  const classStudyByDate = (rows) => {
+    const m = {};
+    for (const r of rows) {
+      if (r.track !== 'class' || r.session_type !== 'study') continue;
+      (m[r.date] = m[r.date] || new Set()).add(r.subject);
+    }
+    return m;
+  };
+  const minOf = (rows, pred) => rows.filter(pred).reduce((a, r) => a + (Number(r.duration_minutes) || 0), 0);
+  const LADDER_RE = /^(Chapter test|Spaced revision)/;
+  const dayjsDay = (iso) => new Date(`${iso}T00:00:00Z`).getUTCDay();
+
+  // ================= S1 — weekly subject-pair interleave =================
+  const sixSubjectRows = [];
+  ['Maths', 'Social Science', 'English', 'Science', 'Hindi', 'AI'].forEach((subj, si) => {
+    sixSubjectRows.push(mkS(`s${si}a`, subj, `${subj} — chapter A`, { estimated_hours: 6 }));
+    sixSubjectRows.push(mkS(`s${si}b`, subj, `${subj} — chapter B`, { estimated_hours: 6 }));
+  });
+
+  check('S1a', '6 subjects -> every day carries a PAIR (>=2 distinct subjects) and no subject repeats on consecutive days', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    assert.equal(typeof SG.buildSubjectRotation, 'function', 'buildSubjectRotation is not exported (S1 mechanism absent)');
+    const rot = SG.buildSubjectRotation(sixSubjectRows, S_TODAY, 7);
+    assert.ok(rot && Array.isArray(rot.order) && rot.order.length === 6, `rotation must order all 6 subjects, got ${JSON.stringify(rot && rot.order)}`);
+    assert.ok(rot.byDate && typeof rot.byDate === 'object', 'rotation must expose a per-date map');
+    for (let d = 0; d < 7; d++) {
+      const date = sadd(S_TODAY, d);
+      const pair = rot.byDate[date];
+      assert.ok(Array.isArray(pair), `no pair for ${date}`);
+      assert.ok(new Set(pair).size >= 2, `day ${date} must carry >=2 distinct subjects, got ${JSON.stringify(pair)}`);
+    }
+    for (let d = 1; d < 7; d++) {
+      const prev = new Set(rot.byDate[sadd(S_TODAY, d - 1)]);
+      for (const s of rot.byDate[sadd(S_TODAY, d)]) {
+        assert.ok(!prev.has(s), `${s} appears on two consecutive days`);
+      }
+    }
+    // and the generated grid must actually FOLLOW the rotation, not just know it
+    const p = generateSchedule({
+      syllabus: sixSubjectRows, dailyHours: 3, preferredTime: 'Morning', daysOff: [],
+      prepLevel: 'Intermediate', weeks: 1, userId: 'u-s1a', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const grid = classStudyByDate(p);
+    const days = Object.keys(grid).sort();
+    assert.ok(days.length >= 5, `expected class study on most of the 7 days, got ${days.length}`);
+    for (const d of days) {
+      assert.ok(grid[d].size >= 2, `grid day ${d} studied only ${[...grid[d]].join('/')} — the pair interleave is not wired into the planner`);
+    }
+    for (let i = 1; i < days.length; i++) {
+      if (sadd(days[i - 1], 1) !== days[i]) continue; // only truly consecutive dates
+      for (const s of grid[days[i]]) {
+        assert.ok(!grid[days[i - 1]].has(s), `${s} studied on consecutive days ${days[i - 1]} and ${days[i]}`);
+      }
+    }
+  });
+
+  check('S1b', 'single-subject backlog degrades to one subject per day, plan still generated', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const rows = [mkS('m1', 'Maths', 'Trigonometry'), mkS('m2', 'Maths', 'Circles'), mkS('m3', 'Maths', 'Statistics')];
+    const rot = SG.buildSubjectRotation(rows, S_TODAY, 7);
+    assert.deepEqual(rot.order, ['Maths'], 'one subject -> an order of one');
+    for (let d = 0; d < 7; d++) {
+      const pair = rot.byDate[sadd(S_TODAY, d)];
+      assert.ok(Array.isArray(pair) && pair.length === 1 && pair[0] === 'Maths', `day ${d} must degrade to a single subject, got ${JSON.stringify(pair)}`);
+    }
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-s1b', today: S_TODAY, createdAt: S_CREATED,
+    });
+    assert.ok(p.length > 3, 'a single-subject plan still produces sessions');
+    assert.ok(p.every((r) => r.session_type !== 'study' || r.subject === 'Maths'), 'no invented subjects');
+    assert.deepEqual(p.coverage.subjectRotation, ['Maths'], 'the summary reports the rotation it used');
+  });
+
+  check('S1c', 'urgent chapter: the pair survives and the minutes are weighted toward the due subject', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const rows = [
+      mkS('u1', 'Science', 'Electricity', { deadline: sadd(S_TODAY, 2), estimated_hours: 8, weightage: 5 }),
+      mkS('u2', 'Science', 'Magnetic Effects', { deadline: sadd(S_TODAY, 3), estimated_hours: 8 }),
+      mkS('h1', 'Hindi', 'Kritika', { estimated_hours: 8 }),
+      mkS('h2', 'Hindi', 'Sanchayan', { estimated_hours: 8 }),
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
+      userId: 'u-s1c', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const day1 = p.filter((r) => r.date === S_TODAY && r.track === 'class' && r.session_type === 'study');
+    const subjects = new Set(day1.map((r) => r.subject));
+    assert.equal(subjects.size, 2, `day 1 must carry both subjects of the pair, got ${[...subjects].join('/') || 'none'}`);
+    const sci = minOf(day1, (r) => r.subject === 'Science');
+    const hin = minOf(day1, (r) => r.subject === 'Hindi');
+    assert.ok(sci > 0 && hin > 0, `both subjects need real time (Science ${sci} min, Hindi ${hin} min)`);
+    assert.ok(sci > hin, `deadline urgency must enlarge the due subject's share (Science ${sci} vs Hindi ${hin})`);
+  });
+
+  check('S1d', 'a declared day off stays light and does NOT shift the weekly pair pattern', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const rotA = SG.buildSubjectRotation(sixSubjectRows, S_TODAY, 14);
+    const p = generateSchedule({
+      syllabus: sixSubjectRows, dailyHours: 3, preferredTime: 'Morning', daysOff: [5],
+      prepLevel: 'Intermediate', weeks: 2, userId: 'u-s1d', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const offDate = sadd(S_TODAY, 5); // Saturday of week 1
+    const offMin = minOf(p, (r) => r.date === offDate);
+    assert.ok(offMin <= 60, `a day off must stay light, got ${offMin} min`);
+    const grid = classStudyByDate(p);
+    assert.ok(Object.keys(grid).length >= 8, `study days expected across the fortnight, got ${Object.keys(grid).length}`);
+    for (const d of Object.keys(grid)) {
+      const expected = rotA.byDate[d] || [];
+      if (expected.length < 2) continue;
+      for (const s of grid[d]) {
+        assert.ok(expected.includes(s), `day ${d} studied ${s}, which is not in that calendar day's pair ${JSON.stringify(expected)} — the pattern shifted`);
+      }
+    }
+  });
+
+  check('S1e', '8 subjects (7+ edge): the pair pattern still interleaves and covers every subject within the week', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const rows = [];
+    ['Maths', 'Science', 'English', 'Hindi', 'Social Science', 'AI', 'Computer Science', 'Sanskrit'].forEach((subj, i) => {
+      rows.push(mkS(`e${i}`, subj, `${subj} — chapter A`, { estimated_hours: 5, deadline: sadd(S_TODAY, 10 + i) }));
+    });
+    const rot = SG.buildSubjectRotation(rows, S_TODAY, 7);
+    assert.equal(rot.order.length, 8, `all 8 subjects must be in the rotation, got ${rot.order.length}`);
+    const seen = new Set();
+    for (let d = 0; d < 7; d++) {
+      const pair = rot.byDate[sadd(S_TODAY, d)];
+      assert.equal(new Set(pair).size, 2, `day ${d} must carry 2 distinct subjects, got ${JSON.stringify(pair)}`);
+      pair.forEach((s) => seen.add(s));
+      if (d > 0) {
+        const prev = new Set(rot.byDate[sadd(S_TODAY, d - 1)]);
+        for (const s of pair) assert.ok(!prev.has(s), `${s} repeats on consecutive days`);
+      }
+    }
+    assert.equal(seen.size, 8, `a week of pairs must reach every subject, reached ${seen.size}`);
+    assert.deepEqual(rot.order[0], 'Maths', 'the nearest deadline leads the rotation');
+  });
+
+  // ================= S2 — exam-aware run-up =================
+  check('S2a', 'school exam ahead: every class day inside the 14-day run-up carries a due-before-exam subject', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const examStart = sadd(S_TODAY, 20);
+    const examEnd = sadd(S_TODAY, 23);
+    const rows = [
+      // Science chapters are DUE BEFORE the exam; every other subject is due after it
+      mkS('sc1', 'Science', 'Life Processes', { deadline: sadd(S_TODAY, 4), estimated_hours: 8 }),
+      mkS('sc2', 'Science', 'Electricity', { deadline: sadd(S_TODAY, 6), estimated_hours: 8 }),
+      mkS('ma1', 'Maths', 'Trigonometry', { deadline: sadd(S_TODAY, 40), estimated_hours: 6 }),
+      mkS('en1', 'English', 'First Flight', { deadline: sadd(S_TODAY, 45), estimated_hours: 6 }),
+      mkS('hi1', 'Hindi', 'Kritika', { deadline: sadd(S_TODAY, 50), estimated_hours: 6 }),
+      mkS('so1', 'Social Science', 'Nationalism', { deadline: sadd(S_TODAY, 55), estimated_hours: 6 }),
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-s2a', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [{ label: 'Mid-Terms', start_date: examStart, end_date: examEnd }],
+    });
+    assert.ok(p.length > 0, 'plan produced');
+    assert.ok(p.coverage.examRunUp, 'the summary must name the run-up it applied');
+    assert.deepEqual(p.coverage.examRunUp.dueSubjects, ['Science'], `run-up must identify the due-before-exam subjects, got ${JSON.stringify(p.coverage.examRunUp.dueSubjects)}`);
+    // the run-up window = the 14 days before the exam range starts
+    assert.ok(p.some((r) => r.date === sadd(examStart, -1) && r.session_type === 'mock'), 'the pre-exam mock day is preserved unchanged');
+    let classDays = 0;
+    for (let d = 6; d <= 19; d++) {
+      const date = sadd(S_TODAY, d);
+      // the day before the exam keeps its accepted pre-exam mock (spec: unchanged)
+      if (date === sadd(examStart, -1)) continue;
+      const dayRows = p.filter((r) => r.date === date && r.track === 'class');
+      if (!dayRows.length) continue;
+      classDays += 1;
+      assert.ok(
+        dayRows.some((r) => r.subject === 'Science'),
+        `run-up day ${date} carries no due-before-exam subject: ${dayRows.map((r) => `${r.session_type}:${r.subject}`).join(', ')}`
+      );
+    }
+    assert.ok(classDays >= 10, `expected class content on most run-up days, got ${classDays}`);
+    // the accepted protected-window rule must survive S2 (H4): no NEW class study in the window
+    const protStart = sadd(examStart, -14);
+    assert.ok(
+      !p.some((r) => r.track === 'class' && r.session_type === 'study' && r.date >= protStart && r.date <= examEnd),
+      'S2 must not reintroduce new class study inside the protected exam window'
+    );
+    // and the wave keeps its shape: revision + timed practice, no invented session types
+    const waveRows = p.filter((r) => r.date >= protStart && r.date < sadd(examStart, -1) && r.track === 'class');
+    assert.ok(waveRows.length > 0, 'the revision wave still runs');
+    assert.ok(waveRows.every((r) => r.session_type === 'revision' || r.session_type === 'practice'), `wave session types unchanged: ${[...new Set(waveRows.map((r) => r.session_type))].join(',')}`);
+  });
+
+  check('S2b', 'no exam within 30 days -> plain rotation, no run-up reported', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const rows = sixSubjectRows.map((r) => ({ ...r, deadline: sadd(S_TODAY, 60) }));
+    const rot = SG.buildSubjectRotation(rows, S_TODAY, 7);
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 1,
+      userId: 'u-s2b', today: S_TODAY, createdAt: S_CREATED, schoolExams: [],
+    });
+    assert.ok(!p.coverage.examRunUp, 'no exam run-up may be reported when no exam is near');
+    const grid = classStudyByDate(p);
+    const firstDay = Object.keys(grid).sort()[0];
+    assert.ok(firstDay, 'class study exists');
+    const pair = rot.byDate[firstDay] || [];
+    for (const s of grid[firstDay]) {
+      assert.ok(pair.includes(s), `${s} studied on ${firstDay} but the plain rotation pair is ${JSON.stringify(pair)}`);
+    }
+  });
+
+  check('S2c', 'overlapping exam ranges: the NEAREST exam drives the run-up', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const near = sadd(S_TODAY, 10);
+    const far = sadd(S_TODAY, 25);
+    const rows = [
+      mkS('a1', 'Science', 'Life Processes', { deadline: sadd(S_TODAY, 8) }),   // due before the NEAR exam
+      mkS('b1', 'Maths', 'Trigonometry', { deadline: sadd(S_TODAY, 20) }),      // due before the FAR exam only
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-s2c', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [
+        { label: 'Unit Test', start_date: far, end_date: sadd(S_TODAY, 26) },
+        { label: 'Mid-Terms', start_date: near, end_date: sadd(S_TODAY, 12) },
+      ],
+    });
+    assert.ok(p.coverage.examRunUp, 'a run-up is reported');
+    assert.equal(p.coverage.examRunUp.exam, 'Mid-Terms', `the nearest exam must win, got ${p.coverage.examRunUp.exam}`);
+    assert.deepEqual(p.coverage.examRunUp.dueSubjects, ['Science'], 'only chapters due before the NEAREST exam drive it');
+  });
+
+  check('S2d', 'H14 boundary behaviour survives S2 (nothing scheduled on/after a one-shot event date)', () => {
+    const olyDate = sadd(S_TODAY, 30);
+    const heavy = Array.from({ length: 8 }, (_, i) =>
+      mkS(`ho${i}`, 'Maths Olympiad', `Oly Chapter ${i}`, { track: 'olympiad', estimated_hours: 20 }));
+    const p = generateSchedule({
+      syllabus: heavy, olympiadDate: olyDate, dailyHours: 2, preferredTime: 'Morning',
+      daysOff: [], weeks: 4, userId: 'u-s2d', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const oly = p.filter((r) => r.track === 'olympiad' && r.session_type === 'study');
+    assert.ok(oly.length > 0, 'olympiad work scheduled');
+    assert.ok(oly.every((r) => r.date < olyDate), 'olympiad prep scheduled on/after the olympiad date');
+    assert.ok(p.coverage.tooLate.length > 0, 'an impossible backlog is still reported');
+  });
+
+  check('S2e', 'exam in 10 days: the run-up is named, the protected window still forbids NEW class study, at-risk chapters are reported not hidden', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const examStart = sadd(S_TODAY, 10);
+    const rows = [
+      mkS('sc1', 'Science', 'Life Processes', { deadline: sadd(S_TODAY, 4), estimated_hours: 8 }),
+      mkS('ma1', 'Maths', 'Trigonometry', { deadline: sadd(S_TODAY, 40), estimated_hours: 6 }),
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s2e', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [{ label: 'Mid-Terms', start_date: examStart, end_date: sadd(S_TODAY, 12) }],
+    });
+    assert.ok(p.coverage.examRunUp, 'the run-up is named even when it started before the plan did');
+    assert.deepEqual(p.coverage.examRunUp.dueSubjects, ['Science'], 'Science is due before the exam');
+    // the H4 rule wins: the class target date has already passed, so NO new class study is invented
+    assert.ok(p.coverage.classDoneBy < S_TODAY, `the class target date must be honestly in the past, got ${p.coverage.classDoneBy}`);
+    assert.ok(!p.some((r) => r.track === 'class' && r.session_type === 'study' && r.date < examStart), 'no new class study inside the protected window');
+    // the chapter that can no longer be finished in time is NAMED, not dropped
+    const named = [
+      ...(p.coverage.unscheduled || []),
+      ...(p.coverage.partial || []),
+      ...(p.coverage.classDueInProtectedWindow || []),
+      ...(p.coverage.examRunUp.dueChapters || []).map((c) => ({ chapter: c.chapter })),
+    ].map((u) => u.chapter);
+    assert.ok(named.includes('Life Processes'), `the at-risk chapter must be listed, got ${JSON.stringify(named)}`);
+    assert.ok(/run-up window|cannot be finished/i.test(String(p.coverage.coverageWarning || '')), `the summary must say it plainly: ${p.coverage.coverageWarning}`);
+  });
+
+  check('S2f', 'exam run-up landing on a declared day off: the wave moves to the previous day, the day off stays a day off', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const examStart = sadd(S_TODAY, 20);
+    const rows = [
+      mkS('sc1', 'Science', 'Life Processes', { deadline: sadd(S_TODAY, 4), estimated_hours: 8 }),
+      mkS('ma1', 'Maths', 'Trigonometry', { deadline: sadd(S_TODAY, 40), estimated_hours: 6 }),
+      mkS('en1', 'English', 'First Flight', { deadline: sadd(S_TODAY, 45), estimated_hours: 6 }),
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime: 'Morning', daysOff: [2], // Wednesday off
+      weeks: 4, userId: 'u-s2f', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [{ label: 'Mid-Terms', start_date: examStart, end_date: sadd(S_TODAY, 23) }],
+    });
+    const offInWindow = [sadd(S_TODAY, 9), sadd(S_TODAY, 16)]; // Wednesdays inside the run-up
+    for (const off of offInWindow) {
+      assert.equal((dayjsDay(off) + 6) % 7, 2, `fixture sanity: ${off} is a Wednesday`);
+      assert.ok(off < examStart && off >= sadd(examStart, -14), `fixture sanity: ${off} is inside the run-up window`);
+      assert.ok(!p.some((r) => r.date === off && /Revision wave/.test(r.topic)), `the wave must not sit on the day off ${off}`);
+      assert.ok(minOf(p, (r) => r.date === off) <= 60, 'a day off stays light');
+      const before = sadd(off, -1);
+      assert.ok(
+        p.some((r) => r.date === before && /Revision wave \(moved from/.test(r.topic)),
+        `the wave moved off ${off} must appear on ${before}: ${p.filter((r) => r.date === before).map((r) => r.topic).join(' | ') || 'nothing'}`
+      );
+    }
+    // the run-up still prioritises the due-before-exam subject after the move
+    const moved = p.filter((r) => /moved from/.test(r.topic));
+    assert.ok(moved.length >= 2, `both moved waves emitted, got ${moved.length}`);
+    assert.ok(moved.every((r) => r.subject === 'Science'), `moved waves keep the due subject, got ${moved.map((r) => r.subject).join(',')}`);
+  });
+
+  // ================= S3 — conquered -> chapter test + spaced revision =================
+  const doneRow = (id, subject, chapter, completedAt, over = {}) =>
+    mkS(id, subject, chapter, { status: 'completed', progress_percent: 100, estimated_hours: 6, completed_at: completedAt, ...over });
+
+  check('S3a', 'one conquered chapter -> exactly 1 chapter test (+2d) and 3 spaced revisions (+3/+7/+14d), never studied again', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const p = generateSchedule({
+      syllabus: [
+        doneRow('d1', 'Science', 'Life Processes', `${S_TODAY}T09:00:00.000Z`),
+        mkS('p1', 'Maths', 'Trigonometry', { estimated_hours: 6 }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s3a', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const tests = p.filter((r) => /^Chapter test: Life Processes$/.test(r.topic));
+    const revs = p.filter((r) => /^Spaced repetition \(\+\d+d\): Life Processes$/.test(r.topic) || /^Spaced revision \(\+\d+d\): Life Processes$/.test(r.topic));
+    assert.equal(tests.length, 1, `exactly one chapter test, got ${tests.length}: ${tests.map((t) => `${t.date}/${t.session_type}`).join(',')}`);
+    assert.equal(tests[0].date, sadd(S_TODAY, 2), `the chapter test belongs at +2 days, got ${tests[0].date}`);
+    assert.equal(tests[0].session_type, 'mock', 'the chapter test reuses the existing mock session type (no schema change)');
+    assert.deepEqual(revs.map((r) => r.date).sort(), [sadd(S_TODAY, 3), sadd(S_TODAY, 7), sadd(S_TODAY, 14)], `spaced revisions at +3/+7/+14, got ${revs.map((r) => r.date).join(',')}`);
+    assert.ok(revs.every((r) => r.session_type === 'revision'), 'spaced sessions use the revision type');
+    assert.ok(revs.every((r) => r.duration_minutes >= 20 && r.duration_minutes <= 30), `spaced revisions are 20-30 min, got ${revs.map((r) => r.duration_minutes).join(',')}`);
+    assert.ok(!p.some((r) => r.session_type === 'study' && r.topic === 'Life Processes'), 'a conquered chapter is never study-scheduled again');
+    assert.deepEqual([p.coverage.pipeline.tests, p.coverage.pipeline.revisions], [1, 3], 'the summary counts the ladder it emitted');
+  });
+
+  check('S3b', 'regenerating over its own output never duplicates the ladder', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const opts = {
+      syllabus: [
+        doneRow('d1', 'Science', 'Life Processes', `${S_TODAY}T09:00:00.000Z`),
+        mkS('p1', 'Maths', 'Trigonometry', { estimated_hours: 6 }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s3b', today: S_TODAY, createdAt: S_CREATED,
+    };
+    const first = generateSchedule(opts);
+    const ladder = first.filter((r) => LADDER_RE.test(r.topic));
+    assert.equal(ladder.length, 4, `the first run must produce exactly 4 ladder sessions, got ${ladder.length}`);
+    const second = generateSchedule({ ...opts, existing: first });
+    const again = second.filter((r) => LADDER_RE.test(r.topic));
+    assert.equal(again.length, 0, `the second run re-created ${again.length} ladder sessions — the identity key is not honoured`);
+    const third = generateSchedule({ ...opts, existing: [...first, ...second] });
+    assert.equal(third.filter((r) => LADDER_RE.test(r.topic)).length, 0, 'a third run is still clean (idempotent)');
+    assert.equal(second.coverage.pipeline.duplicatesSuppressed, 4, 'the suppression is counted, not silent');
+    // kept rows still consume their day: nothing may be over-allocated
+    const totals = {};
+    for (const r of [...first, ...second, ...third]) totals[r.date] = (totals[r.date] || 0) + (Number(r.duration_minutes) || 0);
+    for (const [d, m] of Object.entries(totals)) {
+      assert.ok(m <= 180, `day ${d} over-allocated after regeneration: ${m} > 180`);
+    }
+  });
+
+  check('S3c', 'five conquered chapters -> five chapter tests and fifteen spaced revisions', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const subjects = ['Science', 'Science', 'Maths', 'English', 'Social Science'];
+    const chapters = ['Life Processes', 'Electricity', 'Trigonometry', 'First Flight', 'Nationalism'];
+    const done = chapters.map((ch, i) => doneRow(`c${i}`, subjects[i], ch, `${sadd(S_TODAY, -1)}T09:00:00.000Z`));
+    const p = generateSchedule({
+      syllabus: [...done, mkS('p1', 'Hindi', 'Kritika', { estimated_hours: 6 })],
+      dailyHours: 4, preferredTime: 'Morning', daysOff: [], weeks: 4,
+      userId: 'u-s3c', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const tests = p.filter((r) => /^Chapter test: /.test(r.topic));
+    const revs = p.filter((r) => /^Spaced revision \(\+\d+d\): /.test(r.topic));
+    assert.equal(tests.length, 5, `5 chapter tests expected, got ${tests.length}`);
+    assert.equal(revs.length, 15, `15 spaced revisions expected, got ${revs.length}`);
+    assert.equal(new Set(tests.map((r) => r.topic)).size, 5, 'each test session is distinct per chapter');
+    assert.equal(p.coverage.pipeline.notEmitted, 0, `no ladder session may be lost (${p.coverage.pipeline.notEmitted} unplaced)`);
+    assert.ok(!p.some((r) => r.session_type === 'study' && chapters.includes(r.topic)), 'no conquered chapter returns as study');
+    const byDate = {};
+    for (const r of p) byDate[r.date] = (byDate[r.date] || 0) + (Number(r.duration_minutes) || 0);
+    for (const [d, m] of Object.entries(byDate)) {
+      assert.ok(m <= 240, `day ${d} over-allocated: ${m} > 240`);
+    }
+  });
+
+  check('S3d', 'old completion collapses to ONE catch-up revision; past offsets clamp forward, never backwards', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const p = generateSchedule({
+      syllabus: [
+        doneRow('old1', 'Science', 'Old Chapter', `${sadd(S_TODAY, -30)}T09:00:00.000Z`),
+        doneRow('mid1', 'Maths', 'Mid Chapter', `${sadd(S_TODAY, -5)}T09:00:00.000Z`),
+        mkS('p1', 'Hindi', 'Kritika', { estimated_hours: 6 }),
+      ],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s3d', today: S_TODAY, createdAt: S_CREATED,
+    });
+    const oldRows = p.filter((r) => r.topic.includes('Old Chapter'));
+    assert.equal(oldRows.length, 1, `a completion older than the ladder collapses to ONE catch-up session, got ${oldRows.length} (${oldRows.map((r) => `${r.date}/${r.topic}`).join(', ')})`);
+    assert.equal(oldRows[0].session_type, 'revision', 'the catch-up session is a revision, not a fresh study block');
+    assert.ok(/catch-up/.test(oldRows[0].topic), 'the catch-up session says what it is');
+    const midRows = p.filter((r) => r.topic.includes('Mid Chapter'));
+    assert.equal(midRows.length, 4, `a 5-day-old completion keeps the full ladder, got ${midRows.length}`);
+    assert.ok(midRows.every((r) => r.date >= S_TODAY), `clamped offsets stay in the future: ${midRows.map((r) => r.date).join(',')}`);
+    assert.ok(!p.some((r) => r.date < S_TODAY), 'nothing at all is scheduled in the past');
+  });
+
+  check('S3e', 'ladder overlapping a school exam: revisions stay light on exam days and the chapter test never lands on one', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const syl = [
+      doneRow('d1', 'Science', 'Life Processes', `${S_TODAY}T09:00:00.000Z`),
+      mkS('p1', 'Maths', 'Trigonometry', { estimated_hours: 6 }),
+    ];
+    // (a) a spaced revision falls ON an exam day -> it stays light, nothing else changes
+    const pA = generateSchedule({
+      syllabus: syl, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s3e', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [{ label: 'Unit Test', start_date: sadd(S_TODAY, 3), end_date: sadd(S_TODAY, 4) }],
+    });
+    const examDay = sadd(S_TODAY, 3);
+    const onExamDay = pA.filter((r) => r.date === examDay);
+    assert.ok(onExamDay.some((r) => LADDER_RE.test(r.topic)), `the +3d revision still happens on the exam day: ${onExamDay.map((r) => r.topic).join(' | ')}`);
+    assert.ok(onExamDay.every((r) => r.duration_minutes <= 45), `exam-day sessions stay light, got ${onExamDay.map((r) => r.duration_minutes).join(',')}`);
+    assert.ok(onExamDay.every((r) => r.session_type !== 'study'), 'no new study on an exam day');
+    assert.equal(pA.filter((r) => LADDER_RE.test(r.topic)).length, 4, 'the ladder stays complete');
+    assert.equal(pA.coverage.pipeline.notEmitted, 0, 'no ladder session lost');
+    // (b) the chapter test itself would land on an exam day -> it moves off it
+    const pB = generateSchedule({
+      syllabus: syl, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s3e', today: S_TODAY, createdAt: S_CREATED,
+      schoolExams: [{ label: 'Unit Test', start_date: sadd(S_TODAY, 2), end_date: sadd(S_TODAY, 3) }],
+    });
+    const testB = pB.filter((r) => /^Chapter test: /.test(r.topic));
+    assert.equal(testB.length, 1, 'still exactly one chapter test');
+    assert.ok(testB[0].date > sadd(S_TODAY, 3), `the chapter test must move off the exam days, got ${testB[0].date}`);
+    assert.equal(pB.filter((r) => LADDER_RE.test(r.topic)).length, 4, 'the ladder is still complete after the move');
+    assert.ok(!pB.some((r) => r.session_type === 'mock' && r.date >= sadd(S_TODAY, 2) && r.date <= sadd(S_TODAY, 3)), 'no full test inside the exam range');
+  });
+
+  // ================= S4 — Feb 25 class-track hard cutoff =================
+  const nextOccurrence = (fromIso, mm, dd) => {
+    const y = Number(fromIso.slice(0, 4));
+    const iso = (year) => `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    for (const cand of [iso(y), iso(y + 1), iso(y + 2)]) if (cand > fromIso) return cand;
+    return iso(y + 3);
+  };
+  const offsetTo = (target) => {
+    U.setDevDateOffset(0);
+    const real = U.todayStr();
+    const off = Math.round((new Date(`${target}T00:00:00Z`) - new Date(`${real}T00:00:00Z`)) / 86400000);
+    U.setDevDateOffset(off);
+    return real;
+  };
+
+  check('S4a', 'dev-offset to Feb 26 -> zero class-track sessions, olympiad still scheduled (one date system)', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    assert.ok(U && typeof U.setDevDateOffset === 'function', `utils dev-offset mechanism unavailable: ${uErr}`);
+    assert.equal(typeof SG.classSessionCutoff, 'function', 'classSessionCutoff is not exported (S4 mechanism absent)');
+    U.setDevDateOffset(0);
+    const realToday = U.todayStr();
+    const feb26 = nextOccurrence(realToday, 2, 26);
+    const cutoffYear = Number(feb26.slice(0, 4));
+    try {
+      offsetTo(feb26);
+      assert.equal(U.todayStr(), feb26, `the dev offset must move todayStr to ${feb26}, got ${U.todayStr()}`);
+      assert.equal(SG.classSessionCutoff(feb26), `${cutoffYear}-02-25`, 'the cutoff for a Feb-26 plan date is Feb 25 of the same session');
+      const p = generateSchedule({
+        syllabus: [
+          mkS('c1', 'Science', 'Life Processes', { estimated_hours: 8 }),
+          mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 8 }),
+          mkS('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 8 }),
+        ],
+        olympiadDate: sadd(feb26, 20),
+        dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 6, userId: 'u-s4a',
+      });
+      const classRows = p.filter((r) => r.track === 'class');
+      assert.equal(classRows.length, 0, `class-track sessions must stop at the cutoff, found ${classRows.length} (${classRows.slice(0, 3).map((r) => `${r.date}/${r.session_type}`).join(', ')})`);
+      assert.ok(p.some((r) => r.track === 'olympiad'), 'the olympiad track is unaffected by the class cutoff');
+      assert.equal(p.coverage.classCutoff, `${cutoffYear}-02-25`, 'the summary reports the cutoff it applied');
+      assert.ok(p.coverage.classCutoffDaysBlocked > 0, 'the summary counts the blocked days');
+      assert.ok(/cutoff/i.test(String(p.coverage.coverageWarning || '')), `the summary says plainly why class work was not placed: ${p.coverage.coverageWarning}`);
+      assert.ok([...(p.coverage.unscheduled || []), ...(p.coverage.partial || [])].some((u) => u.track === 'class'), 'the unplaced class chapters are named');
+    } finally {
+      U.setDevDateOffset(0);
+    }
+    assert.equal(U.todayStr(), realToday, 'dev offset reset — no leakage into other suites');
+  });
+
+  check('S4b', 'Feb 20 with an impossible class backlog -> nothing class-track after Feb 25, unplaced chapters listed', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    U.setDevDateOffset(0);
+    const realToday = U.todayStr();
+    const feb20 = nextOccurrence(realToday, 2, 20);
+    const cutoff = `${Number(feb20.slice(0, 4))}-02-25`;
+    try {
+      offsetTo(feb20);
+      assert.equal(U.todayStr(), feb20, `the dev offset must move todayStr to ${feb20}`);
+      assert.equal(SG.classSessionCutoff(feb20), cutoff, 'Feb 20 sits in the session that ends Feb 25 of the same year');
+      const heavy = Array.from({ length: 12 }, (_, i) =>
+        mkS(`h${i}`, ['Science', 'Maths', 'English'][i % 3], `Chapter ${i}`, { estimated_hours: 20 }));
+      const p = generateSchedule({
+        syllabus: heavy, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 8, userId: 'u-s4b',
+      });
+      const lateClass = p.filter((r) => r.track === 'class' && r.date > cutoff);
+      assert.equal(lateClass.length, 0, `class-track sessions after ${cutoff}: ${lateClass.slice(0, 3).map((r) => `${r.date}/${r.session_type}`).join(', ')}`);
+      assert.ok(p.some((r) => r.track === 'class'), 'class work IS scheduled before the cutoff (the rule is a cutoff, not a shutdown)');
+      assert.equal(p.coverage.classCutoff, cutoff, 'cutoff reported');
+      const unplaced = [...(p.coverage.unscheduled || []), ...(p.coverage.partial || [])];
+      assert.ok(unplaced.length > 0, 'the summary must list the chapters that could not be placed before the cutoff');
+      assert.ok(unplaced.every((u) => u.chapter && u.remainingHours > 0), 'unplaced entries name the chapter and the hours left');
+      assert.ok(/cutoff/i.test(String(p.coverage.coverageWarning || '')), 'the warning states the cutoff reason');
+    } finally {
+      U.setDevDateOffset(0);
+    }
+    assert.equal(U.todayStr(), realToday, 'dev offset reset');
+  });
+
+  check('S4c', 'olympiad on Mar 15 -> olympiad keeps scheduling in March while the class track respects the cutoff', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    U.setDevDateOffset(0);
+    const realToday = U.todayStr();
+    const feb20 = nextOccurrence(realToday, 2, 20);
+    const year = Number(feb20.slice(0, 4));
+    const mar15 = `${year}-03-15`;
+    try {
+      offsetTo(feb20);
+      const p = generateSchedule({
+        syllabus: [
+          mkS('c1', 'Science', 'Life Processes', { estimated_hours: 8 }),
+          mkS('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 10 }),
+          mkS('o2', 'Maths Olympiad', 'Combinatorics', { track: 'olympiad', estimated_hours: 10 }),
+        ],
+        olympiadDate: mar15, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 6, userId: 'u-s4c',
+      });
+      const march = p.filter((r) => r.date >= `${year}-03-01` && r.date < mar15);
+      assert.ok(march.some((r) => r.track === 'olympiad'), `olympiad sessions must continue into March, got ${march.map((r) => `${r.date}/${r.track}`).join(', ') || 'none'}`);
+      assert.ok(p.filter((r) => r.track === 'olympiad').every((r) => r.date < mar15), 'olympiad prep still stops at its own date');
+      assert.ok(!p.some((r) => r.track === 'class' && r.date > `${year}-02-25`), 'the class track still respects the cutoff in the same plan');
+    } finally {
+      U.setDevDateOffset(0);
+    }
+    assert.equal(U.todayStr(), realToday, 'dev offset reset');
+  });
+
+  check('S4d', 'cutoff maths: leap-year safe, session-boundary aware, constant lives in constants.js, still one date system', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    assert.ok(/CLASS_SESSION_END/.test(constSrcS), 'constants.js must export CLASS_SESSION_END');
+    assert.equal(SG.classSessionCutoff('2028-02-29'), '2028-02-25', 'leap-year Feb 29 -> cutoff Feb 25 of the same session year');
+    assert.equal(SG.classSessionCutoff('2027-04-01'), '2028-02-25', 'Apr 1 opens a new session -> cutoff Feb 25 of the following year');
+    assert.equal(SG.classSessionCutoff('2027-03-31'), '2027-02-25', 'Mar 31 still belongs to the ending session');
+    assert.equal(SG.classSessionCutoff('2026-09-27'), '2027-02-25', 'an autumn date belongs to the session ending next February');
+    // a school exam straddling the cutoff keeps its exam-day revision (exams override the cutoff)
+    const p = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life Processes', { estimated_hours: 8 })],
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s4d', today: '2027-02-20', createdAt: '2027-02-20T00:00:00.000Z',
+      schoolExams: [{ label: 'Boards', start_date: '2027-02-24', end_date: '2027-03-03' }],
+    });
+    const examDayRows = p.filter((r) => r.date >= '2027-02-24' && r.date <= '2027-03-03');
+    assert.ok(examDayRows.length > 0, 'exam days inside/after the cutoff still get their light revision');
+    assert.ok(examDayRows.every((r) => r.session_type !== 'study'), 'exam days carry no new study');
+    assert.ok(!p.some((r) => r.track === 'class' && r.session_type === 'study' && r.date > '2027-02-25'), 'no NEW class content after the cutoff');
+    // the planner still reads the ONE date system and never the dev-offset setter
+    assert.ok(!/setDevDateOffset/.test(sgSrcS), 'the scheduler must not touch the dev-offset setter itself');
+    assert.ok(/todayStr\(\)/.test(sgSrcS), 'still the single date system');
+  });
+
+  // ================= preservation of the accepted 938e69d foundation =================
+  check('SP1', 'the accepted foundation survives FIX-S: idempotent regen, deadlines-first, completed exclusion, hours parsing, FIX-D4/E wiring', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    // (1) idempotent regeneration: kept rows are never re-created
+    const syl = [mkS('k1', 'Science', 'Life Processes', { estimated_hours: 6 }), mkS('k2', 'Maths', 'Trigonometry', { estimated_hours: 6 })];
+    const base = { syllabus: syl, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2, userId: 'u-sp1', today: S_TODAY, createdAt: S_CREATED };
+    const first = generateSchedule(base);
+    const second = generateSchedule({ ...base, existing: first });
+    const key = (r) => [r.date, r.start_time, r.subject, r.topic, r.session_type].join('|');
+    const keys = new Set(first.map(key));
+    assert.equal(second.filter((r) => keys.has(key(r))).length, 0, 'kept rows were re-created on regeneration');
+    // (2) completed-row exclusion stays auditable, with reasons
+    const p2 = generateSchedule({
+      syllabus: [doneRow('x1', 'Science', 'Done Chapter', `${S_TODAY}T09:00:00.000Z`), mkS('x2', 'Science', 'Open Chapter', { estimated_hours: 6 })],
+      dailyHours: 3, weeks: 2, userId: 'u-sp1', today: S_TODAY, createdAt: S_CREATED,
+    });
+    assert.ok(p2.coverage.completedExcluded >= 1, 'completed exclusion still counted');
+    assert.ok(p2.coverage.completedItems.some((c) => c.reason === 'completed'), 'completed exclusion still carries a reason');
+    assert.ok(!p2.some((r) => r.session_type === 'study' && r.topic === 'Done Chapter'), 'a conquered chapter is never study-scheduled');
+    // (3) hours parsing: an explicit 0 stays 0 and still plans nothing
+    assert.equal(effectiveDailyHours({ daily_study_hours: 0 }), 0, '0 hrs/day must stay 0');
+    assert.equal(effectiveDailyHours({}), 2, 'unset keeps the app default');
+    const zero = generateSchedule({ syllabus: syl, dailyHours: effectiveDailyHours({ daily_study_hours: 0 }), weeks: 2, userId: 'u-sp1', today: S_TODAY, createdAt: S_CREATED });
+    assert.equal(zero.length, 0, 'zero available time still plans nothing');
+    assert.equal(zero.coverage.noCapacity, true, 'zero time is reported, not padded');
+    // (4) autoSetDeadlines before planning + the FIX-D4/FIX-E wiring in the screen
+    assert.equal(typeof autoSetDeadlines, 'function', 'autoSetDeadlines preserved');
+    assert.ok(ssSrcS.indexOf('autoSetDeadlines(') < ssSrcS.indexOf('generateSchedule({'), 'deadlines are still computed BEFORE planning');
+    assert.ok(ssSrcS.includes('autoRescheduleMissed') && ssSrcS.includes('autoRolledRef'), 'FIX-E rollover wiring preserved');
+    assert.ok(sgSrcS.includes('examDates') && sgSrcS.includes('isExamDay') && sgSrcS.includes('FIX-D4'), 'FIX-D4 exam-day guard preserved');
+  });
+
+  const failedS = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedS.length, 0, `FIX-S: ${failedS.length} check(s) failed -> ${failedS.map((f) => f.id).join(', ')}`);
 }
 
 console.log('ALL LOGIC TESTS PASSED ✅');

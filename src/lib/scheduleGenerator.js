@@ -19,6 +19,19 @@
 //   * one date system: resolvePlanDate() falls back to todayStr(), i.e. the FIX-F
 //     dev-date offset — no second calendar is introduced
 //
+// FIX-S — on top of the FIX-H planner (same single planner, no parallel path):
+//   S1 buildSubjectRotation(): a class day is a PAIR of subjects dealt round-robin
+//      over subjects ordered by nearest deadline, keyed by calendar date — so no
+//      subject repeats on back-to-back days and a day off does not shift the week
+//   S2 exam-aware run-up: inside the 14 days before a school exam, subjects holding
+//      chapters due before that exam lead the day's pair and lead the revision wave
+//      (the wave's shape — revision + timed practice, no new study — is unchanged)
+//   S3 conquered chapter -> ONE chapter test at +2d and spaced revisions at
+//      +3/+7/+14d, identity-keyed so regeneration never duplicates the ladder
+//   S4 CLASS_SESSION_END cutoff: no new class-track content after 25 Feb of the
+//      session; olympiad/competitive tracks and exam-related class days continue;
+//      whatever no longer fits is reported, never dropped or scheduled late
+//
 // PRIORITY (the core rule):
 //   1. CLASS/school syllabus — always first (real school exams!)
 //   2. OLYMPIAD — second
@@ -30,7 +43,7 @@
 //   - catch-up (autoRescheduleMissed) when the student falls behind
 // ============================================================
 import dayjs from 'dayjs';
-import { SESSION_TYPES, TRACK_PRIORITY } from '../config/constants';
+import { SESSION_TYPES, TRACK_PRIORITY, CLASS_SESSION_END } from '../config/constants';
 import { minutesToTime, todayStr, dateStr, nowIso } from './utils';
 
 const PREFERRED_START = {
@@ -233,6 +246,16 @@ const REV_WAVE_PICKS = 6;
 const HORIZON_CAP_DAYS = 365;
 const MAX_BLOCKS_PER_DAY = 40;   // hard stop — an allocation loop can never spin
 
+// ---------- FIX-S: planner constants ----------
+// S1 — a class day is a PAIR of subjects, never one subject for the whole day
+const PAIR_SECONDARY_SHARE = 0.35; // the second subject's share of a calm class day
+const PAIR_URGENT_SECONDARY_MIN = 2 * 15; // …shrinks to this floor when the lead subject is due
+// S3 — a conquered chapter is tested once, then revisited on a spaced ladder
+const CHAPTER_TEST_OFFSET_DAYS = 2;
+const SPACED_REVISION_OFFSETS = [3, 7, 14];
+const CHAPTER_TEST_MIN = 60;     // one full-chapter test (uses the existing 'mock' session type)
+const SPACED_REVISION_MIN = 25;  // 20–30 min per spaced revision
+
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const clampNum = (v, lo, hi) => Math.min(hi, Math.max(lo, num(v, lo)));
 const isDateStr = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -298,6 +321,107 @@ export function compareUrgency(a, b, ctx) {
   return String(a.id).localeCompare(String(b.id));
 }
 
+// ---------- FIX-S S1: weekly subject-pair interleave ----------
+/**
+ * Builds the class-track subject rotation for a plan window. PURE: same input,
+ * same output — no clock, no randomness, no mutation of the caller's rows.
+ *
+ * A school week is not "one subject per day until it is finished": every day is
+ * a PAIR of subjects, and the pairs are dealt round-robin over the subjects
+ * ordered by nearest deadline (then heaviest backlog, then name — a total order).
+ * Because day i takes slots (2i, 2i+1) of that order, consecutive days carry
+ * DISJOINT pairs whenever the subject count is even, so no subject repeats on two
+ * back-to-back days. Pairs are keyed by CALENDAR date, so a declared day off
+ * simply leaves its slot unused — the rest of the week does not shift.
+ *
+ * Deadline urgency changes the ORDER (and, in the day loop, the split of the
+ * day's minutes), never the existence of the second subject: the only day with a
+ * single subject is a day where the student genuinely has one subject left.
+ *
+ * @param {Array} pendingRows rows (or work items) still needing time:
+ *        { subject, deadline?, remainingMinutes? | estimated_hours? }
+ * @param {string} startDate 'YYYY-MM-DD' — the plan's day 0
+ * @param {number} numDays   how many calendar days to lay pairs over
+ * @returns {{ order: string[], byDate: Object<string, string[]>, subjects: Array }}
+ */
+export function buildSubjectRotation(pendingRows, startDate, numDays) {
+  const rows = Array.isArray(pendingRows) ? pendingRows.filter(Boolean) : [];
+  const start = isDateStr(startDate) ? startDate : todayStr();
+  const days = Math.max(0, Math.floor(num(numDays, 0)));
+
+  const groups = new Map();
+  for (const r of rows) {
+    const subject = String(r.subject || 'Subject');
+    const explicit = num(r.remainingMinutes, null);
+    const minutes = explicit != null
+      ? Math.max(0, Math.floor(explicit))
+      : Math.max(0, Math.round(num(r.estimated_hours, 0) * 60));
+    if (minutes <= 0) continue; // nothing left to study -> not part of the rotation
+    const raw = r.deadline;
+    const deadline = isDateStr(String(raw || '')) ? String(raw) : (raw ? dateStr(dayjs(raw)) : null);
+    const g = groups.get(subject) || { subject, minutes: 0, deadline: null, chapters: 0 };
+    g.minutes += minutes;
+    g.chapters += 1;
+    if (deadline && (!g.deadline || deadline < g.deadline)) g.deadline = deadline;
+    groups.set(subject, g);
+  }
+
+  // nearest deadline first; no deadline -> the back of the queue
+  const order = [...groups.values()]
+    .sort((a, b) => {
+      const da = a.deadline || '9999-12-31';
+      const db = b.deadline || '9999-12-31';
+      if (da !== db) return da < db ? -1 : 1;
+      if (b.minutes !== a.minutes) return b.minutes - a.minutes;
+      return a.subject.localeCompare(b.subject);
+    })
+    .map((g) => g.subject);
+
+  const byDate = {};
+  const n = order.length;
+  for (let i = 0; i < days; i++) {
+    const date = dateStr(dayjs(start).add(i, 'day'));
+    if (n === 0) { byDate[date] = []; continue; }
+    if (n === 1) { byDate[date] = [order[0]]; continue; }
+    const first = order[(2 * i) % n];
+    const second = order[(2 * i + 1) % n];
+    // an odd subject count can wrap onto itself — never invent a fake second subject
+    byDate[date] = first === second ? [first] : [first, second];
+  }
+
+  return {
+    order,
+    byDate,
+    subjects: [...groups.values()].sort((a, b) => order.indexOf(a.subject) - order.indexOf(b.subject)),
+  };
+}
+
+// ---------- FIX-S S4: the class session's hard cutoff ----------
+/**
+ * The date after which NO new class-track content may be scheduled for the
+ * academic session that contains `today` (April → March, cutoff = CLASS_SESSION_END
+ * of the ending year). Pure + injectable date: it reads nothing but its argument,
+ * so the FIX-F dev-date offset exercises exactly the same path as production.
+ *
+ *   classSessionCutoff('2026-09-26') -> '2027-02-25'   (session 2026-27)
+ *   classSessionCutoff('2027-02-26') -> '2027-02-25'   (cutoff already passed)
+ *   classSessionCutoff('2027-04-01') -> '2028-02-25'   (new session started)
+ *   classSessionCutoff('2028-02-29') -> '2028-02-25'   (leap-safe: MM-DD compare)
+ */
+export function classSessionCutoff(today) {
+  const base = isDateStr(today) ? dayjs(today) : dayjs(todayStr());
+  const [mm, dd] = String(CLASS_SESSION_END || '02-25').split('-');
+  const month = clampNum(mm, 1, 12);
+  const day = clampNum(dd, 1, 31);
+  // April..December belong to the session that ENDS next year; January..March to
+  // the session that ends THIS year.
+  const sessionStartYear = base.isValid() ? (base.month() + 1 >= 4 ? base.year() : base.year() - 1) : Number(String(todayStr()).slice(0, 4));
+  const endYear = sessionStartYear + 1;
+  const iso = `${endYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const cutoff = dayjs(iso);
+  return cutoff.isValid() ? dateStr(cutoff) : iso;
+}
+
 /**
  * Turns REAL syllabus rows into work items with an honest remaining workload.
  * Excluded (never scheduled again): rows already completed, rows at 100%,
@@ -342,7 +466,17 @@ export function buildWorkItems(input) {
     const track = trackOfRow(row, prio);
     if (String(row.status || '').toLowerCase() === 'completed' || progress >= 100) {
       completedExcluded += 1;
-      completedItems.push({ id: row.id, chapter, reason: 'completed' });
+      // FIX-S S3 needs to know WHAT was conquered and WHEN, to build the
+      // test + spaced-revision ladder. completed_at is optional in the data:
+      // a row without it is treated as conquered "today" by the caller.
+      completedItems.push({
+        id: row.id,
+        chapter,
+        subject: String(row.subject || 'Subject'),
+        track,
+        completedAt: row.completed_at && dayjs(row.completed_at).isValid() ? dateStr(dayjs(row.completed_at)) : null,
+        reason: 'completed',
+      });
       continue;
     }
     if (!active.has(track)) {
@@ -470,12 +604,128 @@ export function planSchedule(input) {
   const sortQueue = (t) => { if (queues[t]) queues[t].sort((a, b) => compareUrgency(a, b, ctx)); };
   for (const t of Object.keys(queues)) sortQueue(t);
 
+  // ---------- FIX-S S4: the class session's hard cutoff ----------
+  // Class-track NEW content stops here; olympiad / competitive tracks run to their
+  // own event dates. Pure + date-injected, so the dev-date offset tests it too.
+  const cutoff = classSessionCutoff(today);
+
+  // ---------- FIX-S S1: the class week is a rotation of subject PAIRS ----------
+  // Built once per plan from the class chapters that still need time, keyed by
+  // calendar date, so regenerating mid-week does not reshuffle the week.
+  const rotation = buildSubjectRotation(items.filter((it) => it.track === 'class'), today, totalDays);
+
+  // ---------- FIX-S S2: exam-aware run-up ----------
+  // Per school exam: the subjects that still hold chapters DUE BEFORE that exam
+  // starts. Inside the 14-day run-up those subjects lead the day's pair and lead
+  // the revision wave. Overlapping ranges -> the nearest exam start wins.
+  const runUps = exams
+    .map((e) => {
+      const due = items
+        .filter((it) => it.track === 'class' && isDateStr(it.deadline) && it.deadline < e.start)
+        .sort((a, b) => compareUrgency(a, b, ctx));
+      const subjects = [];
+      for (const it of due) if (!subjects.includes(it.subject)) subjects.push(it.subject);
+      return {
+        exam: e.label || 'School exam',
+        start: e.start,
+        end: e.end,
+        windowStart: dateStr(dayjs(e.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')),
+        dueSubjects: subjects,
+        dueChapters: due.map((it) => ({ subject: it.subject, chapter: it.chapter, deadline: it.deadline })),
+      };
+    })
+    .filter((r) => r.dueSubjects.length > 0);
+  const runUpFor = (date) => {
+    let hit = null;
+    for (const r of runUps) {
+      const diff = dayjs(r.start).diff(dayjs(date), 'day');
+      if (diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS && (!hit || r.start < hit.start)) hit = r;
+    }
+    return hit;
+  };
+  // today's class pair: rotation order, with the run-up leading it. S2 changes
+  // WHICH subject leads and how the minutes split — it never removes the second.
+  const classPairFor = (date) => {
+    const pair = (rotation.byDate && rotation.byDate[date]) || [];
+    if (!pair.length) return pair;
+    const run = runUpFor(date);
+    if (!run) return pair;
+    const inPair = pair.filter((s) => run.dueSubjects.includes(s));
+    if (inPair.length) return [inPair[0], ...pair.filter((s) => s !== inPair[0])].slice(0, 2);
+    return [run.dueSubjects[0], ...pair].slice(0, 2);
+  };
+
+  // ---------- FIX-S S3: conquered chapter -> ONE chapter test + spaced revisions ----------
+  const pipeline = [];
+  let pipelineSkippedTrack = 0;
+  for (const c of built.completedItems) {
+    if (!c || c.reason !== 'completed') continue; // only genuinely conquered chapters
+    const track = c.track || 'class';
+    if (!allocatable.includes(track)) { pipelineSkippedTrack += 1; continue; } // track not planned at all
+    const base = isDateStr(c.completedAt) ? c.completedAt : today; // no completed_at -> conquered today
+    const ageDays = dayjs(today).diff(dayjs(base), 'day');
+    if (ageDays > SPACED_REVISION_OFFSETS[SPACED_REVISION_OFFSETS.length - 1]) {
+      // conquered longer ago than the whole ladder: one honest catch-up revision,
+      // not four sessions pretending the chapter was finished yesterday
+      pipeline.push({
+        date: today, kind: 'rev', offsetDays: null, subject: c.subject, chapter: c.chapter,
+        track, type: 'revision', minutes: SPACED_REVISION_MIN,
+        topic: `Spaced revision (catch-up): ${c.chapter}`,
+      });
+      continue;
+    }
+    const ladder = [
+      { kind: 'test', off: CHAPTER_TEST_OFFSET_DAYS, type: 'mock', minutes: CHAPTER_TEST_MIN, label: 'Chapter test' },
+      ...SPACED_REVISION_OFFSETS.map((off) => ({
+        kind: 'rev', off, type: 'revision', minutes: SPACED_REVISION_MIN, label: `Spaced revision (+${off}d)`,
+      })),
+    ];
+    for (const step of ladder) {
+      const target = dateStr(dayjs(base).add(step.off, 'day'));
+      pipeline.push({
+        // a step that already fell in the past clamps to today — never scheduled backwards
+        date: target < today ? today : target,
+        kind: step.kind,
+        offsetDays: step.off,
+        subject: c.subject,
+        chapter: c.chapter,
+        track,
+        type: step.type,
+        minutes: step.minutes,
+        topic: `${step.label}: ${c.chapter}`,
+      });
+    }
+  }
+  pipeline.sort((a, b) => (a.date !== b.date
+    ? (a.date < b.date ? -1 : 1)
+    : (num(a.offsetDays, 0) - num(b.offsetDays, 0))
+      || String(a.subject).localeCompare(String(b.subject))
+      || String(a.chapter).localeCompare(String(b.chapter))));
+  const pipelineTotal = pipeline.length;
+  // Identity of a pipeline session as recoverable from a STORED schedule row:
+  // subject + topic (the topic carries both the chapter and the ladder step) + type.
+  // schedule rows have no syllabus FK, so this is row.id + kind + offsetDate in the
+  // only form the database can answer with. Regeneration seeds it from `existing`,
+  // so a session is created exactly once even if it rolled to a later day.
+  const pipelineKeys = new Set();
+  const pipelineEmitted = { test: 0, rev: 0 };
+  let pipelineSuppressed = 0;
+  let pipelineCutoffStopped = 0;
+  let pipelineEventStopped = 0;
+  let classCutoffDays = 0;
+
   // existing entries: their minutes occupy the day, their slots are never re-emitted
   const existingKeys = new Set();
   const loadByDate = {};
   for (const r of existingRows) {
     const k = dedupeKey(r);
     if (k) existingKeys.add(k);
+    // FIX-S S3: a chapter test / spaced revision already on the calendar is never
+    // re-created — the ladder runs once per conquered chapter, not once per regeneration
+    const rTopic = String(r.topic || '');
+    if (/^(Chapter test|Spaced revision)/.test(rTopic)) {
+      pipelineKeys.add([String(r.subject || ''), rTopic, String(r.session_type || '')].join('|'));
+    }
     if (String(r.status || 'pending') !== 'pending') continue;
     if (!isDateStr(String(r.date || '')) || String(r.date) < today) continue;
     loadByDate[r.date] = num(loadByDate[r.date], 0) + num(r.duration_minutes, 0);
@@ -487,6 +737,23 @@ export function planSchedule(input) {
     const base = isDayOff ? Math.min(DAY_OFF_CAP_MIN, capacityMin) : capacityMin;
     return Math.max(0, base - num(loadByDate[date], 0));
   };
+
+  // FIX-S S2 edge: a revision-wave day that falls on a declared day off moves to the
+  // PREVIOUS day — a day off stays a day off, and the run-up loses no revision.
+  const movedWaveDates = new Map(); // day before -> the day-off date it carries
+  if (offDays.size && runUps.length) {
+    for (let d = 1; d < totalDays; d++) {
+      const offDate = dateStr(dayjs(today).add(d, 'day'));
+      const weekday = (dayjs(offDate).day() + 6) % 7;
+      if (!offDays.has(weekday)) continue;
+      if (!runUps.some((r) => {
+        const diff = dayjs(r.start).diff(dayjs(offDate), 'day');
+        return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS;
+      })) continue;
+      const before = dateStr(dayjs(today).add(d - 1, 'day'));
+      if (!movedWaveDates.has(before)) movedWaveDates.set(before, offDate);
+    }
+  }
 
   const reasons = [];
   if (!syllabus.length) reasons.push('no-syllabus');
@@ -540,12 +807,37 @@ export function planSchedule(input) {
       const diff = dayjs(e.start).diff(dayjs(date), 'day');
       return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS;
     });
+    // FIX-S S4: a mock driven by the olympiad date is prep FOR that olympiad — it
+    // stops at the date, exactly like the study work does (H14 rule). A "full-length
+    // mock" a week after the event is over would be fake preparation.
+    const olympiadAhead = !!olympiadDate && date < dateStr(dayjs(olympiadDate));
     const isMockDay =
       !schoolExamToday &&
-      ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 70 : olympiadDate != null)) ||
+      ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 70 : olympiadAhead)) ||
         dayBeforeSchoolExam ||
         (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date));
     const classProtected = protectedDates.has(date);
+    // FIX-S S4: after the session cutoff the class track takes no NEW content.
+    // Exam-related class days are carved out — a school exam that straddles the
+    // cutoff still gets its run-up, its light exam-day revision and its pre-exam
+    // mock; olympiad / competitive tracks are never bound by the class cutoff.
+    const mainExamBufferDay = examDate != null && daysToExam != null
+      && daysToExam <= Math.max(3, Math.round(totalDays * 0.12)) && daysToExam > 0;
+    const examRelatedDay = schoolExamToday || dayBeforeSchoolExam || inSchoolExamRev || isMockDay || mainExamBufferDay;
+    const classBlocked = date > cutoff && !examRelatedDay;
+    if (classBlocked) classCutoffDays += 1;
+    // same honesty rule as pruneExpired, applied to consolidation sessions: once a
+    // one-shot event's date has arrived, revising for it is meaningless — no
+    // revision / quiz / conquered-chapter ladder rows for that track from then on.
+    const eventDate = (track) => (track === 'olympiad' ? olympiadDate : track === 'exam' ? examDate : null);
+    const eventPassed = (track) => {
+      const e = eventDate(track);
+      return !!e && date >= dateStr(dayjs(e));
+    };
+    // FIX-S S1/S2: today's class subject pair (rotation order, exam run-up aware)
+    const classPair = classPairFor(date);
+    const isUrgentNow = (it) => !!it.overdue
+      || (isDateStr(it.deadline) && dayjs(it.deadline).diff(dayjs(date), 'day') <= URGENT_LEAD_DAYS);
 
     let cursor = startM;
     let capacity = dayCapacity(date, isDayOff);
@@ -600,12 +892,16 @@ export function planSchedule(input) {
     };
 
     // place one study block for a track; returns 'ok' | 'dup' | 'none'
-    const placeStudy = (track, quota, allowTail) => {
+    // onlySubjects (FIX-S S1): restrict the pick to the day's subject pair — the
+    // most urgent chapter WITHIN that pair leads, everything else keeps its queue.
+    const placeStudy = (track, quota, allowTail, onlySubjects) => {
       const q = queues[track];
       if (!q || !q.length) return 'none';
       if (track === 'class' && classProtected) { protectedBlocksSkipped += 1; return 'none'; }
       sortQueue(track);
-      const it = q[0];
+      const pool = onlySubjects && onlySubjects.length ? q.filter((it) => onlySubjects.includes(it.subject)) : q;
+      if (!pool.length) return 'none';
+      const it = pool[0];
       const block = blockFor(it, Math.min(num(quota, 0), capacity), allowTail);
       if (!block) return 'none';
       const res = push(it.subject, it.chapter, 'study', block, track, it.overdue ? 'high' : 'normal');
@@ -619,7 +915,8 @@ export function planSchedule(input) {
         it.remainingMinutes = 0;
       }
       if (it.remainingMinutes <= 0) {
-        q.shift();
+        const idx = q.indexOf(it);
+        if (idx >= 0) q.splice(idx, 1); // the picked item is not always the queue head now
         finishedTopics += 1;
         // every 2nd finished topic gets a timed-practice block
         if (finishedTopics % 2 === 0 && capacity >= 35) {
@@ -627,6 +924,20 @@ export function planSchedule(input) {
         }
       }
       return 'ok';
+    };
+
+    // spend up to `quota` minutes of this track's allocation; returns minutes used.
+    // Behaviour is unchanged when onlySubjects is null (non-class tracks).
+    const spendQuota = (track, quota, onlySubjects) => {
+      let spent = 0;
+      while (capacity >= MIN_BLOCK_MIN && spent < quota && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
+        const before = capacity;
+        const res = placeStudy(track, Math.min(quota - spent, capacity), false, onlySubjects);
+        if (res === 'none') break;
+        if (res === 'dup') { dupGuard += 1; spent += MIN_BLOCK_MIN; if (capacity === before) continue; }
+        spent += before - capacity;
+      }
+      return spent;
     };
 
     // minutes this track MUST get today to still make its deadlines (EDF rate)
@@ -648,6 +959,27 @@ export function planSchedule(input) {
     // zero available time => plan nothing at all (never invent minutes)
     if (noCapacity) continue;
 
+    // FIX-S S3: today's conquered-chapter test / spaced revisions go in FIRST —
+    // short, dated commitments that consolidation must not lose. Nothing is
+    // dropped: a session that does not fit (or lands on an exam day or a declared
+    // day off) simply rolls to the next day of the plan.
+    if (!isDayOff && pipeline.length) {
+      while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+        const s = pipeline[0];
+        const pkey = [s.subject, s.topic, s.type].join('|');
+        if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
+        if (s.track === 'class' && classBlocked) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+        if (eventPassed(s.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
+        if (schoolExamToday && s.kind === 'test') break; // no full chapter test ON an exam day — it waits
+        const res = push(s.subject, s.topic, s.type, s.minutes, s.track, s.kind === 'test' ? 'high' : 'normal');
+        if (res === 'small') break;                     // no room for a real block today -> rolls forward
+        pipelineKeys.add(pkey);
+        pipeline.shift();
+        if (res === 'dup') { pipelineSuppressed += 1; continue; }
+        pipelineEmitted[s.kind] = num(pipelineEmitted[s.kind], 0) + 1;
+      }
+    }
+
     // School exam DAY itself — light revision only, no new topics
     if (schoolExamToday) {
       const exam = exams.find((e) => date >= e.start && date <= e.end);
@@ -655,29 +987,51 @@ export function planSchedule(input) {
       continue;
     }
 
-    // Mock day: full-length timed test + analysis
+    // Mock day: full-length timed test + analysis.
+    // FIX-S S4: a mock belongs to the event that drives it. A board/main-exam or
+    // pre-school-exam mock is class-track; a mock driven only by an olympiad date
+    // is OLYMPIAD prep — labelling it class would let the class-session cutoff
+    // delete legitimate olympiad work (olympiad/competitive run to their own dates).
     if (isMockDay) {
       const mockLabel = dayBeforeSchoolExam ? 'Pre-school-exam mock' : 'Full-length mock';
-      push('Mock Test', `${mockLabel} + analysis`, 'mock', Math.min(MOCK_MIN, capacity), 'class', 'high');
-      if (capacity >= 30) push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), 'class');
+      const mockTrack = examDate != null || dayBeforeSchoolExam || !olympiadDate ? 'class' : 'olympiad';
+      push('Mock Test', `${mockLabel} + analysis`, 'mock', Math.min(MOCK_MIN, capacity), mockTrack, 'high');
+      if (capacity >= 30) push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), mockTrack);
       continue;
     }
 
-    // Revision wave before school exams: no NEW topics, revise the done ones
-    if (inSchoolExamRev && studied.some((s) => s.track === 'class')) {
+    // Revision wave before school exams: no NEW topics, revise the done ones.
+    // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave,
+    // so the last fortnight revises what the exam will actually ask. The wave's
+    // shape (revision + timed practice, zero new study) is unchanged.
+    if (inSchoolExamRev && !isDayOff && studied.some((s) => s.track === 'class')) {
       const classTopics = studied.filter((s) => s.track === 'class');
       const recent = classTopics.slice(-REV_WAVE_PICKS);
-      const subj = recent[d % recent.length];
-      push(subj.subject, `Revision wave: ${subj.chapter}`, 'revision', Math.min(MAX_BLOCK_MIN, capacity), 'class');
-      if (capacity >= 45) {
-        const p = recent[(d + 1) % recent.length];
-        push(p.subject, `Timed practice: 10 Qs in 25 min (${p.chapter})`, 'practice', Math.min(35, capacity), 'class');
-      }
+      const run = runUpFor(date);
+      // chapters of subjects that are DUE BEFORE this exam lead the wave; if none of
+      // them are in the most recent picks, reach back for them rather than revise
+      // something the exam will not ask
+      const dueAll = run ? classTopics.filter((t) => run.dueSubjects.includes(t.subject)) : [];
+      const pool = dueAll.length ? dueAll.slice(-REV_WAVE_PICKS) : recent;
+      const waveBlock = (idx, movedFrom) => {
+        const subj = pool[idx % pool.length];
+        const label = movedFrom
+          ? `Revision wave (moved from ${movedFrom}): ${subj.chapter}`
+          : `Revision wave: ${subj.chapter}`;
+        push(subj.subject, label, 'revision', Math.min(MAX_BLOCK_MIN, capacity), 'class');
+        if (capacity >= 45) {
+          const nxt = pool[(idx + 1) % pool.length];
+          push(nxt.subject, `Timed practice: 10 Qs in 25 min (${nxt.chapter})`, 'practice', Math.min(35, capacity), 'class');
+        }
+      };
+      waveBlock(d, null);
+      const movedFrom = movedWaveDates.get(date);
+      if (movedFrom && capacity >= MIN_BLOCK_MIN) waveBlock(d + 1, movedFrom);
       continue;
     }
 
     // Main-exam buffer days
-    if (examDate != null && daysToExam != null && daysToExam <= Math.max(3, Math.round(totalDays * 0.12)) && daysToExam > 0) {
+    if (mainExamBufferDay) {
       push('Buffer', 'Backlog / weak topics cleanup', 'revision', Math.min(90, capacity), 'class');
       continue;
     }
@@ -730,7 +1084,10 @@ export function planSchedule(input) {
       }
     }
 
-    // Phase 1c: spend each track's allocation on its most urgent chapter
+    // Phase 1c: spend each track's allocation. A class day is spent on the day's
+    // subject PAIR (FIX-S S1): the lead subject takes the bigger share when it has
+    // a deadline breathing down its neck, but the second subject is never removed
+    // from the day — it keeps at least one real block whenever the day can hold two.
     for (const track of allocatable) {
       const q = queues[track];
       if (!q || !q.length) { leftover[track] = 0; continue; }
@@ -740,13 +1097,28 @@ export function planSchedule(input) {
         leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, quota);
         continue;
       }
+      if (track === 'class' && classBlocked) { leftover[track] = 0; continue; } // FIX-S S4
+      const pair = track === 'class' ? classPair : null;
+      const lead = pair && pair.length ? pair[0] : null;
+      const second = pair && pair.length > 1 ? pair[1] : null;
+      const leadHasWork = !!lead && q.some((it) => it.subject === lead);
+      const secondHasWork = !!second && q.some((it) => it.subject === second);
       let spent = 0;
-      while (capacity >= MIN_BLOCK_MIN && spent < quota && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
-        const before = capacity;
-        const res = placeStudy(track, Math.min(quota - spent, capacity), false);
-        if (res === 'none') break;
-        if (res === 'dup') { dupGuard += 1; spent += MIN_BLOCK_MIN; if (capacity === before) continue; }
-        spent += before - capacity;
+      if (leadHasWork && secondHasWork && quota >= 2 * MIN_BLOCK_MIN) {
+        const leadUrgent = q.some((it) => it.subject === lead && isUrgentNow(it));
+        const secondQuota = clampNum(
+          leadUrgent ? PAIR_URGENT_SECONDARY_MIN : Math.round(quota * PAIR_SECONDARY_SHARE),
+          MIN_BLOCK_MIN,
+          Math.max(MIN_BLOCK_MIN, quota - MIN_BLOCK_MIN)
+        );
+        spent += spendQuota(track, quota - secondQuota, [lead]);
+        spent += spendQuota(track, secondQuota, [second]);
+      } else if (leadHasWork || secondHasWork) {
+        // one half of the pair is finished -> that subject takes the day (S1b)
+        spent += spendQuota(track, quota, [leadHasWork ? lead : second]);
+      } else {
+        // pair exhausted (or a non-class track): plain urgency order, as before
+        spent += spendQuota(track, quota, null);
       }
       leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, Math.max(0, quota - spent));
     }
@@ -761,25 +1133,37 @@ export function planSchedule(input) {
         const subj = subjects[d % subjects.length];
         const chapters = [...bySubject[subj]].slice(0, 2).join(', ');
         const lastTrack = recent[recent.length - 1].track || 'class';
-        push(subj, `Revision: ${chapters}`, 'revision', Math.min(40, capacity), lastTrack);
+        // FIX-S S4: class-track consolidation stops at the session cutoff, and no
+        // track gets consolidation sessions after its own event date
+        if (!(lastTrack === 'class' && classBlocked) && !eventPassed(lastTrack)) {
+          push(subj, `Revision: ${chapters}`, 'revision', Math.min(40, capacity), lastTrack);
+        }
       }
     }
 
     // short quiz slot when there's leftover time
     if (capacity >= 20 && studied.length) {
       const last = studied[studied.length - 1];
-      push(last.subject, `Quick quiz: ${last.chapter}`, 'quiz', Math.min(20, capacity), last.track);
+      if (!(last.track === 'class' && classBlocked) && !eventPassed(last.track)) {
+        push(last.subject, `Quick quiz: ${last.chapter}`, 'quiz', Math.min(20, capacity), last.track);
+      }
     }
 
     // Phase 2 — minutes that no track claimed flow to the most at-risk REAL work.
     // A track that has work keeps its declared share; only unclaimed time moves.
     while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
       for (const t of allocatable) sortQueue(t);
-      const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && classProtected));
+      const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classBlocked)));
       if (!cands.length) break;
       cands.sort((a, b) => compareUrgency(queues[a][0], queues[b][0], ctx));
+      const winner = cands[0];
+      // FIX-S S1: unclaimed minutes stay inside the day's class pair as well, so a
+      // top-up can never undo the interleave; if that pair is finished, the minutes
+      // still go to real class work instead of being wasted.
+      const only = winner === 'class' && classPair.length ? classPair : null;
       const before = capacity;
-      const res = placeStudy(cands[0], capacity, true);
+      let res = placeStudy(winner, capacity, true, only);
+      if (res === 'none' && only) res = placeStudy(winner, capacity, true, null);
       if (res === 'none') break;
       if (res === 'dup') { dupGuard += 1; if (capacity === before) continue; }
       freePool = Math.max(0, freePool - (before - capacity));
@@ -822,6 +1206,15 @@ export function planSchedule(input) {
     .sort((a, b) => compareUrgency(b, a, ctx))
     .map((it) => ({ ...briefOf(it), plannedHours: round1(it.plannedMinutes / 60) }));
 
+  // FIX-S S2: class chapters whose deadline lands INSIDE a protected exam window
+  // cannot be finished before that exam — no new topics are allowed in there (the
+  // accepted H4 rule wins). They are named here and scheduled after the exam
+  // instead of being quietly treated as on time.
+  const dueInProtected = items
+    .filter((it) => it.track === 'class' && isDateStr(it.deadline) && protectedDates.has(it.deadline))
+    .sort((a, b) => compareUrgency(a, b, ctx))
+    .map(briefOf);
+
   const requiredMinutes = items.reduce((a, it) => a + it.plannedMinutes + it.remainingMinutes, 0);
   const plannedMinutes = items.reduce((a, it) => a + it.plannedMinutes, 0);
   const totalRequiredHours = Math.round(requiredMinutes / 60);
@@ -830,6 +1223,11 @@ export function planSchedule(input) {
   const overdueCount = items.filter((it) => it.overdue).length;
   const overloaded = unscheduled.length > 0 || partial.length > 0 || tooLate.length > 0 || requiredPerDay > dailyHours;
   const shortfallHours = Math.max(0, round1((requiredMinutes - plannedMinutes) / 60));
+  // FIX-S S2: the nearest exam run-up that overlaps this plan window (else null)
+  const horizonEnd = dateStr(horizon);
+  const nextRunUp = runUps
+    .filter((r) => r.start >= today && r.windowStart <= horizonEnd)
+    .sort((a, b) => (a.start < b.start ? -1 : 1))[0] || null;
 
   let coverageWarning = null;
   if (noCapacity) {
@@ -844,6 +1242,24 @@ export function planSchedule(input) {
   if (tooLate.length) {
     const late = `${tooLate.length} chapter(s) cannot be prepared before their exam/olympiad date — they stop at that date instead of being scheduled after it.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ${late}` : `⚠️ ${late}`;
+  }
+  // FIX-S S2: class chapters due INSIDE a protected exam window cannot be finished
+  // before that exam (no new topics are allowed in there). Say it plainly.
+  if (dueInProtected.length) {
+    const msg = `${dueInProtected.length} class chapter(s) are due inside the exam run-up window, where no new topics are allowed — they cannot be finished before that exam. Named in the summary, then scheduled after it.`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${msg}` : `⚠️ ${msg}`;
+  }
+  // FIX-S S4: the class session has a hard end. Work that no longer fits is named
+  // here — never quietly scheduled after the cutoff and never silently dropped.
+  const classUnplaced = [...unscheduled, ...partial].filter((u) => u.track === 'class');
+  if (classCutoffDays > 0 && classUnplaced.length) {
+    const cut = `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${cut}` : `⚠️ ${cut}`;
+  }
+  // FIX-S S3: ladder steps that did not fit inside the plan window are named too
+  if (pipeline.length) {
+    const pend = `${pipeline.length} conquered-chapter session(s) (chapter test / spaced revision) did not fit before this plan's horizon ends — extend the plan window to keep the ladder whole.`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${pend}` : `⚠️ ${pend}`;
   }
 
   const coverage = {
@@ -889,6 +1305,7 @@ export function planSchedule(input) {
     partial,
     tooLate,
     shortfallHours,
+    classDueInProtectedWindow: dueInProtected,
     completedExcluded: built.completedExcluded,
     completedItems: built.completedItems,
     excludedItems: built.excludedItems,
@@ -897,6 +1314,23 @@ export function planSchedule(input) {
     protectedBlocksSkipped,
     noCapacity,
     reasons,
+    // FIX-S fields (S1 rotation, S2 run-up, S3 ladder, S4 class cutoff)
+    classCutoff: cutoff,
+    classCutoffDaysBlocked: classCutoffDays,
+    classCutoffUnplaced: classUnplaced.length,
+    subjectRotation: rotation.order,
+    subjectRotationDetail: rotation.subjects,
+    examRunUp: nextRunUp,
+    pipeline: {
+      planned: pipelineTotal,
+      tests: pipelineEmitted.test,
+      revisions: pipelineEmitted.rev,
+      duplicatesSuppressed: pipelineSuppressed,
+      stoppedByCutoff: pipelineCutoffStopped,
+      stoppedByEventDate: pipelineEventStopped,
+      skippedDisabledTrack: pipelineSkippedTrack,
+      notEmitted: pipeline.length,
+    },
   };
 
   return { rows, coverage };
