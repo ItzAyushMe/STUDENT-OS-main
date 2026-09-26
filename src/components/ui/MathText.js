@@ -75,10 +75,16 @@ export function mathify(input) {
 }
 
 // Drop-in replacement for <Text> that mathifies the content first.
-export function MathText({ children, style, numberOfLines, ...rest }) {
+// FIX-G0: `value` is now an explicit, supported alias for the content.
+// Before this, a call site written as <MathText value={q.q} /> pushed `value`
+// into ...rest, where <Text> ignored it — so the question stem rendered EMPTY
+// (options bypass MathText, which is why only stems disappeared on screen).
+// Existing children-style consumers are untouched: children still wins.
+export function MathText({ children, value, style, numberOfLines, ...rest }) {
+  const content = children ?? value;
   return (
     <Text style={[{ fontFamily: fonts.body }, style]} numberOfLines={numberOfLines} {...rest}>
-      {mathify(children)}
+      {mathify(content)}
     </Text>
   );
 }
