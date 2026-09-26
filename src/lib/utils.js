@@ -23,9 +23,41 @@ export function uuid() {
 // localDateOf(v) = the LOCAL calendar date (YYYY-MM-DD) of any ISO/Date value.
 export const localDateOf = (v) => (v ? dayjs(v).format('YYYY-MM-DD') : '');
 
-export const todayStr = () => dayjs().format('YYYY-MM-DD');
+// FIX-F4: dev date offset — stored in AsyncStorage sos.dev.dateOffsetDays, applied to todayStr
+// Everything uses real clock + offset, so rollover/Arena/gym/xpOnce all shift together
+let _devOffsetDays = 0;
+let _devOffsetLoaded = false;
+
+export function setDevDateOffset(days) {
+  _devOffsetDays = Number(days) || 0;
+  _devOffsetLoaded = true;
+}
+
+export function getDevDateOffset() {
+  return _devOffsetDays;
+}
+
+export async function loadDevDateOffset() {
+  try {
+    const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+    const raw = await AsyncStorage.getItem('sos.dev.dateOffsetDays');
+    const n = raw != null ? parseInt(raw, 10) : 0;
+    _devOffsetDays = Number.isFinite(n) ? n : 0;
+    _devOffsetLoaded = true;
+  } catch {
+    _devOffsetDays = 0;
+    _devOffsetLoaded = true;
+  }
+  return _devOffsetDays;
+}
+
+export const todayStr = () => {
+  if (_devOffsetDays === 0) return dayjs().format('YYYY-MM-DD');
+  return dayjs().add(_devOffsetDays, 'day').format('YYYY-MM-DD');
+};
 export const dateStr = (d) => dayjs(d).format('YYYY-MM-DD');
 export const nowIso = () => new Date().toISOString();
+
 
 export function daysBetween(a, b) {
   return dayjs(b).startOf('day').diff(dayjs(a).startOf('day'), 'day');

@@ -30,11 +30,14 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CACHE_TTL = 30 * 60 * 1000;
 const RUNTIME_KEY = 'sos.ai.runtime';
 
-// NEW X R4: Fallback chains verified 20 Sep 2026 against official deprecations
-// Gemini: lead with floating alias gemini-flash-latest (cannot go stale), fallbacks 3.5-flash and 3.1-flash-lite GA
-// Groq: verified deprecations page — llama-3.3-70b-versatile and llama-3.1-8b-instant shut down 16 Aug 2026, removed
+// FIX-F9 + R4: Fallback chains verified
+// 2026-09-20: Gemini lead gemini-flash-latest -> 3.5-flash -> 3.1-flash-lite GA (docs.cloud.google.com model-versions, 2026-09-18)
+// 2026-09-21: Groq verified via https://console.groq.com/docs/models — Production: openai/gpt-oss-120b (500 tps), openai/gpt-oss-20b (1000 tps) — both verified active today
+//             Preview: qwen/qwen3.8-27b (450 tps) present, but qwen/qwen3.6-27b ABSENT (404 observed in PO logs, not listed in current docs) — REMOVED per FIX-F9
+//             llama-3.3-70b-versatile and llama-3.1-8b-instant are Enterprise only (contact sales) per same page, removed earlier in R4
+//             Chain now only verified production models to avoid 404s
 const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
-const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'];
+const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']; // FIX-F9: qwen/qwen3.6-27b removed (404), verified 2026-09-21 via console.groq.com/docs/models
 
 // ---------- runtime config (Settings screen overrides env) ----------
 let runtime = {

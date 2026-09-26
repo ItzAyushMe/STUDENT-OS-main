@@ -82,7 +82,13 @@ export const authService = {
       const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) throw new Error(error.message);
       const user = data?.user;
-      if (!user) throw new Error('Check your inbox and confirm your email, then sign in.');
+      const sess = data?.session;
+      // FIX-F3: no session = email confirmation required — do NOT create local session, do NOT insert users row (RLS 42501)
+      if (!user) throw new Error('Please verify your email first, then login — profile will be created after login ✅');
+      if (!sess) {
+        // No session yet — email verification pending. Do NOT write SESSION_KEY, do NOT attempt users insert.
+        throw new Error('Please verify your email first, then login — profile will be created after login ✅');
+      }
       const session = { userId: user.id, email, mode: 'supabase' };
       await writeJson(SESSION_KEY, session);
       return { session, username };

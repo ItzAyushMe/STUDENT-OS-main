@@ -21,6 +21,7 @@ import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
 import { infoAlert } from '../../lib/alert';
 import { GYM_PLANS, GYM_SPLITS, MUSCLE_GROUPS, EXERCISE_LIBRARY } from '../../config/constants';
+import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce';
 import { getWeeklyGymSplit, normalizeGymSplit, gymSplitBadgeText, todayWorkout, getExercisesForGroups, normalizeGymSplitV2, getSplitDefinition } from '../../lib/gymSplit';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, fmtDate } from '../../lib/utils';
@@ -133,9 +134,12 @@ export function GymScreen({ navigation }) {
     return getExercisesForGroups(groups, libMode);
   }, [effectiveToday, mode, gymSplit]);
 
+  // FIX-F1: gym XP farm guard — once per day via xpOnce, logging independent of XP
   const finishWorkout = async () => {
     if (saving) return;
     setSaving(true);
+    let alreadyEarned = false;
+    let earnedToday = false;
     try {
       const exercises = Object.entries(entries)
         .filter(([, v]) => v.sets || v.reps || v.weight)
@@ -150,16 +154,40 @@ export function GymScreen({ navigation }) {
         return;
       }
       const dayLabel = mode === 'split' && effectiveToday ? effectiveToday.label : GYM_PLANS[planKey].name;
-      await db.insert('workout_logs', {
-        user_id: profile.id,
-        date: todayStr(),
-        plan_name: dayLabel,
-        exercises,
-        xp_earned: 30,
-        created_at: nowIso(),
-      });
-      const xpRes = await awardXP('WORKOUT');
-      if (xpRes) setConfetti(Date.now());
+      // FIX-F1: check daily guard before XP, but log always
+      try {
+        alreadyEarned = await hasEarnedToday(profile.id, 'workout');
+      } catch { alreadyEarned = false; }
+      const xpToLog = alreadyEarned ? 0 : 30;
+      // Log workout FIRST — independent of XP success (F7 independence pattern)
+      try {
+        await db.insert('workout_logs', {
+          user_id: profile.id,
+          date: todayStr(),
+          plan_name: dayLabel,
+          exercises,
+          xp_earned: xpToLog,
+          created_at: nowIso(),
+        });
+      } catch (logErr) {
+        infoAlert('Workout save fail hua', logErr?.message || 'Workout log nahi ho paya — dobara try karo');
+        return;
+      }
+      // Then XP with guard
+      if (!alreadyEarned) {
+        try {
+          const xpRes = await awardXP('WORKOUT');
+          if (xpRes) {
+            setConfetti(Date.now());
+            earnedToday = true;
+            await markEarnedToday(profile.id, 'workout');
+          }
+        } catch (xpErr) {
+          console.warn('[F1] workout XP failed', xpErr?.message);
+        }
+      } else {
+        infoAlert('Aaj ka gym XP le liya 💪', 'Workout logged, 0 XP — daily cap reached. Kal phir +30 milega!');
+      }
       setEntries({});
       await load();
     } catch (e) {
@@ -342,6 +370,15 @@ export function GymScreen({ navigation }) {
                 </Text>
               </Card>
               <Card mode="light" style={{ marginBottom: 14, padded: false }} padded={false}>
+                {/* FIX-F2: split mode list header — same as Classic */}
+                {!narrow ? (
+                  <View style={{ flexDirection: 'row', paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8 }}>
+                    <Text style={[styles.colHead, { flex: 1.8 }]}>Exercise</Text>
+                    <Text style={[styles.colHead, { flex: 0.6 }]}>Sets</Text>
+                    <Text style={[styles.colHead, { flex: 0.6 }]}>Reps</Text>
+                    <Text style={[styles.colHead, { flex: 0.6 }]}>Wt(kg)</Text>
+                  </View>
+                ) : null}
                 {todayExercises.map((ex) => (
                   <ExerciseRow
                     key={ex.name}

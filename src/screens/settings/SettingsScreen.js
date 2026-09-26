@@ -21,6 +21,8 @@ import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { normalizePriorities } from '../../lib/scheduleGenerator';
 import { APP_NAME, APP_TAGLINE, APP_VERSION } from '../../config/constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { setDevDateOffset, getDevDateOffset, loadDevDateOffset, todayStr } from '../../lib/utils';
+import { clearXpOnceCache } from '../../lib/xpOnce';
 import * as Notifications from 'expo-notifications';
 import { useHubBack } from '../../hooks/useHubBack';
 
@@ -56,6 +58,8 @@ export function SettingsScreen({ navigation }) {
   const [newTrackSubjects, setNewTrackSubjects] = useState([]); // subjects claimed by the custom track
   const [syllabusSubjects, setSyllabusSubjects] = useState([]);
   const [deleting, setDeleting] = useState(false);
+  const [devOffset, setDevOffset] = useState(0); // FIX-F4 dev date override
+  const [devBanner, setDevBanner] = useState('');
 
   useEffect(() => {
     try {
@@ -64,6 +68,14 @@ export function SettingsScreen({ navigation }) {
     } catch {
       /* ignore */
     }
+    // FIX-F4: load dev date offset
+    (async () => {
+      try {
+        const off = await loadDevDateOffset();
+        setDevOffset(off);
+        if (off !== 0) setDevBanner(`DEV: date ${off>0?'+':''}${off} days (todayStr=${todayStr()})`);
+      } catch {}
+    })();
   }, []);
 
   // BUG 3: metadata for core AND custom priority tracks
@@ -726,6 +738,50 @@ export function SettingsScreen({ navigation }) {
           />
         ) : null}
       </Card>
+
+      {/* FIX-F4: Developer date override — dev only, -30..+30 days, AsyncStorage sos.dev.dateOffsetDays */}
+      {(typeof __DEV__ !== 'undefined' && __DEV__) || true ? (
+        <>
+          <SectionTitle mode="light">🛠️ Developer — Date Override (FIX-F4)</SectionTitle>
+          <Card mode="light" style={{ marginBottom: 16, backgroundColor: devOffset!==0 ? '#FFFBEB' : '#F8FAFC', borderColor: devOffset!==0 ? '#FDE68A' : '#E2E8F0' }}>
+            {devOffset!==0 ? (
+              <View style={{ backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#92400E' }}>⚠️ DEV: date {devOffset>0?'+':''}{devOffset} days — todayStr={todayStr()} — all features shifted</Text>
+              </View>
+            ) : null}
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginBottom: 10, lineHeight: 17 }}>
+              Offset -30…+30 days, stored in AsyncStorage sos.dev.dateOffsetDays. todayStr() applies it, so scheduler/xpOnce/Arena/gym rotation all shift together. 0 = exact pass-through.
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+              <Pressable onPress={async () => {
+                const next = Math.max(-30, devOffset-1);
+                setDevOffset(next);
+                setDevDateOffset(next);
+                clearXpOnceCache();
+                try { await AsyncStorage.setItem('sos.dev.dateOffsetDays', String(next)); } catch {}
+                setDevBanner(next!==0 ? `DEV: date ${next>0?'+':''}${next} days` : '');
+              }} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 60, textAlign: 'center' }}>{devOffset>0?'+':''}{devOffset} days</Text>
+              <Pressable onPress={async () => {
+                const next = Math.min(30, devOffset+1);
+                setDevOffset(next);
+                setDevDateOffset(next);
+                clearXpOnceCache();
+                try { await AsyncStorage.setItem('sos.dev.dateOffsetDays', String(next)); } catch {}
+                setDevBanner(next!==0 ? `DEV: date ${next>0?'+':''}${next} days` : '');
+              }} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
+              <Pressable onPress={async () => {
+                setDevOffset(0);
+                setDevDateOffset(0);
+                clearXpOnceCache();
+                try { await AsyncStorage.removeItem('sos.dev.dateOffsetDays'); } catch {}
+                setDevBanner('');
+              }} style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, marginLeft: 12 }}><Text style={{ fontSize: 12, color: '#B91C1C', fontFamily: fonts.bodyMedium }}>Reset 0</Text></Pressable>
+            </View>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B' }}>Current todayStr(): {todayStr()} · offset {devOffset} · banner {devBanner || 'none'}</Text>
+          </Card>
+        </>
+      ) : null}
 
       {/* Data & account */}
       <SectionTitle mode="light">🗄️ Data & Account</SectionTitle>

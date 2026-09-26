@@ -20,6 +20,79 @@ import { nowIso, uuid } from './utils';
 
 export const isRemote = () => isSupabaseConfigured;
 
+// ---------- FIX-F5: identity safety — authenticated session is authoritative ----------
+// Client correctness is fix path, never DB rules. Never rewrite user_id to force RLS.
+// Guard: before any cloud write, get session.user.id, compare with profile.id / row user_id.
+// If mismatch -> reload profile belonging to session.user.id, only continue if state matches.
+// If no session -> no write + friendly message. On auth/token failure -> refresh once, retry once.
+let _currentUserId = null;
+let _reloadProfileCb = null;
+let _cachedSessionUid = null;
+let _cachedAt = 0;
+
+export function setCurrentUserId(id) { _currentUserId = id; }
+export function setReloadProfileCallback(cb) { _reloadProfileCb = cb; }
+
+async function getSessionUid() {
+  const now = Date.now();
+  if (_cachedSessionUid && now - _cachedAt < 2000) return _cachedSessionUid;
+  try {
+    if (!isRemote()) return null;
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    const uid = data?.session?.user?.id || null;
+    _cachedSessionUid = uid;
+    _cachedAt = now;
+    return uid;
+  } catch (e) {
+    // FIX-F5: on auth/token failure -> refresh once
+    try {
+      const { data } = await supabase.auth.refreshSession();
+      const uid = data?.session?.user?.id || data?.user?.id || null;
+      _cachedSessionUid = uid;
+      _cachedAt = Date.now();
+      return uid;
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function ensureIdentity(table, rowOrId, rowUserId) {
+  if (!isRemote()) return; // local mode bypass
+  const sessionUid = await getSessionUid();
+  if (!sessionUid) {
+    throw new Error('Session expired — please login again');
+  }
+  // If currentUserId mismatch with session, reload profile
+  if (_currentUserId && _currentUserId !== sessionUid) {
+    if (typeof _reloadProfileCb === 'function') {
+      try { await _reloadProfileCb(); } catch {}
+      // after reload, check again
+      if (_currentUserId && _currentUserId !== sessionUid) {
+        throw new Error('Session mismatch — reloading profile, please try again');
+      }
+    } else {
+      throw new Error('Session mismatch — profile id does not match session, please re-login');
+    }
+  }
+  // For users table, id must equal sessionUid
+  if (table === 'users') {
+    const idToCheck = typeof rowOrId === 'string' ? rowOrId : rowOrId?.id;
+    if (idToCheck && idToCheck !== sessionUid) {
+      throw new Error('Session mismatch — users.id must equal session uid, not stale profile id');
+    }
+  }
+  // For tables with user_id, must equal sessionUid
+  if (rowUserId && rowUserId !== sessionUid) {
+    throw new Error('Session mismatch — user_id does not match session uid, reloading profile');
+  }
+  if (rowOrId && typeof rowOrId === 'object' && rowOrId.user_id && rowOrId.user_id !== sessionUid) {
+    throw new Error('Session mismatch — row.user_id does not match session uid');
+  }
+}
+
+
 // ---------------- local store ----------------
 const KEY = (table) => `sos.db.${table}`;
 
@@ -176,6 +249,7 @@ export const db = {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
       try {
+        await ensureIdentity(table, full, full.user_id);
         const { data, error } = await supabase.from(table).insert(full).select().single();
         if (error) throw error;
         return data;
@@ -238,6 +312,7 @@ export const db = {
     const full = { ...patch, updated_at: nowIso() };
     if (isRemote()) {
       try {
+        await ensureIdentity(table, id, patch.user_id || null);
         const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
         if (error) throw error;
         return data;
@@ -268,6 +343,7 @@ export const db = {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
       try {
+        await ensureIdentity(table, full, full.user_id);
         const { data, error } = await supabase.from(table).upsert(full).select().single();
         if (error) throw error;
         return data;
@@ -307,6 +383,10 @@ export const db = {
 
   async removeWhere(table, eq) {
     if (isRemote()) {
+      // FIX-F5: if eq contains user_id, ensure it matches session
+      if (eq && eq.user_id) {
+        await ensureIdentity(table, null, eq.user_id);
+      }
       let q = supabase.from(table).delete();
       for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
       const { error } = await q;

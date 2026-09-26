@@ -31,20 +31,25 @@ export function DeckScreen({ navigation, route }) {
   const [confetti, setConfetti] = useState(0);
   const flip = useRef(new Animated.Value(0)).current;
 
+  // FIX-F6: silent failure audit — add visible catch
   const load = useCallback(async () => {
     if (!profile?.id) return;
-    const rows = await db.list('flashcards', { eq: { user_id: profile.id, subject, topic } });
-    // due cards first, then the rest
-    const now = new Date();
-    rows.sort((a, b) => {
-      const aDue = !a.next_review || new Date(a.next_review) <= now ? 0 : 1;
-      const bDue = !b.next_review || new Date(b.next_review) <= now ? 0 : 1;
-      return aDue - bDue;
-    });
-    setCards(rows);
-    setIdx(0);
-    setDone(false);
-    setReviewed(0);
+    try {
+      const rows = await db.list('flashcards', { eq: { user_id: profile.id, subject, topic } });
+      const now = new Date();
+      rows.sort((a, b) => {
+        const aDue = !a.next_review || new Date(a.next_review) <= now ? 0 : 1;
+        const bDue = !b.next_review || new Date(b.next_review) <= now ? 0 : 1;
+        return aDue - bDue;
+      });
+      setCards(rows);
+      setIdx(0);
+      setDone(false);
+      setReviewed(0);
+    } catch (e) {
+      console.warn('[F6] Deck load failed', e?.message);
+      infoAlert('Deck load fail hua', e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Flashcards load nahi ho paye — dobara try karo');
+    }
   }, [profile?.id, subject, topic]);
 
   const onBack = useHubBack(navigation, 'StudyHub');

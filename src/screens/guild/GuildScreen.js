@@ -171,11 +171,11 @@ export function GuildScreen({ navigation }) {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // accept / decline incoming requests — v1.0.6 J: RLS allows friend_id to update
+  // FIX-F6 + FIX-F5: respondRequest with identity guard and visible error
   const respondRequest = async (row, accept) => {
     try {
       if (accept) {
         await db.update('friends', row.id, { status: 'accepted' });
-        // mirror friendship so it appears in MY list too
         const existingMirror = await db.list('friends', { eq: { user_id: profile.id, friend_id: row.user_id } });
         if (!existingMirror.length) {
           await db.insert('friends', {
@@ -191,10 +191,18 @@ export function GuildScreen({ navigation }) {
       }
       await load();
     } catch (e) {
-      setAddMsg(e?.message || 'Request update nahi ho paya.');
+      console.warn('[F6] respondRequest failed', e?.message);
+      if (String(e?.message||'').includes('Session expired')) {
+        setAddMsg('Session expired — please login again');
+      } else if (String(e?.message||'').includes('42501')) {
+        setAddMsg('Request update failed — permission error, please re-login');
+      } else {
+        setAddMsg(e?.message || 'Request update nahi ho paya.');
+      }
     }
   };
 
+  // FIX-F6: silent failure audit — addFriend had no try/catch, UI unresponsive on RLS 42501
   const addFriend = async () => {
     const uname = addUsername.trim().replace(/^@/, '');
     if (!uname) return;
@@ -203,47 +211,60 @@ export function GuildScreen({ navigation }) {
       setAddMsg('Khud ko add karke kya milega yaar 😄');
       return;
     }
-    if (isRemote()) {
-      const found = await db.list('users', { eq: { username: uname } });
-      if (!found.length) {
-        setAddMsg('No player with that username. Spelling check karo!');
-        return;
+    try {
+      if (isRemote()) {
+        const found = await db.list('users', { eq: { username: uname } });
+        if (!found.length) {
+          setAddMsg('No player with that username. Spelling check karo!');
+          return;
+        }
+        const already = await db.list('friends', { eq: { user_id: profile.id, friend_id: found[0].id } });
+        if (already.length) {
+          setAddMsg('Already friends / request pending hai.');
+          return;
+        }
+        const reverse = await db.list('friends', { eq: { user_id: found[0].id, friend_id: profile.id } });
+        if (reverse.length && reverse[0].status === 'pending') {
+          setAddMsg('Unhone already request bheja hai — incoming requests check karo! 📨');
+          return;
+        }
+        await db.insert('friends', {
+          user_id: profile.id,
+          friend_id: found[0].id,
+          friend_name: found[0].display_name || found[0].username,
+          status: 'pending',
+          created_at: nowIso(),
+        });
+        setAddMsg('Request bhej di! Accept hone tak thoda patience 😄');
+      } else {
+        if (friends.some((f) => (f.friend?.username || '').toLowerCase() === uname.toLowerCase())) {
+          setAddMsg('Already in your guild!');
+          return;
+        }
+        await db.insert('friends', {
+          user_id: profile.id,
+          friend_id: `local-${uname}`,
+          friend_name: uname,
+          status: 'accepted',
+          created_at: nowIso(),
+        });
+        setAddMsg(`${uname} added to your guild! 🎉`);
       }
-      const already = await db.list('friends', { eq: { user_id: profile.id, friend_id: found[0].id } });
-      if (already.length) {
-        setAddMsg('Already friends / request pending hai.');
-        return;
+      setAddUsername('');
+      await load();
+    } catch (e) {
+      console.warn('[F6] addFriend failed', e?.message);
+      // Friendly visible message, DB detail only in console
+      if (String(e?.message||'').includes('Session expired')) {
+        setAddMsg('Session expired — please login again');
+      } else if (String(e?.message||'').includes('Session mismatch')) {
+        setAddMsg('Session mismatch — reloading profile, please try again');
+      } else if (String(e?.message||'').includes('42501') || String(e?.message||'').toLowerCase().includes('permission')) {
+        setAddMsg('Friend request failed — permission error (RLS). Please re-login and try again.');
+      } else {
+        setAddMsg(e?.message || 'Friend request nahi ho paya — dobara try karo');
       }
-      // check if they already sent me a request
-      const reverse = await db.list('friends', { eq: { user_id: found[0].id, friend_id: profile.id } });
-      if (reverse.length && reverse[0].status === 'pending') {
-        setAddMsg('Unhone already request bheja hai — incoming requests check karo! 📨');
-        return;
-      }
-      await db.insert('friends', {
-        user_id: profile.id,
-        friend_id: found[0].id,
-        friend_name: found[0].display_name || found[0].username,
-        status: 'pending',
-        created_at: nowIso(),
-      });
-      setAddMsg('Request bhej di! Accept hone tak thoda patience 😄');
-    } else {
-      if (friends.some((f) => (f.friend?.username || '').toLowerCase() === uname.toLowerCase())) {
-        setAddMsg('Already in your guild!');
-        return;
-      }
-      await db.insert('friends', {
-        user_id: profile.id,
-        friend_id: `local-${uname}`,
-        friend_name: uname,
-        status: 'accepted',
-        created_at: nowIso(),
-      });
-      setAddMsg(`${uname} added to your guild! 🎉`);
     }
-    setAddUsername('');
-    await load();
   };
 
   const cheer = (item) => {

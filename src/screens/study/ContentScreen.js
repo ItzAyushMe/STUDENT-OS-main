@@ -57,30 +57,41 @@ export function ContentScreen({ navigation }) {
     return 'link';
   };
 
+  // FIX-F6: silent failure audit — add/remove had no visible catch
   const add = async () => {
     if (!form.title.trim()) return;
     const type = form.kind === 'link' ? detectType(form.body) : 'note';
-    await db.insert('content', {
-      user_id: profile.id,
-      title: form.title.trim(),
-      type,
-      url: form.kind === 'link' ? normalizeUrl(form.body.trim()) : null,
-      text: form.kind === 'note' ? form.body.trim() : null,
-      subject: form.subject.trim() || null,
-      topic: null,
-      ai_summary: null,
-      file_size: null,
-      created_at: nowIso(),
-    });
-    await awardXP('NOTE_CREATE');
-    setForm({ kind: 'note', title: '', body: '', subject: '' });
-    setAddOpen(false);
-    await load();
+    try {
+      await db.insert('content', {
+        user_id: profile.id,
+        title: form.title.trim(),
+        type,
+        url: form.kind === 'link' ? normalizeUrl(form.body.trim()) : null,
+        text: form.kind === 'note' ? form.body.trim() : null,
+        subject: form.subject.trim() || null,
+        topic: null,
+        ai_summary: null,
+        file_size: null,
+        created_at: nowIso(),
+      });
+      await awardXP('NOTE_CREATE');
+      setForm({ kind: 'note', title: '', body: '', subject: '' });
+      setAddOpen(false);
+      await load();
+    } catch (e) {
+      console.warn('[F6] Content add failed', e?.message);
+      setAiMsg(e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Content save fail hua — dobara try karo');
+    }
   };
 
   const remove = async (item) => {
-    await db.remove('content', item.id);
-    await load();
+    try {
+      await db.remove('content', item.id);
+      await load();
+    } catch (e) {
+      console.warn('[F6] Content remove failed', e?.message);
+      setAiMsg('Content delete nahi ho paya — dobara try karo');
+    }
   };
 
   const summarize = async (item) => {

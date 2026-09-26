@@ -101,10 +101,16 @@ export function TestBuilderScreen({ navigation }) {
   const [elapsed, setElapsed] = useState(0);
   const [stage, setStage] = useState('');
 
+  // FIX-F6: silent failure audit — load with visible error
   const load = useCallback(async () => {
     if (!profile?.id) return;
-    const data = await db.list('syllabus', { eq: { user_id: profile.id } });
-    setRows(data.filter((r) => r.status !== 'completed'));
+    try {
+      const data = await db.list('syllabus', { eq: { user_id: profile.id } });
+      setRows(data.filter((r) => r.status !== 'completed'));
+    } catch (e) {
+      console.warn('[F6] TestBuilder load failed', e?.message);
+      setError(e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Syllabus load nahi ho paya — dobara try karo');
+    }
   }, [profile?.id]);
 
   // NEW X R5: honest progress — elapsed seconds + stage
