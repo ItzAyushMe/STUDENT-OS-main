@@ -174,6 +174,16 @@ export const CLASS_GROUPS = [
 
 export const BOARDS = ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'];
 
+// FIX-S S4: the academic session's hard cutoff for NEW class-track content.
+// Indian school session = April → March, so '02-25' means 25 February of the
+// session's ENDING year (session 2026-27 stops taking new class chapters on
+// 2027-02-25). Olympiad / competitive-exam tracks are NOT bound by it — they run
+// to their own event dates. Exam-related class days (school-exam run-up, exam
+// days, pre-exam mocks, board buffer days) are still allowed through the range.
+// Stored as MM-DD so it survives leap years and is compared with the ONE date
+// system (todayStr / dayjs), never with a second calendar.
+export const CLASS_SESSION_END = '02-25';
+
 export const EXAMS = [
   'None', 'JEE Main', 'JEE Advanced', 'NEET', 'NTSE', 'KVPY / INSPIRE',
   'UPSC', 'CAT', 'GATE', 'CLAT', 'CUET', 'Other',
