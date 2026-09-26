@@ -34,6 +34,9 @@ export function BattleScreen({ navigation }) {
   const [opponent, setOpponent] = useState(null);
   const [friends, setFriends] = useState([]);
   const [battleId, setBattleId] = useState(null);
+  // FIX-G6: XP the ledger actually awarded (0 on a capped day). The result line
+  // used to print a hardcoded 25/85 regardless of the cap or a failed award.
+  const [xpAwarded, setXpAwarded] = useState(0);
   const [questions, setQuestions] = useState([]);
   const [qSource, setQSource] = useState('bank'); // 'ai' | 'bank'
   const [prepping, setPrepping] = useState(false);
@@ -94,6 +97,7 @@ export function BattleScreen({ navigation }) {
       setCorrect(0);
       setTimeLeft(PER_Q_SECONDS);
       setTotalTime(0);
+      setXpAwarded(0);   // FIX-G6: never show the previous battle's XP
     };
 
     // instant bank fallback first, then try AI (short prep phase)
@@ -153,17 +157,25 @@ export function BattleScreen({ navigation }) {
     const xpForWin = battleAlreadyEarned ? 0 : (won ? 60 : 0);
     // XP and persistence independent — result save in its own try/catch (fail -> banner, XP secured)
     // Order: guard -> XP -> save (per spec sequence diagram guard -> XP -> save)
+    // FIX-G6: awardedXp is the sum of what the ledger REALLY granted
+    // (awardXP returns { gained } or null on failure / zero-gain).
+    let awardedXp = 0;
     if (!battleAlreadyEarned) {
       try {
         const res = await awardXP('BATTLE_COMPLETE', { amount: xpForBattle, label: 'Battle fought' });
+        awardedXp += Number(res?.gained) || 0;
         if (res) await markEarnedToday(profile.id, 'battle');
-        if (won && xpForWin) await awardXP('BATTLE_WIN');
+        if (won && xpForWin) {
+          const winRes = await awardXP('BATTLE_WIN');
+          awardedXp += Number(winRes?.gained) || 0;
+        }
       } catch (e) {
         console.warn('[F7] battle XP failed', e?.message);
       }
     } else {
       setSaveMsg('Aaj ka battle XP le liya ⚔️ — 0 XP, game still counts');
     }
+    setXpAwarded(awardedXp);
     try {
       await db.insert('quiz_results', {
         user_id: profile.id,
@@ -174,7 +186,7 @@ export function BattleScreen({ navigation }) {
         correct_answers: correct,
         accuracy: Math.round((correct / questions.length) * 100),
         time_taken: totalTime,
-        xp_earned: xpForBattle + xpForWin,
+        xp_earned: awardedXp,
         weak_topics: [],
         created_at: nowIso(),
       });
@@ -323,8 +335,13 @@ export function BattleScreen({ navigation }) {
               <ScoreSide name={opponent.name} emoji={opponent.emoji} score={rivalScore} />
             </View>
             <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: GAMER.subtext, marginTop: 16 }}>
-              {fmtClock(totalTime)} total · +{25 + (correct > rivalScore ? 60 : 0)} XP earned
+              {fmtClock(totalTime)} total · +{xpAwarded} XP earned
             </Text>
+            {xpAwarded === 0 ? (
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginTop: 4, textAlign: 'center', lineHeight: 16 }}>
+                Aaj ka battle XP cap ho gaya — 0 XP, par game, accuracy aur streak count hote hain.
+              </Text>
+            ) : null}
             <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: GAMER.accent, marginTop: 8, textAlign: 'center', lineHeight: 18 }}>
               {correct > rivalScore
                 ? 'Shaabaash! Winner XP bank ho gaya. Rematch?'

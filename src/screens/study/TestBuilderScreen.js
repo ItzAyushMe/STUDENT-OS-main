@@ -17,6 +17,8 @@ import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { Input } from '../../components/ui/Input';
 import { Loading } from '../../components/ui/EmptyState';
 import { MathText } from '../../components/ui/MathText';
+// FIX-G: stem resolution + bullet/bold answer rendering (pure, unit-tested)
+import { stemOf, toBullets, parseBoldSegments } from '../../lib/testGenKit';
 import { db } from '../../lib/db';
 import { useHubBack } from '../../hooks/useHubBack';
 import { aiGenerateTest, aiGenerateQuestionBank, aiGenerateMindMap, AIUnavailableError } from '../../lib/aiFeatures';
@@ -37,6 +39,37 @@ function getAnswerDisplay(q) {
   if (q?.answer_text) return q.answer_text;
   if (Array.isArray(q?.options) && typeof q?.answer === 'number' && q.options[q.answer]) return q.options[q.answer];
   return q?.answer ?? '—';
+}
+
+// FIX-G3: model answers now arrive as bullet points with **bold** keywords.
+// Printed/shared exports must show PLAIN text (no literal asterisks).
+function plainAnswerText(q) {
+  const bullets = toBullets(String(getAnswerDisplay(q) ?? '—'));
+  return bullets.map((b) => String(b).replace(/\*\*/g, '').trim()).filter(Boolean).join(' • ') || '—';
+}
+
+// FIX-G3: on-screen answer = real bullets + real bold segments.
+function AnswerText({ q, why, showWhy = true }) {
+  const bullets = toBullets(String(getAnswerDisplay(q) ?? '—'));
+  return (
+    <View style={{ marginTop: 3 }}>
+      {bullets.map((line, i) => (
+        <Text key={i} style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', lineHeight: 16 }}>
+          {bullets.length > 1 ? '• ' : ''}
+          {parseBoldSegments(line).map((seg, si) => (
+            <Text key={si} style={seg.bold ? { fontFamily: fonts.bodySemiBold, fontWeight: '700' } : undefined}>
+              {seg.text}
+            </Text>
+          ))}
+        </Text>
+      ))}
+      {showWhy && why ? (
+        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+          Why: {String(why)}
+        </Text>
+      ) : null}
+    </View>
+  );
 }
 
 function printHtml(title, bodyHtml) {
@@ -191,7 +224,7 @@ export function TestBuilderScreen({ navigation }) {
 
   // ---------- exports ----------
   const qHtml = (q, i) => `
-    <div class="q"><b>Q${i}.</b> ${escapeHtml(q.q)}
+    <div class="q"><b>Q${i}.</b> ${escapeHtml(stemOf(q))}
       ${q.options?.length ? `<div class="opts">${q.options.map((o, j) => `<div>(${String.fromCharCode(97 + j)}) ${escapeHtml(o)}</div>`).join('')}</div>` : ''}
     </div>`;
 
@@ -205,7 +238,7 @@ export function TestBuilderScreen({ navigation }) {
           <h3>${escapeHtml((sec.label && String(sec.label).trim()) ? sec.label : (sec.type || 'Section'))}</h3>
           ${(sec.questions || []).map((q, i) => qHtml(q, i + 1)).join('')}`).join('')}
         <div class="ans"><b>Answer Key — Set ${escapeHtml(s.set)}</b>
-          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(getAnswerDisplay(q) ?? '—')}</div>`).join('')}
+          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(plainAnswerText(q))}</div>`).join('')}
         </div>
       </div>`).join('');
     printHtml('StudentOS Test', body);
@@ -219,7 +252,7 @@ export function TestBuilderScreen({ navigation }) {
       <h2>Questions</h2>
       ${r.questions.map((q, i) => qHtml(q, i + 1)).join('')}
       <div class="ans"><b>Answers</b>
-        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(getAnswerDisplay(q) ?? '—')}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
+        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(plainAnswerText(q))}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
       </div>`;
     printHtml('StudentOS Question Bank', body);
   };
@@ -253,11 +286,11 @@ export function TestBuilderScreen({ navigation }) {
         lines.push(`--- SET ${s.set} ---`);
         (s.sections || []).forEach((sec) => {
           lines.push(sec.label || sec.type);
-          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}${q.answer != null ? `\n   Ans: ${getAnswerDisplay(q)}` : ''}`));
+          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${stemOf(q)}${q.answer != null ? `\n   Ans: ${plainAnswerText(q)}` : ''}`));
         });
       });
     } else if (result.kind === 'bank') {
-      result.data.questions.forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}\n   Ans: ${q.answer}`));
+      result.data.questions.forEach((q, i) => lines.push(`Q${i + 1}. ${stemOf(q)}\n   Ans: ${plainAnswerText(q)}`));
     } else {
       const walk = (n, d) => { lines.push(`${'  '.repeat(d)}• ${n.label}`); (n.children || []).forEach((c) => walk(c, d + 1)); };
       result.data.chapters.forEach((c) => { lines.push(`\n== ${c.chapter} ==`); walk(c.root, 0); });
@@ -417,6 +450,11 @@ export function TestBuilderScreen({ navigation }) {
               <Chip key={s} label={`Set ${s}`} mode="light" selected={setTab === s} onPress={() => setSetTab(s)} />
             ))}
           </View>
+          {result.data._skipped > 0 ? (
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#B45309', marginBottom: 8 }}>
+              ⚠️ {result.data._skipped} malformed questions skipped (empty stem) — dobara generate karo.
+            </Text>
+          ) : null}
           {(result.data.sets.find((s) => s.set === setTab)?.sections || []).map((sec, si) => (
             <View key={si} style={{ marginBottom: 12 }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#6D28D9', marginBottom: 6 }}>
@@ -425,7 +463,7 @@ export function TestBuilderScreen({ navigation }) {
               {(sec.questions || []).map((q, qi) => (
                 <View key={qi} style={{ marginBottom: 8 }}>
                   <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', lineHeight: 18 }}>
-                    Q{qi + 1}. <MathText value={q.q} />
+                    Q{qi + 1}. <MathText>{stemOf(q)}</MathText>
                   </Text>
                   {q.options?.length ? (
                     <View style={{ marginLeft: 14, marginTop: 3 }}>
@@ -436,11 +474,7 @@ export function TestBuilderScreen({ navigation }) {
                       ))}
                     </View>
                   ) : null}
-                  {showAnswers ? (
-                    <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 3 }}>
-                      Ans: {String(getAnswerDisplay(q) ?? '—')}
-                    </Text>
-                  ) : null}
+                  {showAnswers ? <AnswerText q={q} /> : null}
                 </View>
               ))}
             </View>
@@ -464,13 +498,18 @@ export function TestBuilderScreen({ navigation }) {
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
             </View>
           ) : null}
+          {result.data._skipped > 0 ? (
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#B45309', marginBottom: 8 }}>
+              ⚠️ {result.data._skipped} malformed questions skipped (empty stem) — dobara generate karo.
+            </Text>
+          ) : null}
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginBottom: 10 }}>
             Question Bank — {result.data.questions.length} questions{result.data._partial ? ' (partial)' : ''}
           </Text>
           {result.data.questions.map((q, qi) => (
             <View key={qi} style={{ marginBottom: 9 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', lineHeight: 18 }}>
-                Q{qi + 1} [{String(q.type || 'q').toUpperCase()}]. <MathText value={q.q} />
+                Q{qi + 1} [{String(q.type || 'q').toUpperCase()}]. <MathText>{stemOf(q)}</MathText>
               </Text>
               {q.options?.length ? (
                 <View style={{ marginLeft: 14, marginTop: 2 }}>
@@ -481,9 +520,7 @@ export function TestBuilderScreen({ navigation }) {
                   ))}
                 </View>
               ) : null}
-              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 2 }}>
-                Ans: {String(getAnswerDisplay(q) ?? '—')}{q.why ? ` — ${q.why}` : ''}
-              </Text>
+              <AnswerText q={q} why={q.why} />
             </View>
           ))}
           {result.data.weakSpots ? (
@@ -503,6 +540,11 @@ export function TestBuilderScreen({ navigation }) {
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginBottom: 10 }}>
             Mind Maps — {result.data.chapters.length} chapter{result.data.chapters.length > 1 ? 's' : ''}
           </Text>
+          {result.data._banner ? (
+            <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
+            </View>
+          ) : null}
           {result.data.chapters.map((c, ci) => (
             <View key={ci} style={{ marginBottom: 14 }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#6D28D9', marginBottom: 6 }}>

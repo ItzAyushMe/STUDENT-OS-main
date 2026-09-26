@@ -1,5 +1,7 @@
 
 // NEW X R5: pure test question normalizer — no react-native deps
+// FIX-G2: difficulty tag is validated/clamped to 1-3 by the shared pure kit
+import { clampDifficultyTag } from './testGenKit.js';
 function resolveAnswerIndex(q) {
   const options = Array.isArray(q.options) ? q.options.map(String) : [];
   const at = String(q.answer_text ?? q.answerText ?? q.answer ?? '').trim();
@@ -42,7 +44,7 @@ function resolveAnswerIndexStrict({ answer, options }) {
   return null;
 }
 
-export function normalizeTestQuestion(q, fallbackType = 'saq') {
+export function normalizeTestQuestion(q, fallbackType = 'saq', difficultyDefault = 2) {
   if (!q) return null;
   if (typeof q === 'string') {
     const txt = q.trim();
@@ -58,6 +60,7 @@ export function normalizeTestQuestion(q, fallbackType = 'saq') {
       marks: ft.includes('vsaq') ? 2 : ft.includes('saq') ? 3 : ft.includes('laq') ? 5 : 1,
       type: ft,
       topic: '',
+      difficulty: clampDifficultyTag(null, difficultyDefault),
     };
   }
   const qText = q.q || q.question || q.text || q.prompt || q.title || '';
@@ -128,6 +131,8 @@ export function normalizeTestQuestion(q, fallbackType = 'saq') {
     marks: q.marks || (finalType.includes('vsaq') ? 2 : finalType.includes('saq') ? 3 : finalType.includes('laq') ? 5 : 1),
     type: finalType,
     topic: q.topic || '',
+    // FIX-G2: per-question difficulty tag, validated 1-3 (never NaN, never 0/5)
+    difficulty: clampDifficultyTag(q.difficulty, difficultyDefault),
   };
 }
 

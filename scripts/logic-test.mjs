@@ -645,9 +645,19 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
 {
   // Batching and difficulty bands existence checks
+  // FIX-G1 SUPERSEDES two assertions that used to live here:
+  //   'BATCH_SIZE ... 20' and 'MAX_BATCHES ... 6'.
+  // 20-question batches were the source of the Groq 413 failures, and a hard
+  // 6-batch cap could never fill a 100-question bank (6 x 20 = 120 at best, but
+  // under-delivery meant it always gave up short). The loop is still BOUNDED —
+  // the cap just derives from the requested total instead of being a constant.
   const src = read('src/lib/aiFeatures.js');
-  assert.ok(src.includes('BATCH_SIZE') && src.includes('20'), 'Question bank batching ≤20 exists');
-  assert.ok(src.includes('MAX_BATCHES') && src.includes('6'), 'Max 6 batches exists');
+  assert.ok(src.includes('QB_BATCH_SIZE') && !/BATCH_SIZE\s*=\s*20/.test(src), 'Question bank batching bounded and no longer 20/request');
+  assert.ok(src.includes('batchCapFor') && src.includes('maxBatches'), 'Batch cap exists (bounded loop), derived from the requested total');
+  const { batchCapFor, QB_BATCH_SIZE } = await import('./../src/lib/testGenKit.js');
+  assert.strictEqual(QB_BATCH_SIZE, 10, 'FIX-G1: batch size is 10');
+  assert.ok(batchCapFor(100, QB_BATCH_SIZE) >= Math.ceil(100 / QB_BATCH_SIZE), 'cap allows at least the minimum batches needed');
+  assert.ok(Number.isFinite(batchCapFor(1000, QB_BATCH_SIZE)) && batchCapFor(1000, QB_BATCH_SIZE) < 400, 'cap stays finite/bounded for large targets');
   assert.ok(src.includes('_banner') && src.includes('questions mile'), 'Partial banner honest message exists');
   assert.ok(src.includes('difficultyBand') && src.includes('foundation recall') && src.includes('olympiad HOTS'), 'Difficulty bands mapped to concrete text');
   assert.ok(src.includes('answerLengthHint') || src.includes('VSAQ = one line'), 'Answer length hints baked into prompts');
@@ -1099,6 +1109,384 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.ok(aiServiceSrc.includes('openai/gpt-oss-120b') && aiServiceSrc.includes('openai/gpt-oss-20b'), 'F9: keeps openai models');
   assert.ok(aiServiceSrc.includes('2026-09-21') && aiServiceSrc.includes('console.groq.com/docs/models'), 'F9: verification date/source documented');
   assert.ok(aiServiceSrc.includes('500 tps') && aiServiceSrc.includes('1000 tps'), 'F9: each entry has verification detail (tps)');
+}
+
+// ---------- FIX-G: G0 stems, G1 bank counts, G2 difficulty, G3 answers, G4 mind maps, G5 habit sheet, G6 battle XP ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    // GUARD: an async fn would reject instead of throwing and silently record a FALSE PASS.
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  const tbSrc = read('src/screens/study/TestBuilderScreen.js');
+  const mtSrc = read('src/components/ui/MathText.js');
+  const afSrc = read('src/lib/aiFeatures.js');
+  const hbSrc = read('src/screens/life/HabitsScreen.js');
+  const bsSrc = read('src/screens/guild/BattleScreen.js');
+  const nqSrc = read('src/lib/testQuestionNormalizer.js');
+
+  // testGenKit is a NEW pure lib — import dynamically so "missing" is a recorded failure, not a crash
+  let K = null;
+  let kitImportError = '';
+  try { K = await import('./../src/lib/testGenKit.js'); }
+  catch (e) { kitImportError = String(e && e.message ? e.message : e).split('\n')[0]; }
+
+  // ================= G0 — question stems invisible =================
+  check('G0.1', 'TestBuilder no longer renders stems via <MathText value={...}> (value landed in ...rest -> empty stem)', () => {
+    assert.ok(!/<MathText\s+value=/.test(tbSrc), 'found <MathText value=... /> call site');
+  });
+  check('G0.2', 'TestBuilder renders stems as MathText children', () => {
+    const m = tbSrc.match(/<MathText[^>]*>\{[^}]*\}<\/MathText>/g) || [];
+    assert.ok(m.length >= 2, `expected >=2 children-style stem renders, found ${m.length}`);
+  });
+  check('G0.3', 'MathText supports an explicit value prop without changing children consumers', () => {
+    assert.ok(/value/.test(mtSrc), 'MathText has no value support');
+    assert.ok(/children\s*\?\?\s*value|children\s*\|\|\s*value|value\s*\?\?\s*children/.test(mtSrc), 'MathText does not fall back between children and value');
+    // fail-before proof: old signature rendered ONLY children, so value= produced ''
+    const oldRender = (props) => String(props.children === undefined ? '' : props.children);
+    assert.equal(oldRender({ value: 'Define osmosis.' }), '', 'fail-before: value-only call rendered empty string');
+    const newRender = (props) => String(props.children ?? props.value ?? '');
+    assert.equal(newRender({ value: 'Define osmosis.' }), 'Define osmosis.', 'pass-after: value-only call renders the stem');
+    assert.equal(newRender({ children: 'Existing consumer' }), 'Existing consumer', 'children consumers unchanged');
+  });
+  check('G0.4', 'empty-stem questions are dropped AND counted, and the count is surfaced in the result card', () => {
+    assert.ok(/_skipped/.test(afSrc), 'aiFeatures does not report _skipped');
+    assert.ok(/malformed questions skipped/i.test(tbSrc), 'TestBuilder does not surface "N malformed questions skipped"');
+  });
+  check('G0.5', 'validateStems drops every empty-stem alias and counts them (q/question/text/prompt/title)', () => {
+    assert.ok(K, `testGenKit missing: ${kitImportError}`);
+    const raw = [
+      { q: 'What is photosynthesis?' },
+      { question: 'Define osmosis.' },
+      { text: 'State Newton first law.' },
+      { prompt: 'Explain respiration.' },
+      { title: 'Name the organelle.' },
+      { q: '' }, { q: '   ' }, { question: null }, { options: ['a', 'b'] }, {},
+    ];
+    const r = K.validateStems(raw);
+    assert.equal(r.kept.length, 5, `kept ${r.kept.length}, expected 5`);
+    assert.equal(r.skipped, 5, `skipped ${r.skipped}, expected 5`);
+  });
+  check('G0.6', 'print/share path resolves the same stem (never raw q.q that can be empty)', () => {
+    assert.ok(/stemOf\(/.test(tbSrc), 'TestBuilder print/share does not use stemOf()');
+    const q = { question: 'Define diffusion.' };
+    assert.equal(String(q.q ?? ''), '', 'fail-before: raw q.q is empty for aliased stem');
+    assert.ok(K, 'testGenKit missing');
+    assert.equal(K.stemOf(q), 'Define diffusion.', 'pass-after: stemOf resolves the alias');
+  });
+
+  // ================= G1 — question bank counts (86/100 class of failure) =================
+  check('G1.1', 'batch size is 10, not 20 (Groq 413 history)', () => {
+    assert.ok(!/const\s+BATCH_SIZE\s*=\s*20/.test(afSrc), 'aiFeatures still uses BATCH_SIZE = 20');
+    assert.ok(/QB_BATCH_SIZE/.test(afSrc) || /batchSize\s*[:=]\s*10/.test(afSrc), 'aiFeatures does not use the 10-question batch size');
+    assert.ok(K, 'testGenKit missing');
+    assert.equal(K.QB_BATCH_SIZE, 10, 'QB_BATCH_SIZE must be 10');
+  });
+  check('G1.2', 'per-type targets are tracked against the requested mix (not totals only)', () => {
+    assert.ok(/scaleBreakdown|missingByType/.test(afSrc), 'aiFeatures has no per-type tracking');
+  });
+  check('G1.3', 'scaleBreakdown allocates exact integers that sum to the total', () => {
+    assert.ok(K, `testGenKit missing: ${kitImportError}`);
+    // PO runtime mix: 100 questions as 10/15/25/50
+    const a = K.scaleBreakdown({ mcq: 10, vsaq: 15, saq: 25, laq: 50 }, 100);
+    assert.deepEqual(a, { mcq: 10, vsaq: 15, saq: 25, laq: 50 });
+    assert.equal(a.mcq + a.vsaq + a.saq + a.laq, 100, 'must sum exactly to total');
+    // default UI breakdown 10/4/4/2 (sums 20) scaled to 100 -> 50/20/20/10
+    const b = K.scaleBreakdown({ mcq: 10, vsaq: 4, saq: 4, laq: 2 }, 100);
+    assert.deepEqual(b, { mcq: 50, vsaq: 20, saq: 20, laq: 10 });
+    // non-divisible ratio must still sum exactly (largest remainder)
+    const c = K.scaleBreakdown({ mcq: 1, vsaq: 1, saq: 1 }, 10);
+    assert.equal(c.mcq + c.vsaq + c.saq + (c.laq || 0), 10, `largest-remainder sum was ${JSON.stringify(c)}`);
+    // degenerate: empty breakdown falls back to an exact-sum default, never 0 total
+    const d = K.scaleBreakdown({}, 25);
+    assert.equal(d.mcq + d.vsaq + d.saq + d.laq, 25, 'empty breakdown must still sum to total');
+  });
+  check('G1.4', 'missingByType/planBatch request ONLY the missing types, capped at the batch size', () => {
+    assert.ok(K, 'testGenKit missing');
+    const targets = { mcq: 50, vsaq: 20, saq: 20, laq: 10 };
+    const have = { mcq: 50, vsaq: 12, saq: 3, laq: 0 };
+    const miss = K.missingByType(targets, have);
+    assert.deepEqual(miss, { vsaq: 8, saq: 17, laq: 10 }, `missing was ${JSON.stringify(miss)}`);
+    const plan = K.planBatch(targets, have, 10);
+    assert.ok(plan.reqCount <= 10, `batch requested ${plan.reqCount} > 10`);
+    assert.equal(plan.reqCount, 10);
+    assert.ok(!('mcq' in plan.ask) || plan.ask.mcq === 0, 'top-up must not re-request a satisfied type');
+    const askSum = Object.values(plan.ask).reduce((x, y) => x + y, 0);
+    assert.equal(askSum, plan.reqCount, 'per-batch ask must sum to reqCount');
+  });
+  check('G1.8', 'still short after the cap -> partial + honest banner (banner is rendered in the UI)', () => {
+    assert.ok(/_partial/.test(afSrc) && /_banner/.test(afSrc), 'aiFeatures lost the partial/banner contract');
+    assert.ok(/result\.data\._banner|data\._banner/.test(tbSrc), 'TestBuilder does not render _banner');
+  });
+
+  // ================= G2 — difficulty obedience =================
+  check('G2.1', 'difficulty bands map to concrete prompt language and name the band explicitly', () => {
+    assert.ok(/difficultyInstruction/.test(afSrc), 'aiFeatures does not use difficultyInstruction');
+    assert.ok(K, 'testGenKit missing');
+    const easy = K.difficultyInstruction(20);
+    const med = K.difficultyInstruction(100);
+    const hard = K.difficultyInstruction(140);
+    assert.ok(/easy/i.test(easy) && /recall|definition|direct fact/i.test(easy), `easy band language was: ${easy}`);
+    assert.ok(/medium|moderate|standard/i.test(med) && /appl/i.test(med), `medium band language was: ${med}`);
+    assert.ok(/hard/i.test(hard) && /multi-step|HOTS|unfamiliar/i.test(hard), `hard band language was: ${hard}`);
+    // the three must be distinguishable, not one generic string
+    assert.ok(easy !== med && med !== hard && easy !== hard, 'bands are not distinguishable');
+  });
+  check('G2.2', 'per-question difficulty tag is validated and clamped to 1-3', () => {
+    assert.ok(K, 'testGenKit missing');
+    assert.equal(K.clampDifficultyTag(0), 1);
+    assert.equal(K.clampDifficultyTag(5), 3);
+    assert.equal(K.clampDifficultyTag('2'), 2);
+    assert.equal(K.clampDifficultyTag(2.7), 3, 'rounds to nearest valid tag');
+    assert.equal(K.clampDifficultyTag(null, 2), 2, 'falls back to the requested default');
+    assert.equal(K.clampDifficultyTag('hard'), 2, 'non-numeric falls back to default, never NaN');
+    assert.ok(/clampDifficultyTag/.test(nqSrc) || /difficulty/.test(nqSrc), 'normalizer does not carry a difficulty tag');
+  });
+
+  // ================= G3 — answer quality =================
+  check('G3.1', 'word windows are enforced with validation (VSAQ 10-20, SAQ 20-30, LAQ 50-60)', () => {
+    assert.ok(K, `testGenKit missing: ${kitImportError}`);
+    assert.deepEqual(K.answerWindow('vsaq'), { min: 10, max: 20 });
+    assert.deepEqual(K.answerWindow('saq'), { min: 20, max: 30 });
+    assert.deepEqual(K.answerWindow('laq'), { min: 50, max: 60 });
+    assert.equal(K.answerWindow('mcq'), null, 'MCQ has no word window');
+    const words = (n) => Array.from({ length: n }, (_, i) => `w${i + 1}`).join(' ');
+    assert.equal(K.answerWordCount(words(15)), 15);
+    assert.ok(K.isAnswerInRange({ type: 'vsaq', answer: words(15) }), '15 words is in the VSAQ window');
+    assert.ok(!K.isAnswerInRange({ type: 'vsaq', answer: words(45) }), '45 words violates the VSAQ window');
+    assert.ok(K.isAnswerInRange({ type: 'mcq', answer: 'b' }), 'MCQ is never a violator');
+  });
+  check('G3.3', 'aiFeatures actually calls the answer-window enforcement', () => {
+    assert.ok(/enforceAnswerWindows/.test(afSrc), 'aiFeatures does not enforce answer windows');
+  });
+  check('G3.4', 'answers render as bullets with **bold** keywords (app does not show literal asterisks)', () => {
+    assert.ok(K, 'testGenKit missing');
+    const segs = K.parseBoldSegments('Photosynthesis needs **chlorophyll** and **sunlight**.');
+    assert.deepEqual(segs, [
+      { text: 'Photosynthesis needs ', bold: false },
+      { text: 'chlorophyll', bold: true },
+      { text: ' and ', bold: false },
+      { text: 'sunlight', bold: true },
+      { text: '.', bold: false },
+    ]);
+    assert.deepEqual(K.parseBoldSegments('no bold here'), [{ text: 'no bold here', bold: false }]);
+    const bullets = K.toBullets('• First point\n• Second point');
+    assert.ok(Array.isArray(bullets) && bullets.length === 2, `toBullets gave ${JSON.stringify(bullets)}`);
+    assert.ok(/parseBoldSegments/.test(tbSrc), 'TestBuilder does not render bold segments');
+  });
+
+  // ================= G4 — mind map depth =================
+  check('G4.1', 'node-count minimums: heavy (>=6h) chapters >=32 nodes and 3 levels, light >=16', () => {
+    assert.ok(K, `testGenKit missing: ${kitImportError}`);
+    assert.equal(K.isHeavyChapter({ chapter: 'Life Processes', estimated_hours: 6 }), true, 'Life Processes (6h) must be heavy');
+    assert.equal(K.isHeavyChapter({ chapter: 'The Road Not Taken', estimated_hours: 2 }), false, 'a 2-hour chapter must be light');
+    assert.equal(K.mindMapMinNodes({ estimated_hours: 6 }), 32);
+    assert.equal(K.mindMapMinNodes({ estimated_hours: 2 }), 16);
+    const small = { label: 'root', children: [{ label: 'a', children: [{ label: 'a1' }] }] };
+    assert.equal(K.countMindMapNodes(small), 3, 'root counts as a node');
+    assert.equal(K.mindMapDepth(small), 3, 'root=level 1');
+    const r = K.mindMapMeetsMinimum(small, { estimated_hours: 6 });
+    assert.equal(r.ok, false);
+    assert.equal(r.minNodes, 32);
+    assert.equal(r.minDepth, 3);
+  });
+  check('G4.2', 'one chapter per request (no multi-chapter batching)', () => {
+    assert.ok(/for\s*\(.*of\s+chapters|chapters\.map\(async|one chapter per request/i.test(afSrc), 'aiGenerateMindMap still batches all chapters into one request');
+  });
+  check('G4.4', 'difficulty changes mind map CONTENT TYPE (easy=definitions/labels, hard=formulas/dates/derivations)', () => {
+    assert.ok(K, 'testGenKit missing');
+    const easy = K.mindMapContentInstruction(20);
+    const hard = K.mindMapContentInstruction(140);
+    assert.ok(/definition|label|core idea/i.test(easy), `easy content instruction was: ${easy}`);
+    assert.ok(/formula|date|derivation/i.test(hard), `hard content instruction was: ${hard}`);
+    assert.ok(easy !== hard, 'difficulty does not change content type');
+  });
+
+  // ================= G5 — habit sheet Save unreachable =================
+  check('G5.1', 'habit sheet body is scrollable and the Save button is pinned visible', () => {
+    assert.ok(/ScrollView/.test(hbSrc), 'HabitsScreen has no ScrollView');
+    const modalStart = hbSrc.indexOf('Add/Edit habit modal');
+    assert.ok(modalStart > 0, 'could not locate the Add/Edit habit modal');
+    const modalSrc = hbSrc.slice(modalStart);
+    assert.ok(/<ScrollView/.test(modalSrc), 'the modal body is not wrapped in a ScrollView');
+    assert.ok(/KeyboardAvoidingView/.test(hbSrc), 'no KeyboardAvoidingView — keyboard can cover Save');
+    // Save must sit OUTSIDE the ScrollView so it stays pinned
+    const scrollOpen = modalSrc.indexOf('<ScrollView');
+    const scrollClose = modalSrc.indexOf('</ScrollView>');
+    const saveAt = modalSrc.indexOf('Add Habit (+10 XP per day)');
+    assert.ok(scrollOpen >= 0 && scrollClose > scrollOpen, 'ScrollView not closed in the modal');
+    assert.ok(saveAt > scrollClose, 'Save button is inside the scroll body — it can fall below the fold');
+  });
+
+  // ================= G6 — Battle "+25 XP earned" lie =================
+  check('G6.1', 'battle result line no longer hardcodes the XP value', () => {
+    assert.ok(!/\+\{25 \+ \(correct > rivalScore \? 60 : 0\)\} XP earned/.test(bsSrc), 'BattleScreen still hardcodes +{25 + (win?60:0)} XP earned');
+    assert.ok(/awardedXp|xpAwarded/.test(bsSrc), 'BattleScreen has no state holding the real awarded XP');
+  });
+  check('G6.2', 'displayed XP always equals the ledger truth, including the 0 XP daily-cap case', () => {
+    // fail-before: display computed from the score, ledger computed from the cap
+    const oldDisplay = (correct, rivalScore) => 25 + (correct > rivalScore ? 60 : 0);
+    assert.equal(oldDisplay(5, 2), 85, 'fail-before: banner says 0 XP but line claims 85');
+    // pass-after: display is the awarded value captured from the award results
+    const newDisplay = (awarded) => awarded;
+    assert.equal(newDisplay(0), 0, 'capped day shows 0 XP');
+    assert.equal(newDisplay(85), 85, 'uncapped win shows the real 85');
+    assert.equal(newDisplay(25), 25, 'uncapped loss shows the real 25');
+    assert.ok(/aaj ka cap|0 XP/i.test(bsSrc), 'BattleScreen does not explain the 0 XP cap case');
+    // the rendered line must actually read the awarded value, and the persisted row must match it
+    const xpLine = bsSrc.split('\n').find((l) => l.includes('XP earned')) || '';
+    assert.ok(/awardedXp|xpAwarded/.test(xpLine), `"XP earned" line does not render the awarded value: ${xpLine.trim()}`);
+    assert.ok(!/25 \+ \(correct > rivalScore/.test(xpLine), '"XP earned" line still computes from the score');
+    assert.ok(/xp_earned:\s*(awardedXp|xpAwarded)/.test(bsSrc), 'quiz_results.xp_earned is not the value shown to the user');
+  });
+
+  // ---------- async behavioural checks (always run; they assert K themselves) ----------
+  {
+    const record = async (id, desc, fn) => {
+      try { await fn(); results.push({ id, desc, ok: true }); }
+      catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+    };
+
+    await record('G1.5', 'deterministic UNDER-DELIVERING provider still ends at exactly 100/100 with exact per-type counts', async () => {
+      const targets = K.scaleBreakdown({ mcq: 10, vsaq: 15, saq: 25, laq: 50 }, 100);
+      assert.deepEqual(targets, { mcq: 10, vsaq: 15, saq: 25, laq: 50 });
+      let calls = 0;
+      let maxReq = 0;
+      const seq = {};
+      // Deterministic under-delivery: ~40% short on every batch, but a request for
+      // n>=1 never returns 0 (no real provider does that — it would make the target
+      // unreachable by construction rather than testing the top-up logic).
+      const ask = async ({ askBreakdown, reqCount }) => {
+        calls++;
+        maxReq = Math.max(maxReq, reqCount);
+        const out = [];
+        for (const [type, n] of Object.entries(askBreakdown)) {
+          for (let i = 0; i < Math.max(n > 0 ? 1 : 0, Math.floor(n * 0.6)); i++) {
+            seq[type] = (seq[type] || 0) + 1;
+            out.push({ type, q: `${type.toUpperCase()} practice question number ${seq[type]} on the chapter`, answer: 'model answer text here', options: type === 'mcq' ? ['a', 'b', 'c', 'd'] : undefined });
+          }
+        }
+        return out;
+      };
+      const res = await K.runQuestionBankLoop({ targets, ask, batchSize: 10, maxBatches: K.batchCapFor(100, 10) });
+      assert.equal(res.questions.length, 100, `bank ended at ${res.questions.length}/100`);
+      assert.equal(res.short, false, 'must not be short');
+      assert.deepEqual(res.perType, targets, `per-type counts were ${JSON.stringify(res.perType)} vs ${JSON.stringify(targets)}`);
+      assert.ok(maxReq <= 10, `a batch requested ${maxReq} > 10`);
+      assert.ok(calls <= K.batchCapFor(100, 10), `used ${calls} batches, cap is ${K.batchCapFor(100, 10)}`);
+      // every question must have a usable stem
+      assert.ok(res.questions.every((q) => K.stemOf(q).length >= 3), 'a question with an empty stem slipped through');
+    });
+
+    await record('G1.6', 'empty/garbled batch triggers exactly ONE automatic retry before proceeding', async () => {
+      const targets = { mcq: 4, vsaq: 0, saq: 0, laq: 0 };
+      const calls = [];
+      let n = 0;
+      const ask = async (req) => {
+        calls.push(req.reqCount);
+        n++;
+        if (n === 1) return [];                 // first batch comes back empty/garbled
+        if (n === 2) return [];                 // its single automatic retry is also empty
+        return [{ type: 'mcq', q: `MCQ stem ${n} about the chapter`, options: ['a', 'b', 'c', 'd'], answer: 'a' }];
+      };
+      const res = await K.runQuestionBankLoop({ targets, ask, batchSize: 10, maxBatches: 6 });
+      assert.equal(res.retries, 1, `expected exactly 1 automatic retry, saw ${res.retries}`);
+      assert.equal(res.emptyBatches, 1, 'an empty batch (after its retry) must be counted once, not retried forever');
+      assert.ok(res.questions.length >= 1, 'loop must continue past an empty batch');
+    });
+
+    await record('G1.7', 'duplicates never shrink the bank below the request — a top-up replaces them', async () => {
+      const targets = { mcq: 6, vsaq: 0, saq: 0, laq: 0 };
+      let n = 0;
+      const ask = async () => {
+        n++;
+        // provider keeps re-sending the same three stems plus one fresh one
+        const dupes = [1, 2, 3].map((i) => ({ type: 'mcq', q: `Repeated stem ${i} about the chapter`, options: ['a', 'b', 'c', 'd'], answer: 'a' }));
+        return [...dupes, { type: 'mcq', q: `Fresh stem ${n} about the chapter`, options: ['a', 'b', 'c', 'd'], answer: 'b' }];
+      };
+      const res = await K.runQuestionBankLoop({ targets, ask, batchSize: 10, maxBatches: 12 });
+      assert.equal(res.questions.length, 6, `duplicates shrank the bank to ${res.questions.length}`);
+      assert.ok(res.duplicates >= 3, `duplicates were not counted: ${res.duplicates}`);
+      const stems = new Set(res.questions.map((q) => K.stemOf(q)));
+      assert.equal(stems.size, res.questions.length, 'final bank contains duplicate stems');
+    });
+
+    await record('G3.2', 'violators get exactly ONE rewrite pass; in-range answers are untouched', async () => {
+      const w = (n) => Array.from({ length: n }, (_, i) => `word${i + 1}`).join(' ');
+      const qs = [
+        { type: 'vsaq', q: 'Good one', answer: w(15) },      // in range
+        { type: 'vsaq', q: 'Too long', answer: w(60) },       // violator
+        { type: 'saq', q: 'Too short', answer: w(5) },        // violator
+        { type: 'mcq', q: 'MCQ', answer: 'b', options: ['a', 'b', 'c', 'd'] }, // never a violator
+      ];
+      let rewriteCalls = 0;
+      const ask = async ({ violators }) => {
+        rewriteCalls++;
+        assert.equal(violators.length, 2, `rewrite pass was given ${violators.length} violators`);
+        return violators.map((v) => ({ q: v.q, answer: v.type === 'vsaq' ? w(15) : w(25) }));
+      };
+      const res = await K.enforceAnswerWindows({ questions: qs, ask });
+      assert.equal(rewriteCalls, 1, `expected exactly ONE rewrite pass, saw ${rewriteCalls}`);
+      assert.equal(res.fixed, 2, `fixed ${res.fixed}, expected 2`);
+      assert.equal(res.questions[0].answer, w(15), 'an in-range answer must be untouched');
+      assert.equal(K.answerWordCount(res.questions[1].answer), 15, 'violator was rewritten into range');
+      assert.ok(K.isAnswerInRange(res.questions[2]), 'second violator now in range');
+      assert.equal(res.questions[3].answer, 'b', 'MCQ answer untouched');
+      // no violators -> no AI call at all
+      let zeroCalls = 0;
+      const res2 = await K.enforceAnswerWindows({ questions: [qs[0], qs[3]], ask: async () => { zeroCalls++; return []; } });
+      assert.equal(zeroCalls, 0, 'rewrite pass must not fire when nothing violates');
+      assert.equal(res2.fixed, 0);
+    });
+
+    await record('G4.3', 'short map gets exactly ONE follow-up top-up request, then reports honestly', async () => {
+      const heavy = { chapter: 'Life Processes', estimated_hours: 6 };
+      const small = { label: 'Life Processes', children: [{ label: 'Nutrition', children: [{ label: 'Autotrophic' }] }] };
+      assert.equal(K.countMindMapNodes(small), 3);
+      let topUps = 0;
+      const ask = async () => {
+        topUps++;
+        // top-up returns enough branches to clear the heavy minimum, 3 levels deep
+        return {
+          label: 'Life Processes',
+          children: Array.from({ length: 8 }, (_, i) => ({
+            label: `Branch ${i + 1}`,
+            children: Array.from({ length: 3 }, (_, j) => ({ label: `Leaf ${i + 1}.${j + 1}` })),
+          })),
+        };
+      };
+      const res = await K.ensureMindMapSize({ root: small, chapter: heavy, ask });
+      assert.equal(topUps, 1, `expected exactly ONE top-up request, saw ${topUps}`);
+      assert.equal(res.toppedUp, true);
+      assert.ok(res.nodes >= 32, `heavy chapter ended at ${res.nodes} nodes, needs >=32`);
+      assert.ok(res.depth >= 3, `depth was ${res.depth}, needs >=3`);
+      assert.equal(res.ok, true);
+      // a top-up that still falls short must report honestly, not fake it
+      let topUps2 = 0;
+      const weakAsk = async () => { topUps2++; return { label: 'Extra', children: [{ label: 'x' }] }; };
+      const res2 = await K.ensureMindMapSize({ root: small, chapter: heavy, ask: weakAsk });
+      assert.equal(topUps2, 1, 'must not loop top-ups forever');
+      assert.equal(res2.ok, false, 'still-short map must report ok:false');
+      assert.equal(res2.minNodes, 32);
+      // a light chapter that already qualifies must not call the AI at all
+      let topUps3 = 0;
+      const big = { label: 'Root', children: Array.from({ length: 6 }, (_, i) => ({ label: `B${i}`, children: Array.from({ length: 3 }, (_, j) => ({ label: `L${i}${j}` })) })) };
+      const res3 = await K.ensureMindMapSize({ root: big, chapter: { chapter: 'Poem', estimated_hours: 2 }, ask: async () => { topUps3++; return null; } });
+      assert.equal(topUps3, 0, 'a qualifying light map must not trigger a top-up');
+      assert.equal(res3.ok, true);
+      assert.ok(res3.nodes >= 16, `light chapter needs >=16 nodes, got ${res3.nodes}`);
+    });
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-G: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
 }
 
 console.log('ALL LOGIC TESTS PASSED ✅');

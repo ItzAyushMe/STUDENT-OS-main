@@ -7,6 +7,15 @@
 // v1.0.6 recovery: robust normalization, count validation, retry
 // ============================================================
 import { askAI, askAIJSON, AIUnavailableError, AI_PERSONA } from './aiService';
+// FIX-G: pure generation rules (batching, per-type targets, difficulty language,
+// answer word windows, mind map node minimums) live in testGenKit so they are
+// unit-testable without a live AI provider.
+import {
+  QB_BATCH_SIZE, batchCapFor, scaleBreakdown, missingByType, countByType,
+  runQuestionBankLoop, difficultyInstruction, difficultyBandName,
+  enforceAnswerWindows, answerWindow, answerWordCount, answerTextOf, stemOf,
+  ensureMindMapSize, mindMapContentInstruction, mindMapMinNodes, isHeavyChapter,
+} from './testGenKit.js';
 
 export { AIUnavailableError };
 
@@ -46,6 +55,37 @@ function answerLengthHint(type) {
   return "short answer";
 }
 
+
+// FIX-G3: ONE shared rewrite pass for answers that violate their word window.
+// Returns [{q, answer}] which enforceAnswerWindows matches back by stem.
+async function rewriteAnswerWindows({ violators, context = '' }) {
+  if (!Array.isArray(violators) || !violators.length) return [];
+  const list = violators.map((v) => {
+    const w = answerWindow(v.type);
+    const now = answerWordCount(answerTextOf(v));
+    const need = w ? `${w.min}-${w.max} words` : 'in range';
+    return `- ${String(v.type || 'answer').toUpperCase()} | stem: ${stemOf(v).slice(0, 160)} | currently ${now} words | required ${need}`;
+  }).join('\n');
+  const data = await askAIJSON({
+    prompt: `Rewrite each model answer below so it fits its required word window exactly.
+${list}
+Student context: ${esc(context)}.
+Rules: keep the same question and the same factual content; answer as bullet points; wrap the 2-4 key terms in **double asterisks**; simple English; no markdown other than the **bold** markers; math in plain text.`,
+    system: `${AI_PERSONA}\nYou are an exam answer editor. Output ONLY the JSON object.`,
+    schemaHint: `{"answers":[{"q":"the same stem text","answer":"rewritten model answer, bullet points, **keywords** bolded"}]}`,
+    temperature: 0.3,
+    noCache: true,
+  });
+  return Array.isArray(data?.answers) ? data.answers : [];
+}
+
+// FIX-G2: default per-question difficulty tag implied by the requested band.
+function bandDifficultyDefault(pct) {
+  const b = difficultyBandName(pct);
+  if (b === 'easy') return 1;
+  if (b === 'hard' || b === 'very hard') return 3;
+  return 2;
+}
 
 function classGuard(profileContext = '') {
   return `IMPORTANT: match the student's class level exactly — ${
@@ -422,6 +462,9 @@ export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = 
   const ctx = buildProfileContext(profile);
   const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
   const band = difficultyBand(difficultyPct);
+  const diffInstruction = difficultyInstruction(difficultyPct);   // FIX-G2
+  const diffDefault = bandDifficultyDefault(difficultyPct);
+  let skippedCount = 0;                                           // FIX-G0: counted, never silent
   const parts = [
     `MCQ: ${breakdown.mcq || 0} (1 mark each) — ${answerLengthHint('mcq')}`,
     `VSAQ: ${breakdown.vsaq || 0} (2 marks each) — ${answerLengthHint('vsaq')}`,
@@ -441,9 +484,11 @@ Chapters to cover: ${esc(chList)}.
 Test: ${totalMarks} marks, ${totalQuestions} questions, ${timeMinutes} minutes.
 ${breakdownPrompt}.
 Difficulty: ${difficultyPct}% — ${band}.
+${diffInstruction}
 Create TWO full sets (Set A and Set B) with DIFFERENT questions of the same pattern, like real exam papers.
-Answer lengths: VSAQ one line (~10–20 words), SAQ 20–30 words, LAQ 50–60 words.
-Questions must be syllabus-accurate, in simple English, no markdown anywhere.
+Answer lengths: VSAQ one line (~10–20 words), SAQ 20–30 words, LAQ 50–60 words. Write each answer as bullet points and wrap the 2–4 key terms in **double asterisks**.
+Questions must be syllabus-accurate, in simple English, no markdown anywhere except the **bold** markers inside answers.
+Every question MUST have a non-empty "q" stem — a question with no stem is unusable.
 Math notation: plain text only (a/b, sqrt(x), x^2) — never LaTeX.
 IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer. If you cannot, include incomplete:true.`,
       system: `${AI_PERSONA}\nYou are a strict examiner. Output ONLY the JSON object.`,
@@ -476,7 +521,10 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer. If you 
         const normalized = rawSections.map((sec, idx) => {
           const type = sec.type || sec.label || 'mcq';
           const label = sec.label && sec.label.trim() !== 'Section' && sec.label.trim().length >= 3 ? sec.label : (sec.type ? labelForType(sec.type, idx) : labelForType(type, idx));
-          const questions = Array.isArray(sec.questions) ? sec.questions.map(q => normalizeTestQuestion(q, type)).filter(Boolean) : [];
+          const rawQs = Array.isArray(sec.questions) ? sec.questions : [];
+          const questions = rawQs.map(q => normalizeTestQuestion(q, type, diffDefault)).filter(Boolean);
+          // FIX-G0: empty-stem / unusable drops are COUNTED so the UI can say so
+          skippedCount += Math.max(0, rawQs.length - questions.length);
           return { type, label, questions };
         }).filter(s => s.questions && s.questions.length > 0);
         return { set: set.set || 'A', sections: normalized };
@@ -524,83 +572,127 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer. If you 
     throw new AIUnavailableError(`AI ne sirf ${totalQs}/${totalQuestions} questions diye — chhota count try karo ya dobara try karo.`);
   }
 
+  // FIX-G0: report how many malformed questions the normalizer dropped
+  data._skipped = skippedCount;
+
+  // FIX-G3: enforce answer word windows across both sets with exactly ONE
+  // rewrite pass (zero AI calls when every answer is already in range).
+  // enforceAnswerWindows returns a same-length, same-order list.
+  const flatQuestions = data.sets.flatMap((st) => (st.sections || []).flatMap((sec) => (sec.questions || [])));
+  const windows = await enforceAnswerWindows({
+    questions: flatQuestions,
+    ask: rewriteAnswerWindows,
+    context: `${ctx} | ${chList}`,
+  });
+  if (windows.fixed > 0) {
+    data._answerFixes = windows.fixed;
+    let i = 0;
+    for (const st of data.sets) {
+      for (const sec of (st.sections || [])) {
+        sec.questions = (sec.questions || []).map(() => windows.questions[i++]);
+      }
+    }
+  }
+
   return data;
 }
 
-export async function aiGenerateQuestionBank({ profile = {}, chapters = [], breakdown = {}, totalQuestions = 25, difficultyPct = 100 }) {
+export async function aiGenerateQuestionBank({
+  profile = {},
+  chapters = [],
+  breakdown = {},
+  totalQuestions = 25,
+  difficultyPct = 100,
+  _askJSON = null,          // FIX-G: test seam (no live provider needed)
+}) {
   const ctx = buildProfileContext(profile);
   const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
   const band = difficultyBand(difficultyPct);
+  const diffInstruction = difficultyInstruction(difficultyPct);          // FIX-G2: concrete band language
+  const targets = scaleBreakdown(breakdown, totalQuestions);             // FIX-G1: exact per-type targets
+  const diffDefault = bandDifficultyDefault(difficultyPct);
+  const ask = _askJSON || askAIJSON;
+  let weakSpots = '';
 
-  const attemptBatch = async (reqCount, alreadyHave = []) => {
-    const data = await askAIJSON({
-      prompt: `Generate a practice QUESTION BANK as JSON for this student.
+  // FIX-G1: batches are QB_BATCH_SIZE (=10). The previous 20-per-request batching
+  // kept hitting Groq 413 "payload too large", and the loop then gave up short.
+  const askBatch = async ({ askBreakdown = {}, reqCount = 0, already = [], retry = false }) => {
+    const mixLine = Object.entries(askBreakdown)
+      .filter(([, n]) => Number(n) > 0)
+      .map(([t, n]) => `${n} × ${String(t).toUpperCase()}`)
+      .join(', ') || `${reqCount} questions`;
+    const data = await ask({
+      prompt: `Generate a practice QUESTION BANK batch as JSON for this student.
 Student: ${esc(ctx)}.
 Chapters: ${esc(chList)}.
-Total questions THIS BATCH: ${reqCount}. Overall target ${totalQuestions}. Mix: MCQ ${breakdown.mcq || 0}, VSAQ ${breakdown.vsaq || 0}, SAQ ${breakdown.saq || 0}, LAQ ${breakdown.laq || 0}.
-Difficulty: ${difficultyPct}% — ${band}.
-Answer lengths: VSAQ one line ~10–20 words, SAQ 20–30 words, LAQ 50–60 words.
-Simple English, no markdown. Math in plain text only.
-Already generated ${alreadyHave.length} questions, avoid duplicates.
-IMPORTANT: Return EXACTLY ${reqCount} questions, no fewer. If you cannot, include incomplete:true.`,
+THIS BATCH — return EXACTLY: ${mixLine} (${reqCount} questions).
+Overall target: ${totalQuestions}. Per-type targets: MCQ ${targets.mcq}, VSAQ ${targets.vsaq}, SAQ ${targets.saq}, LAQ ${targets.laq}.
+Already generated: ${already.length} — do not repeat any of them.${retry ? '\nThe previous reply was empty or unreadable — return valid JSON this time.' : ''}
+${diffInstruction}
+Answer lengths: VSAQ one line ~10–20 words, SAQ 20–30 words, LAQ 50–60 words. Write answers as bullet points and wrap the 2–4 key terms in **double asterisks**.
+Simple English, no markdown other than the **bold** markers. Math in plain text only.
+Every question MUST have a non-empty "q" stem — a question with no stem is unusable.`,
       system: `${AI_PERSONA}\nYou are a question-bank generator. Output ONLY the JSON object.`,
       schemaHint: `{
-  "questions": [ { "type": "mcq", "q": "text", "options": ["a","b","c","d"], "answer": "b", "why": "one-line reason" },
-                 { "type": "vsaq", "q": "text", "answer": "model answer ~10-20 words" },
-                 { "type": "saq", "q": "text", "answer": "model answer 20-30 words" },
-                 { "type": "laq", "q": "text", "answer": "model answer 50-60 words" } ],
+  "questions": [ { "type": "mcq", "q": "text", "options": ["a","b","c","d"], "answer": "b", "why": "one-line reason", "difficulty": 2 },
+                 { "type": "vsaq", "q": "text", "answer": "model answer ~10-20 words", "difficulty": 2 },
+                 { "type": "saq", "q": "text", "answer": "model answer 20-30 words", "difficulty": 2 },
+                 { "type": "laq", "q": "text", "answer": "model answer 50-60 words", "difficulty": 3 } ],
   "weakSpots": "one line on what to revise"
 }`,
       temperature: 0.5,
       noCache: true,
     });
-    const qs = Array.isArray(data?.questions) ? data.questions : [];
-    const clean = qs.map((q) => normalizeTestQuestion(q)).filter(Boolean);
-    return { data: { ...data, questions: clean }, count: clean.length };
+    if (data?.weakSpots) weakSpots = data.weakSpots;
+    // raw items — the loop normalizes, validates stems, dedupes and trims per type
+    return Array.isArray(data?.questions) ? data.questions : [];
   };
 
-  // NEW X R5: batching ≤20 per request, max 6 batches, CONTINUE retry for shortfalls
-  const BATCH_SIZE = 20;
-  const MAX_BATCHES = 6;
-  let allQuestions = [];
-  let weakSpots = '';
-  let attempts = 0;
+  const loop = await runQuestionBankLoop({
+    targets,
+    ask: askBatch,
+    batchSize: QB_BATCH_SIZE,
+    maxBatches: batchCapFor(totalQuestions, QB_BATCH_SIZE),
+    normalize: (item, fallbackType) => normalizeTestQuestion(item, fallbackType, diffDefault),
+    context: `${ctx} | ${chList}`,
+  });
 
-  while (allQuestions.length < totalQuestions && attempts < MAX_BATCHES) {
-    const remaining = totalQuestions - allQuestions.length;
-    const thisBatch = Math.min(BATCH_SIZE, remaining);
-    try {
-      const res = await attemptBatch(thisBatch, allQuestions);
-      if (res.data?.weakSpots) weakSpots = res.data.weakSpots;
-      // avoid exact duplicate q text
-      const existingTexts = new Set(allQuestions.map(q => q.q));
-      const fresh = res.data.questions.filter(q => !existingTexts.has(q.q));
-      allQuestions = [...allQuestions, ...fresh].slice(0, totalQuestions);
-      // if shortfall and we got some, CONTINUE-retry requesting only missing count (not full regen)
-      if (fresh.length < thisBatch && fresh.length > 0 && allQuestions.length < totalQuestions) {
-        // continue loop will request missing
-      }
-    } catch (e) {
-      // on error, break if we have at least 50% else throw
-      if (allQuestions.length >= Math.ceil(totalQuestions * 0.5)) break;
-      throw e;
-    }
-    attempts++;
-  }
+  // FIX-G3: exactly ONE rewrite pass for answers outside their word window
+  const win = await enforceAnswerWindows({
+    questions: loop.questions,
+    ask: rewriteAnswerWindows,
+    context: `${ctx} | ${chList}`,
+  });
+  const questions = win.questions;
 
-  if (!allQuestions.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
+  if (!questions.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
 
-  if (allQuestions.length < totalQuestions) {
+  const perType = countByType(questions);
+  const base = {
+    questions,
+    weakSpots,
+    _perType: perType,
+    _targets: targets,
+    _skipped: loop.skippedMalformed,      // FIX-G0: empty-stem drops are COUNTED, not silent
+    _batches: loop.batches,
+    _retries: loop.retries,
+    _duplicates: loop.duplicates,
+    _answerFixes: win.fixed,
+  };
+
+  if (questions.length < totalQuestions) {
     // Return partial with honest banner — never silently short
+    const miss = missingByType(targets, perType);
+    const missLine = Object.entries(miss).map(([t, n]) => `${n} ${String(t).toUpperCase()}`).join(', ');
+    const skipLine = loop.skippedMalformed ? ` · ${loop.skippedMalformed} malformed skipped` : '';
     return {
-      questions: allQuestions,
-      weakSpots,
+      ...base,
       _partial: true,
-      _banner: `${allQuestions.length}/${totalQuestions} questions mile — dobara try karo baaki ke liye`,
+      _banner: `${questions.length}/${totalQuestions} questions mile${missLine ? ` — baaki: ${missLine}` : ''}${skipLine} — dobara try karo`,
     };
   }
 
-  return { questions: allQuestions.slice(0, totalQuestions), weakSpots };
+  return base;
 }
 
 function normalizeMindMapResponse(data, fallbackChapters) {
@@ -638,34 +730,101 @@ function normalizeMindMapResponse(data, fallbackChapters) {
   return { chapters: clean };
 }
 
-export async function aiGenerateMindMap({ profile = {}, chapters = [], difficultyPct = 100 }) {
+export async function aiGenerateMindMap({
+  profile = {},
+  chapters = [],
+  difficultyPct = 100,
+  _askJSON = null,          // FIX-G: test seam (no live provider needed)
+}) {
   const ctx = buildProfileContext(profile);
-  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
   const band = difficultyBand(difficultyPct);
-  const high = Number(difficultyPct) >= 120;
-  const branchInstruction = high
-    ? "6–9 main branches and deeper leaves (2 levels), include key formulas/dates/terms"
-    : "4–5 main branches, core ideas only, 2–4 leaf points each";
+  const contentInstruction = mindMapContentInstruction(difficultyPct);   // FIX-G4: difficulty changes CONTENT TYPE
+  const ask = _askJSON || askAIJSON;
 
-  const raw = await askAIJSON({
-    prompt: `Create a one-page revision MIND MAP as JSON for each of these chapters: ${esc(chList)}.
+  // FIX-G4.2: ONE chapter per request. Batching every chapter into a single
+  // prompt is why maps came back thin — the model split its budget across
+  // chapters instead of filling each one.
+  const chaptersToMap = Array.isArray(chapters) && chapters.length
+    ? chapters
+    : [{ subject: '', chapter: 'whole syllabus', estimated_hours: 0 }];
+
+  const requestMap = async (ch, extraInstruction = '') => {
+    const heavy = isHeavyChapter(ch);
+    const minNodes = mindMapMinNodes(ch);
+    const shape = heavy
+      ? `8–10 main branches, each with 3–4 leaf points, at least 3 levels deep — ${minNodes}+ nodes in total`
+      : `5–6 main branches, each with 3–4 leaf points, at least 2 levels deep — ${minNodes}+ nodes in total`;
+    return ask({
+      prompt: `Create a one-page revision MIND MAP as JSON for ONE chapter only.
+Chapter: ${esc(ch?.chapter || 'the chapter')} (${esc(ch?.subject || '')}).
 Student: ${esc(ctx)}.
 Difficulty: ${difficultyPct}% — ${band}.
-For each chapter: a central idea with ${branchInstruction}. Short phrases only (3–7 words), the kind a topper writes on one page. No markdown anywhere.
-${high ? "Include key formulas, dates, terms where relevant." : ""}`,
-    system: `${AI_PERSONA}\nYou are a revision-notes expert. Output ONLY the JSON object.`,
-    schemaHint: `{
-  "chapters": [
-    { "chapter": "chapter name", "root": { "label": "central idea",
-      "children": [ { "label": "branch", "children": [ { "label": "leaf" } ] } ] } }
-  ]
+${contentInstruction}
+Structure: a central idea with ${shape}. Short phrases only (3–7 words), the kind a topper writes on one page. No markdown anywhere.${extraInstruction}`,
+      system: `${AI_PERSONA}\nYou are a revision-notes expert. Output ONLY the JSON object.`,
+      schemaHint: `{
+  "chapter": "chapter name",
+  "root": { "label": "central idea",
+    "children": [ { "label": "branch", "children": [ { "label": "leaf" } ] } ] }
 }`,
-    temperature: 0.4,
-    noCache: true,
-  });
-  const normalized = normalizeMindMapResponse(raw, chapters);
-  if (!normalized.chapters.length) {
-    throw new Error(raw?.chapters ? 'Mind map shape samajh nahi aaya — dobara try karo' : 'Mind map nahi bana — dobara try karo');
+      temperature: 0.4,
+      noCache: true,
+    });
+  };
+
+  const pickRoot = (data, ch) => {
+    const list = Array.isArray(data?.chapters) || Array.isArray(data?.maps)
+      ? (data.chapters || data.maps)
+      : data ? [data] : [];
+    const normalized = normalizeMindMapResponse({ chapters: list }, [ch]);
+    return normalized.chapters[0] || null;
+  };
+
+  const out = [];
+  const shortfalls = [];
+
+  for (const ch of chaptersToMap) {
+    let entry = null;
+    try {
+      entry = pickRoot(await requestMap(ch), ch);
+    } catch (e) {
+      entry = null;   // one bad chapter must not kill the whole revision sheet
+    }
+    if (!entry?.root) continue;
+
+    // FIX-G4.3: if the map is below its node minimum, ask for exactly ONE top-up
+    const ensured = await ensureMindMapSize({
+      root: entry.root,
+      chapter: ch,
+      difficultyPct,
+      ask: async ({ nodes, minNodes, minDepth, needed }) => {
+        const top = await requestMap(
+          ch,
+          `\nYour previous map had only ${nodes} nodes. It MUST have at least ${minNodes} nodes across ${minDepth} levels. Add ${Math.max(1, needed)} MORE distinct branches and leaves for this same chapter — do not repeat existing ones. Return the FULL expanded map.`,
+        );
+        return pickRoot(top, ch)?.root || null;
+      },
+    });
+
+    entry = {
+      ...entry,
+      root: ensured.root,
+      _nodes: ensured.nodes,
+      _depth: ensured.depth,
+      _minNodes: ensured.minNodes,
+      _heavy: !!ensured.heavy,
+    };
+    if (!ensured.ok) shortfalls.push(`${entry.chapter}: ${ensured.nodes}/${ensured.minNodes} nodes`);
+    out.push(entry);
   }
-  return normalized;
+
+  if (!out.length) {
+    throw new Error('Mind map nahi bana — dobara try karo');
+  }
+  const result = { chapters: out };
+  if (shortfalls.length) {
+    result._short = shortfalls;
+    result._banner = `Mind map chhota reh gaya — ${shortfalls.join('; ')} — dobara try karo`;
+  }
+  return result;
 }

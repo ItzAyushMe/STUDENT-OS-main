@@ -2,7 +2,7 @@
 // 7-day view, per-habit streaks, streak freeze power-up and
 // custom habit creation. Light mode.
 import { memo, useCallback, useMemo, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -347,6 +347,18 @@ export function HabitsScreen({ navigation }) {
 
       {/* Add/Edit habit modal */}
       <ModalSheet visible={addOpen} onClose={() => { setAddOpen(false); setEditHabit(null); }} title={editHabit ? 'Edit Habit' : 'New Habit'} mode="light">
+        {/* FIX-G5: the sheet body (AI suggestions + type/category/day/icon
+            pickers) is taller than the sheet, so Save used to fall below the
+            fold and the keyboard covered the name field. Body now SCROLLS
+            (flexShrink so it only shrinks when the content is too tall) inside
+            a KeyboardAvoidingView, and Save stays PINNED outside the scroll. */}
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView
+          style={{ flexGrow: 0, flexShrink: 1 }}
+          contentContainerStyle={{ paddingBottom: 4 }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         {/* AI habit suggestions (add mode only) */}
         {!editHabit ? (
           <Card mode="light" onPress={aiBusy ? undefined : suggestHabits} style={{ marginBottom: 12, backgroundColor: '#ECFEFF', borderColor: '#A5F3FC' }}>
@@ -418,7 +430,9 @@ export function HabitsScreen({ navigation }) {
             </Pressable>
           ))}
         </View>
-        <View style={{ flexDirection: 'row', marginTop: 6 }}>
+        </ScrollView>
+        {/* Save is PINNED here — outside the ScrollView, always visible */}
+        <View style={{ flexDirection: 'row', marginTop: 10 }}>
           <Button
             title={editHabit ? 'Save Changes' : 'Add Habit (+10 XP per day)'}
             mode="light"
@@ -430,6 +444,7 @@ export function HabitsScreen({ navigation }) {
             <Button title="Remove" variant="secondary" mode="light" onPress={() => removeHabit(editHabit)} style={{ flex: 0.6 }} />
           ) : null}
         </View>
+        </KeyboardAvoidingView>
       </ModalSheet>
     </Screen>
   );
