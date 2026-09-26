@@ -116,7 +116,15 @@ export function arcOf(profile) {
 
 // Effective daily study hours with an active arc applied (capped sanely).
 export function effectiveDailyHours(profile) {
-  const base = Number(profile?.daily_study_hours) || 2;
+  const raw = profile?.daily_study_hours;
+  const parsed = Number(raw);
+  // FIX-H: an UNSET value keeps the app default (2h). An explicit 0 stays 0 —
+  // `Number(0) || 2` used to invent 2 hrs/day of study time the student never
+  // said they had, and the scheduler then built an impossible plan on top of it.
+  const base =
+    raw === null || raw === undefined || raw === '' || !Number.isFinite(parsed)
+      ? 2
+      : Math.max(0, parsed);
   const arc = arcOf(profile);
   if (!arc) return base;
   return Math.min(14, Math.round(base * arc.hoursBoost * 10) / 10);
