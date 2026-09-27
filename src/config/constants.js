@@ -184,6 +184,36 @@ export const BOARDS = ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'];
 // system (todayStr / dayjs), never with a second calendar.
 export const CLASS_SESSION_END = '02-25';
 
+// FIX-S S5: the academic session START (1 April), in the same MM-DD form as
+// CLASS_SESSION_END so both compare through the ONE date system (todayStr/dayjs).
+// The Class 10 -> Class 11 promotion window opens on this date.
+export const SESSION_START = '04-01';
+
+// FIX-S S5: promotion scope for this round (PO decision 6: the same machinery
+// serves 11 -> 12 later; that is NOT in scope now).
+export const PROMOTION_FROM_CLASS = 'Class 10';
+export const PROMOTION_TO_CLASS = 'Class 11';
+// Stream is LABEL-ONLY for now (PO decision 2): it is stored on the profile and
+// shown in the prompt, but planning uses the existing COMBINED Class 11 dataset
+// (89 rows). No stream-specific curriculum is created by this round.
+export const PROGRESSION_STREAMS = ['Science', 'Commerce', 'Humanities'];
+
+// FIX-S S5 syllabus lifecycle. 'archived' = superseded history (Class 10 rows kept
+// after promotion). Archived rows are visible history ONLY: never planned, never
+// counted for track progress, never counted as trophies, never deleted.
+export const SYLLABUS_ARCHIVED = 'archived';
+export const isArchivedRow = (r) => String((r && r.status) || '').toLowerCase() === SYLLABUS_ARCHIVED;
+export const activeSyllabusRows = (rows) =>
+  Array.isArray(rows) ? rows.filter((r) => r && !isArchivedRow(r)) : [];
+
+// FIX-S S5 schema gate (PO decision: stay DORMANT until the DDL runs).
+// The promotion flow needs users.progression (jsonb) and the widened
+// syllabus.status CHECK ('archived'). Until then: no prompt, no banner, no
+// archival attempt. Flipped by the PO after the SQL runs, or auto-detected by a
+// READ-side probe (the live users row carries a `progression` key once the column
+// exists). Local/offline mode has no schema, so it is always ready.
+export const S5_SCHEMA_GATE_APPLIED = false;
+
 export const EXAMS = [
   'None', 'JEE Main', 'JEE Advanced', 'NEET', 'NTSE', 'KVPY / INSPIRE',
   'UPSC', 'CAT', 'GATE', 'CLAT', 'CUET', 'Other',

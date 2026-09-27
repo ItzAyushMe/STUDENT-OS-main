@@ -334,7 +334,14 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const trackFnIdx = src.indexOf('seedSyllabusTrack');
   const trackFnSlice = src.slice(trackFnIdx, trackFnIdx + 800);
   assert.ok(!trackFnSlice.includes('if (existing && existing.length) return 0;'), 'seedSyllabusTrack does NOT have early exit blocking merge');
-  assert.ok(trackFnSlice.includes('existingKeys') && trackFnSlice.includes('fresh'), 'seedSyllabusTrack uses existingKeys/fresh merge logic');
+  // FIX-S S5: the merge logic was EXTRACTED to src/lib/presetRows.js (one dedupe rule
+  // for every caller, archived-aware). The guard keeps its intent and now also checks
+  // the new home, so the merge cannot silently disappear from either file.
+  assert.ok(trackFnSlice.includes('selectFreshPresetRows') && trackFnSlice.includes('fresh'), 'seedSyllabusTrack uses the shared existingKeys/fresh merge logic');
+  const presetRowsSrc = read('src/lib/presetRows.js');
+  assert.ok(presetRowsSrc.includes('::') && presetRowsSrc.includes('blockingKeys'), 'presetRows.js owns the subject::chapter merge rule');
+  assert.ok(presetRowsSrc.includes('isArchivedRow'), 'the merge rule ignores ARCHIVED rows (FIX-S S5)');
+  assert.ok(read('src/lib/starterData.js').includes('importPresetRows'), 'starterData still exports the shared preset import');
   const existingRows = [
     { subject: 'Science', chapter: 'Motion', track: 'class', status: 'completed' },
     { subject: 'Science', chapter: 'Force', track: 'class', status: 'in_progress' },
@@ -2549,6 +2556,445 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(ssSrcS.includes('autoRescheduleMissed') && ssSrcS.includes('autoRolledRef'), 'FIX-E rollover wiring preserved');
     assert.ok(sgSrcS.includes('examDates') && sgSrcS.includes('isExamDay') && sgSrcS.includes('FIX-D4'), 'FIX-D4 exam-day guard preserved');
   });
+
+  // ================= S5 — session progression (Class 10 -> Class 11) =================
+  // PO decisions 1-5 + NEW Y's audited criteria S5a-S5f.
+  // The live DDL is NOT run by the agent: the feature stays DORMANT until the PO
+  // applies it (isSchemaReady probes read-side), and the exact SQL lives in
+  // supabase/schema.sql + FIX-S-REPORT.md. These tests exercise the real code paths
+  // against an in-memory store, because every effect in runPromotion() is injected.
+  let PR = null; let prErr = '';
+  try { PR = await import('./../src/lib/progression.js'); }
+  catch (e) { prErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  let PW = null; let pwErr = '';
+  try { PW = await import('./../src/lib/presetRows.js'); }
+  catch (e) { pwErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  let SD = null; let sdErr = '';
+  try { SD = await import('./../src/data/syllabusData.js'); }
+  catch (e) { sdErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+
+  const prSrc = read('src/lib/progression.js');
+  const hookSrc = read('src/hooks/usePromotion.js');
+  const sdLibSrc = read('src/lib/starterData.js');
+  const sySrc = read('src/screens/study/SyllabusScreen.js');
+  const hsSrc = read('src/screens/home/HomeScreen.js');
+
+  const P_TODAY = '2027-04-01';                 // first day of the new session (SESSION_START)
+  const P_STAMP = '2027-04-01T00:00:00.000Z';
+  const P_SESSION = '2027-28';                  // sessionLabelFor('2027-04-01')
+
+  // a Class 10 student with a REAL history: XP, streak, board exams, an olympiad,
+  // content/habits/workouts — everything the promotion must not touch
+  const mkUser = (over = {}) => ({
+    id: 'u-s5',
+    class_level: 'Class 10',
+    board: 'CBSE',
+    total_xp: 12480,
+    current_streak: 27,
+    longest_streak: 41,
+    streak_freezes: 2,
+    competitive_exam: 'NEET',
+    exam_date: '2028-04-15',
+    olympiad: 'NSEP',
+    olympiad_date: '2027-11-21',
+    school_exams: [{ label: 'Class 10 Boards', start_date: '2027-02-24', end_date: '2027-03-03' }],
+    priorities: { order: ['class', 'olympiad', 'exam'], enabled: { class: true }, timeSplit: { class: 60, olympiad: 25, exam: 15 } },
+    arc: { id: 'hard75', start_date: '2027-01-01', day: 40 },
+    days_off: [6],
+    custom_exercises: [{ name: 'Squats' }],
+    progression: null,
+    ...over,
+  });
+
+  // the Class 10 map: 9 rows, mixed statuses. c10-9 deliberately shares its
+  // subject::chapter with a Class 11 chapter — the archived row must NOT swallow it.
+  const COLLISION = 'Units and Measurement — Errors & Significant Figures';
+  const mkClass10Map = () => [
+    { id: 'c10-1', user_id: 'u-s5', subject: 'Science', chapter: 'Life Processes', track: 'class', status: 'completed', progress_percent: 100, completed_at: '2026-11-02T09:00:00.000Z', weightage: 4, estimated_hours: 6 },
+    { id: 'c10-2', user_id: 'u-s5', subject: 'Science', chapter: 'Chemical Reactions (Class 10 fixture)', track: 'class', status: 'completed', progress_percent: 100, completed_at: '2026-12-11T09:00:00.000Z', weightage: 3, estimated_hours: 5 },
+    { id: 'c10-3', user_id: 'u-s5', subject: 'Maths', chapter: 'Trigonometry', track: 'class', status: 'completed', progress_percent: 100, completed_at: '2027-01-18T09:00:00.000Z', weightage: 5, estimated_hours: 8 },
+    { id: 'c10-4', user_id: 'u-s5', subject: 'Maths', chapter: 'Quadratic Equations', track: 'class', status: 'in_progress', progress_percent: 60, completed_at: null, weightage: 4, estimated_hours: 6 },
+    { id: 'c10-5', user_id: 'u-s5', subject: 'English', chapter: 'The Road Not Taken', track: 'class', status: 'in_progress', progress_percent: 25, completed_at: null, weightage: 2, estimated_hours: 3 },
+    { id: 'c10-6', user_id: 'u-s5', subject: 'Hindi', chapter: 'Sagar aur Ram', track: 'class', status: 'locked', progress_percent: 0, completed_at: null, weightage: 2, estimated_hours: 3 },
+    { id: 'c10-7', user_id: 'u-s5', subject: 'Social Science', chapter: 'Nationalism in India', track: 'class', status: 'completed', progress_percent: 100, completed_at: '2027-01-05T09:00:00.000Z', weightage: 3, estimated_hours: 6 },
+    { id: 'c10-8', user_id: 'u-s5', subject: 'AI', chapter: 'Intro to AI', track: 'class', status: 'locked', progress_percent: 0, completed_at: null, weightage: 2, estimated_hours: 4 },
+    { id: 'c10-9', user_id: 'u-s5', subject: 'Physics', chapter: COLLISION, track: 'class', status: 'locked', progress_percent: 0, completed_at: null, weightage: 3, estimated_hours: 5 },
+    // an olympiad row: promotion must NEVER archive it (PO decision 5)
+    { id: 'oly-1', user_id: 'u-s5', subject: 'Physics', chapter: 'Rotational Motion (olympiad)', track: 'olympiad', status: 'in_progress', progress_percent: 30, completed_at: null, weightage: 4, estimated_hours: 10 },
+  ];
+
+  const mkCounts = () => ({ content: 14, habits: 6, workouts: 33, schedule: 120 });
+
+  const mkStore = (rows) => ({
+    syllabus: rows.map((r) => ({ ...r })),
+    sessions: [
+      { id: 'sch-1', user_id: 'u-s5', subject: 'Science', topic: 'Life Processes', session_type: 'study', status: 'pending', date: '2027-04-05', track: 'class' },
+      { id: 'sch-2', user_id: 'u-s5', subject: 'Maths', topic: 'Trigonometry', session_type: 'study', status: 'pending', date: '2027-04-06', track: 'class' },
+      { id: 'sch-3', user_id: 'u-s5', subject: 'Maths', topic: 'Chapter test: Trigonometry', session_type: 'mock', status: 'pending', date: '2027-04-08', track: 'class' },
+      { id: 'sch-4', user_id: 'u-s5', subject: 'Science', topic: 'Life Processes', session_type: 'study', status: 'completed', date: '2026-11-02', track: 'class' },
+      { id: 'sch-5', user_id: 'u-s5', subject: 'Physics', topic: 'Rotational Motion (olympiad)', session_type: 'study', status: 'pending', date: '2027-04-07', track: 'olympiad' },
+    ],
+  });
+
+  // the effects runPromotion() needs — an in-memory stand-in for db.* + updateProfile.
+  // gateApplied:false simulates the LIVE cloud database before the PO runs the DDL:
+  // every write of status='archived' is rejected by the CHECK constraint.
+  const mkDeps = (store, profile, opts = {}) => {
+    const writes = { userPatches: [], syllabusArchive: 0, syllabusInsert: 0, otherTables: [] };
+    const deps = {
+      listSyllabus: async () => store.syllabus,
+      archiveRow: async (id, patch) => {
+        if (opts.gateApplied === false && patch && patch.status === 'archived') {
+          throw new Error('new row for relation "syllabus" violates check constraint "syllabus_status_check"');
+        }
+        const row = store.syllabus.find((r) => r.id === id);
+        if (!row) throw new Error(`no syllabus row ${id}`);
+        Object.assign(row, patch);
+        writes.syllabusArchive += 1;
+        return row;
+      },
+      importRows: async (preset, track, existing) => {
+        const { fresh } = PW.selectFreshPresetRows(profile.id, preset, track, existing, { stamp: P_STAMP });
+        for (const r of fresh) store.syllabus.push({ ...r, id: `new-${store.syllabus.length + 1}` });
+        writes.syllabusInsert += fresh.length;
+        return { inserted: fresh.length };
+      },
+      patchProfile: async (patch) => {
+        writes.userPatches.push(Object.keys(patch).sort());
+        Object.assign(profile, patch);
+        return profile;
+      },
+    };
+    return { deps, writes };
+  };
+
+  const snapshotOf = (profile, counts) => PR.preservationSnapshot({ profile, counts });
+  const isFixtureRow = (r) => String(r.id).startsWith('c10-');
+
+  check('S5a', 'shouldPrompt(profile, today) is pure: Class 10 + nothing decided + on/after 1 Apr -> true; 15 Mar, Class 11 and an accepted student -> false; a decline re-fires the NEXT day', () => {
+    assert.ok(PR, `progression.js import failed: ${prErr}`);
+    assert.equal(typeof PR.shouldPrompt, 'function', 'shouldPrompt(profile, today) must be exported');
+    const c10 = { id: 'u', class_level: 'Class 10', progression: null };
+    assert.equal(PR.shouldPrompt(c10, '2027-04-01'), true, '1 Apr (SESSION_START): the new session has begun -> prompt');
+    assert.equal(PR.shouldPrompt(c10, '2027-04-30'), true, 'the window stays open while nothing is decided');
+    assert.equal(PR.shouldPrompt(c10, '2027-03-15'), false, '15 Mar: board-exam season -> no prompt');
+    assert.equal(PR.shouldPrompt(c10, '2027-02-26'), false, 'the day after the S4 class cutoff -> still no prompt');
+    assert.equal(PR.shouldPrompt({ id: 'u', class_level: 'Class 11', progression: null }, '2027-04-01'), false, 'Class 11 is never prompted');
+    assert.equal(PR.shouldPrompt({ id: 'u', class_level: 'Class 9', progression: null }, '2027-04-01'), false, 'only the Class 10 -> 11 transition is offered');
+    assert.equal(PR.shouldPrompt({ id: 'u', class_level: '10', progression: null }, '2027-04-01'), true, 'class_level "10" normalises to Class 10');
+    const accepted = { ...c10, progression: { session: P_SESSION, status: 'accepted', stream: 'Science', promotedOn: '2027-04-01' } };
+    assert.equal(PR.shouldPrompt(accepted, '2027-04-01'), false, 'already accepted this session');
+    assert.equal(PR.shouldPrompt(accepted, '2028-04-03'), false, 'an acceptance is permanent, not per-session');
+    const declined = { ...c10, progression: { session: P_SESSION, status: 'declined', declinedOn: '2027-04-01' } };
+    assert.equal(PR.shouldPrompt(declined, '2027-04-01'), false, 'asked today -> no double prompt the same day');
+    assert.equal(PR.shouldPrompt(declined, '2027-04-02'), true, 'a decline re-fires the NEXT day (PO decision 4)');
+    assert.equal(PR.shouldPrompt({ ...c10, progression: { session: '2026-27', status: 'declined', declinedOn: '2026-04-02' } }, '2027-04-05'), true, 'an older session decision cannot silence a new session');
+    // session/window maths
+    assert.equal(PR.sessionLabelFor('2027-04-01'), P_SESSION, 'Apr-Dec belongs to the session starting that year');
+    assert.equal(PR.sessionLabelFor('2028-03-31'), P_SESSION, 'Jan-Mar belongs to the session that started last April');
+    assert.equal(PR.promotionDueDate('2027-03-15'), '2027-04-01', 'window opens 1 Apr of the same calendar year');
+    assert.equal(PR.promotionDueDate('2028-02-29'), '2028-04-01', 'leap-year safe');
+    assert.equal(PR.normalizeClassLevel('class-10'), 'Class 10', 'class level normalisation');
+    // purity: no data layer, no wall clock, no env — everything is injected
+    assert.ok(!/^\s*import[^\n]*from\s+'(\.\/db|@react-native-async-storage|@supabase)/m.test(prSrc), 'progression.js must not import the data layer');
+    assert.ok(!/new Date\(\)/.test(prSrc), 'progression.js must not read the wall clock (today is injected)');
+    assert.ok(!/process\.env/.test(prSrc), 'progression.js must not read env');
+    assert.equal(PR.shouldPrompt(c10, '2027-04-01'), PR.shouldPrompt(c10, '2027-04-01'), 'same input -> same output');
+    assert.ok(/SESSION_START/.test(constSrcS), 'constants.js must define SESSION_START next to CLASS_SESSION_END');
+    assert.ok(/PROMOTION_FROM_CLASS|PROMOTION_TO_CLASS/.test(constSrcS), 'the promotion classes live in constants.js, not in a screen');
+  });
+
+  check('S5d', 'an ARCHIVED chapter generates no study, no chapter test and no spaced revision — and never enters the S3 conquered registry', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const syl = [
+      mkS('a1', 'Physics', 'Archived Chapter', { status: 'archived', progress_percent: 40 }),
+      mkS('a2', 'Chemistry', 'Archived Conquered', { status: 'archived', progress_percent: 100, completed_at: '2027-01-02T09:00:00.000Z' }),
+      mkS('k1', 'Maths', 'Live Chapter'),
+    ];
+    const p = generateSchedule({
+      syllabus: syl, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+      userId: 'u-s5d', today: S_TODAY, createdAt: S_CREATED,
+    });
+    assert.equal(p.coverage.archivedExcluded, 2, 'archived rows are counted, not silently dropped');
+    assert.equal(p.coverage.excludedItems.filter((e) => e.reason === 'archived').length, 2, 'the exclusion registry carries reason "archived"');
+    assert.ok(!p.some((r) => /Archived Chapter|Archived Conquered/.test(String(r.topic || ''))), 'no session of ANY kind for an archived chapter');
+    assert.equal(p.filter((r) => LADDER_RE.test(String(r.topic || ''))).length, 0, 'no chapter test / spaced revision ladder for an archived conquered chapter');
+    assert.ok(!p.coverage.completedItems.some((c) => c.id === 'a2'), 'archived rows never enter the S3 conquered registry');
+    assert.ok(p.coverage.classTotal >= 1 && p.some((r) => r.topic === 'Live Chapter'), 'the live chapter still plans normally');
+    // archived history gets no deadline either
+    const dl = autoSetDeadlines(syl, '2027-05-10', 3, []);
+    assert.equal(dl.a1, undefined, 'an archived row gets no deadline');
+    assert.equal(dl.a2, undefined, 'an archived CONQUERED row gets no deadline');
+    assert.ok(dl.k1, 'a live row still gets one');
+    // one predicate, owned by constants.js, used by the planner and the screens
+    assert.ok(/isArchivedRow/.test(constSrcS) && /activeSyllabusRows/.test(constSrcS), 'constants.js owns the archived predicate');
+    assert.ok(/isArchivedRow/.test(sgSrcS), 'the planner filters through the shared predicate');
+    // the archived map is surfaced as collapsible history and nothing more
+    assert.ok(sySrc.includes('Class 10 · Archived'), 'SyllabusScreen renders the "Class 10 · Archived" section (PO decision 3)');
+    assert.ok(sySrc.includes('archivedOpen'), 'that section is collapsible');
+    assert.ok(sySrc.includes('activeSyllabusRows(rows)'), 'progress/subject cards count ACTIVE rows only');
+  });
+
+  {
+    const record = async (id, desc, fn) => {
+      try { await fn(); results.push({ id, desc, ok: true }); }
+      catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+    };
+
+    await record('S5b', 'accept("Science") -> class_level Class 11 + progression record, every Class 10 row archived, the combined 89-chapter Class 11 set imported, and XP/streak/content/habits/workouts byte-identical', async () => {
+      assert.ok(PR, `progression.js import failed: ${prErr}`);
+      assert.ok(PW, `presetRows.js import failed: ${pwErr}`);
+      assert.ok(SD, `syllabusData.js import failed: ${sdErr}`);
+      const profile = mkUser();
+      const counts = mkCounts();
+      const before = JSON.stringify(snapshotOf(profile, counts));
+      const store = mkStore(mkClass10Map());
+      const { deps, writes } = mkDeps(store, profile);
+
+      const plan = PR.planAccept({ userId: profile.id, profile, rows: store.syllabus, stream: 'Science', today: P_TODAY, stamp: P_STAMP });
+      const res = await PR.runPromotion(plan, deps);
+      assert.equal(res.ok, true, `accept must succeed, got: ${res.message || JSON.stringify(res)}`);
+
+      // class level + the progression record
+      assert.equal(profile.class_level, 'Class 11', 'class_level becomes Class 11');
+      assert.equal(res.classLevel, 'Class 11');
+      assert.equal(profile.progression.status, 'accepted');
+      assert.equal(profile.progression.session, P_SESSION, 'the decision is bound to the session year');
+      assert.equal(profile.progression.stream, 'Science', 'the stream is recorded');
+      assert.equal(profile.progression.promotedOn, P_TODAY);
+      assert.equal(profile.progression.declinedOn, undefined, 'an acceptance carries no declinedOn');
+
+      // archival: every Class 10 row, history fields intact, olympiad row untouched
+      const fixture = store.syllabus.filter(isFixtureRow);
+      assert.equal(fixture.length, 9, 'fixture sanity');
+      assert.ok(fixture.every((r) => r.status === 'archived'), 'ALL Class 10 rows are archived');
+      assert.equal(res.archived, 9);
+      const conquered = fixture.find((r) => r.id === 'c10-3');
+      assert.equal(conquered.completed_at, '2027-01-18T09:00:00.000Z', 'conquered history stays on the archived row');
+      assert.equal(conquered.progress_percent, 100, 'archived progress is not reset');
+      const partial = fixture.find((r) => r.id === 'c10-4');
+      assert.equal(partial.progress_percent, 60, 'in-progress history is preserved too');
+      const oly = store.syllabus.find((r) => r.id === 'oly-1');
+      assert.equal(oly.status, 'in_progress', 'the olympiad row is NEVER archived (PO decision 5)');
+
+      // import: the COMBINED Class 11 dataset (PO decision 2) — not a stream subset
+      const imported = store.syllabus.filter((r) => !isFixtureRow(r) && r.id !== 'oly-1');
+      assert.equal(imported.length, 89, 'the Class 11 import must yield the full combined 89-chapter set');
+      assert.equal(res.imported, 89);
+      assert.equal(SD.CLASS_SYLLABI['Class 11'].rows.length, 89, 'source dataset check');
+      assert.ok(imported.every((r) => r.track === 'class' && r.status === 'locked' && r.progress_percent === 0), 'imported rows are fresh class-track rows');
+      // DEVIATION GUARD (declared in the report): pickSyllabusSet hands a NEET profile
+      // the 11-row CLASS11_12_PCB subset, so the promotion resolves CLASS_SYLLABI
+      // explicitly — otherwise a NEET aspirant would lose 78 chapters on promotion.
+      const pcb = SD.pickSyllabusSet({ class_level: 'Class 11', competitive_exam: 'NEET' }).class;
+      assert.equal(pcb.rows.length, 11, 'the PCB subset exists and is what pickSyllabusSet returns for NEET');
+      assert.notEqual(imported.length, pcb.rows.length, 'the promotion must NOT import the PCB subset');
+      assert.equal(plan.preset.key, 'Class 11', 'the promotion names its preset explicitly');
+      // an archived row never blocks the fresh Class 11 chapter of the same name
+      const collided = store.syllabus.filter((r) => r.subject === 'Physics' && r.chapter === COLLISION);
+      assert.equal(collided.length, 2, 'archived Class 10 row + freshly imported Class 11 row coexist');
+      assert.equal(collided.filter((r) => r.status === 'archived').length, 1);
+      assert.equal(collided.filter((r) => r.status === 'locked').length, 1);
+      assert.equal(PW.selectFreshPresetRows('u', SD.CLASS_SYLLABI['Class 11'], 'class', fixture).fresh.length, 89, 'the dedupe rule ignores archived rows');
+
+      // PRESERVATION: byte-identical before/after
+      assert.equal(JSON.stringify(snapshotOf(profile, counts)), before, 'XP / streak / freezes / board / exam dates / school exams / content / habits / workouts changed');
+      assert.equal(profile.total_xp, 12480, 'total_xp untouched');
+      assert.equal(profile.current_streak, 27, 'streak untouched');
+      assert.equal(counts.content, 14, 'Content Locker count untouched');
+      assert.equal(counts.habits, 6, 'habits untouched');
+      assert.equal(counts.workouts, 33, 'workouts untouched');
+      assert.equal(counts.schedule, 120, 'schedule history count untouched');
+
+      // the write set is EXACTLY two profile fields and nothing but syllabus/users
+      assert.deepEqual(writes.userPatches, [['class_level', 'progression']], `unexpected profile write set: ${JSON.stringify(writes.userPatches)}`);
+      assert.equal(writes.otherTables.length, 0, 'no table other than syllabus/users may be written');
+      assert.equal(writes.syllabusArchive, 9, 'exactly the Class 10 rows were archived');
+      assert.equal(writes.syllabusInsert, 89, 'exactly the Class 11 rows were inserted');
+
+      // pending Class 10 sessions are retired; completed history is not
+      const retire = PR.pendingSessionsToRetire(store.sessions, fixture);
+      assert.deepEqual(retire.ids.sort(), ['sch-1', 'sch-2', 'sch-3'], 'pending sessions of archived chapters (incl. the ladder test) are retired');
+      assert.ok(!retire.ids.includes('sch-4'), 'completed history is never deleted');
+      assert.ok(!retire.ids.includes('sch-5'), 'olympiad sessions are never retired');
+
+      // stream is a LABEL only: every stream imports the same combined set
+      const other = PR.planAccept({ userId: 'u', profile: mkUser(), rows: mkClass10Map(), stream: 'Commerce', today: P_TODAY, stamp: P_STAMP });
+      assert.equal(other.preset.rowCount, plan.preset.rowCount, 'Commerce imports the same 89 chapters (label-only stream)');
+      assert.equal(other.preset.key, plan.preset.key);
+      assert.throws(
+        () => PR.planAccept({ userId: 'u', profile: mkUser(), rows: [], stream: 'Arts', today: P_TODAY, stamp: P_STAMP }),
+        /stream must be one of/, 'an unknown stream is refused, not silently accepted'
+      );
+      // PO decision 5: retired Class 10 school exams stop driving planning
+      const after = PR.activeSchoolExams(profile, profile.school_exams);
+      assert.equal(after.length, 0, 'the Class 10 board exam no longer drives planning after promotion');
+      assert.equal(profile.school_exams.length, 1, 'but it is still SAVED on the profile');
+      assert.equal(PR.activeSchoolExams({ class_level: 'Class 10', progression: null }, profile.school_exams).length, 1, 'before promotion it still drives planning');
+    });
+
+    await record('S5c', 'decline -> progression declined + declinedOn, class_level unchanged, nothing archived, ZERO class sessions with an honest summary, olympiad/competitive unchanged, prompt re-fires next day', async () => {
+      assert.ok(PR, `progression.js import failed: ${prErr}`);
+      const profile = mkUser();
+      const counts = mkCounts();
+      const before = JSON.stringify(snapshotOf(profile, counts));
+      const store = mkStore(mkClass10Map());
+      const { deps, writes } = mkDeps(store, profile);
+
+      const res = await PR.runPromotion(PR.planDecline({ userId: profile.id, profile, today: P_TODAY, stamp: P_STAMP }), deps);
+      assert.equal(res.ok, true, `decline must succeed, got: ${res.message || JSON.stringify(res)}`);
+      assert.equal(profile.class_level, 'Class 10', 'declining NEVER changes class_level');
+      assert.equal(profile.progression.status, 'declined');
+      assert.equal(profile.progression.declinedOn, P_TODAY, 'declinedOn drives the next-day re-prompt');
+      assert.equal(profile.progression.session, P_SESSION);
+      assert.equal(profile.progression.stream, null, 'no stream is recorded for a decline');
+      assert.equal(store.syllabus.filter((r) => r.status === 'archived').length, 0, 'nothing is archived on decline');
+      assert.equal(store.syllabus.length, 10, 'nothing is imported on decline');
+      assert.deepEqual(writes.userPatches, [['progression']], 'a decline writes ONLY progression');
+      assert.equal(writes.syllabusArchive, 0);
+      assert.equal(writes.syllabusInsert, 0);
+      assert.equal(JSON.stringify(snapshotOf(profile, counts)), before, 'XP/streak/content/habits/workouts untouched');
+
+      // re-prompt the next day (PO decision 4)
+      assert.equal(PR.shouldPrompt(profile, P_TODAY), false, 'asked today -> quiet today');
+      assert.equal(PR.shouldPrompt(profile, '2027-04-02'), true, 'decline re-fires the next day');
+      assert.equal(PR.promotionState(profile, P_TODAY), 'declined', 'the UI can show the paused state');
+
+      // the planner: ZERO class sessions, honest summary, olympiad/competitive intact
+      const paused = PR.classPausedFor(profile, '2027-04-02');
+      assert.ok(paused && paused.reason === 'promotion-declined' && paused.since === P_TODAY, 'classPausedFor feeds the planner');
+      const syl = [
+        mkS('c1', 'Physics', 'Kinematics'),
+        mkS('c2', 'Chemistry', 'Mole Concept'),
+        mkS('c3', 'Maths', 'Sets'),
+        mkS('o1', 'Physics', 'Rotational Motion (olympiad)', { track: 'olympiad', estimated_hours: 10 }),
+        mkS('e1', 'Physics', 'NEET Physics — Modern', { track: 'exam', estimated_hours: 8 }),
+      ];
+      const common = {
+        syllabus: syl, dailyHours: 3, preferredTime: 'Morning', daysOff: [], prepLevel: 'Intermediate',
+        weeks: 4, userId: 'u-s5c', today: '2027-04-02', createdAt: '2027-04-02T00:00:00.000Z',
+        olympiadDate: '2027-11-21', examDate: '2028-04-15',
+      };
+      const unpaused = generateSchedule(common);
+      const plan = generateSchedule({ ...common, classPaused: paused });
+      assert.equal(plan.filter((r) => r.track === 'class').length, 0, 'ZERO class sessions while the promotion is declined');
+      assert.equal(plan.coverage.classTotal, 0, 'the summary reports no class work at all');
+      assert.equal(plan.coverage.classPaused.heldChapters, 3, 'how many chapters were held back is reported');
+      assert.ok(plan.coverage.reasons.includes('class-paused'), 'the reason is in the coverage registry');
+      assert.ok(/paused/i.test(String(plan.coverage.coverageWarning || '')), 'an honest summary line, not a silently shorter plan');
+      assert.equal(plan.coverage.classCutoffDaysBlocked, unpaused.coverage.classCutoffDaysBlocked, 'a pause is never reported as the S4 class cutoff');
+      assert.ok(plan.length > 0, 'the plan is not empty — the other tracks keep running');
+      // olympiad / competitive unchanged: same chapters, same totals, still scheduled
+      const itemKey = (c) => (c.planned || []).filter((i) => i.track !== 'class').map((i) => `${i.subject}|${i.chapter}`).sort();
+      assert.deepEqual(itemKey(plan.coverage), itemKey(unpaused.coverage), 'olympiad/exam chapters keep exactly their plan');
+      assert.equal(plan.coverage.olympiadTotal, unpaused.coverage.olympiadTotal, 'olympiad workload unchanged');
+      assert.equal(plan.coverage.examTotal, unpaused.coverage.examTotal, 'competitive workload unchanged');
+      assert.ok(plan.filter((r) => r.track === 'olympiad').length > 0, 'olympiad sessions keep running');
+      assert.ok(plan.filter((r) => r.track === 'exam').length > 0, 'competitive sessions keep running');
+      assert.ok(plan.filter((r) => r.track !== 'class').length >= unpaused.filter((r) => r.track !== 'class').length, 'no olympiad/competitive session is lost to the pause');
+      // wiring: the screen feeds the planner, it does not re-implement the rule
+      assert.ok(ssSrcS.includes('classPaused: promo.paused'), 'ScheduleScreen passes the pause into the planner');
+      assert.ok(ssSrcS.includes('promo.schoolExamsForPlanning()'), 'retired Class 10 school exams stop driving planning');
+      assert.ok(hsSrc.includes('promo.paused'), 'Home says the class track is paused');
+    });
+
+    await record('S5e', 'local (offline) mode: accept and decline both work with no cloud; cloud mode stays DORMANT until the schema gate is applied, and a refused archive never half-promotes', async () => {
+      assert.ok(PR, `progression.js import failed: ${prErr}`);
+      // a LOCAL users row has no schema at all -> always ready
+      assert.equal(PR.isSchemaReady({ id: 'u', class_level: 'Class 10' }, { remote: false }), true, 'local mode must not be gated');
+      // cloud: a row WITHOUT the progression key means the DDL has not run yet
+      assert.equal(PR.isSchemaReady({ id: 'u', class_level: 'Class 10' }, { remote: true }), false, 'cloud without users.progression -> dormant (no prompt, no banner)');
+      assert.equal(PR.isSchemaReady({ id: 'u', class_level: 'Class 10', progression: null }, { remote: true }), true, 'cloud with the column present -> ready');
+
+      // full local accept round trip
+      const local = mkUser({ id: 'u-local' });
+      delete local.progression; // a local row literally has no such key
+      const store = mkStore(mkClass10Map());
+      const { deps, writes } = mkDeps(store, local);
+      const res = await PR.runPromotion(PR.planAccept({ userId: local.id, profile: local, rows: store.syllabus, stream: 'Humanities', today: P_TODAY, stamp: P_STAMP }), deps);
+      assert.equal(res.ok, true, `local accept must work with the cloud absent: ${res.message || ''}`);
+      assert.equal(local.class_level, 'Class 11');
+      assert.equal(local.progression.stream, 'Humanities');
+      assert.equal(res.imported, 89, 'the same combined set is imported offline');
+      assert.equal(store.syllabus.filter(isFixtureRow).every((r) => r.status === 'archived'), true, 'archival works offline');
+      assert.deepEqual(writes.userPatches, [['class_level', 'progression']]);
+
+      // full local decline round trip (second student)
+      const local2 = mkUser({ id: 'u-local2' });
+      delete local2.progression;
+      const store2 = mkStore(mkClass10Map());
+      const d2 = mkDeps(store2, local2);
+      const r2 = await PR.runPromotion(PR.planDecline({ userId: local2.id, profile: local2, today: P_TODAY, stamp: P_STAMP }), d2.deps);
+      assert.equal(r2.ok, true, 'local decline must work with the cloud absent');
+      assert.equal(local2.class_level, 'Class 10');
+      assert.equal(PR.shouldPrompt(local2, '2027-04-02'), true, 'the offline decline still re-prompts next day');
+
+      // the schema gate: cloud archival refusal must abort BEFORE class_level changes
+      const gated = mkUser({ id: 'u-gated' });
+      const store3 = mkStore(mkClass10Map());
+      const d3 = mkDeps(store3, gated, { gateApplied: false });
+      const r3 = await PR.runPromotion(PR.planAccept({ userId: gated.id, profile: gated, rows: store3.syllabus, stream: 'Science', today: P_TODAY, stamp: P_STAMP }), d3.deps);
+      assert.equal(r3.ok, false, 'without the DDL the accept must FAIL, not pretend');
+      assert.equal(r3.reason, 'schema-gate', 'the failure names the gate');
+      assert.equal(gated.class_level, 'Class 10', 'NEVER a half-promotion: class_level untouched');
+      assert.equal(gated.progression, null, 'no progression record written either');
+      assert.equal(store3.syllabus.filter((r) => r.status === 'archived').length, 0, 'nothing archived');
+      assert.equal(store3.syllabus.length, 10, 'nothing imported');
+      assert.equal(d3.writes.userPatches.length, 0, 'no users write at all');
+      assert.ok(/DDL|schema gate/i.test(String(r3.message)), 'the message tells the PO what to run');
+      assert.ok(PR.shouldPrompt(gated, '2027-04-02'), true, 'the student is asked again once the gate is applied');
+
+      // wiring: ONE controller for both screens, probing the gate read-side
+      assert.ok(hookSrc.includes('isSchemaReady(profile, { remote: isRemote() })'), 'the hook probes the gate with the real mode');
+      assert.ok(hookSrc.includes('runPromotion(') && hookSrc.includes('importPresetRows'), 'the hook runs the same engine and the shared import');
+      assert.ok(ssSrcS.includes('usePromotion()') && hsSrc.includes('usePromotion()'), 'Schedule and Home share ONE promotion controller');
+      assert.ok(/S5_SCHEMA_GATE_APPLIED\s*=\s*false/.test(constSrcS), 'the code declares the live gate as NOT applied yet (dormant)');
+    });
+
+    await record('S5f', 'one-time per session: the accepted state survives regeneration and relaunch, archived chapters never return to the calendar, and no second prompt fires', async () => {
+      assert.ok(PR, `progression.js import failed: ${prErr}`);
+      const profile = mkUser();
+      const store = mkStore(mkClass10Map());
+      const { deps } = mkDeps(store, profile);
+      const res = await PR.runPromotion(PR.planAccept({ userId: profile.id, profile, rows: store.syllabus, stream: 'Science', today: P_TODAY, stamp: P_STAMP }), deps);
+      assert.equal(res.ok, true, 'accept must succeed');
+      const stored = JSON.parse(JSON.stringify(profile.progression)); // what a relaunch re-reads
+
+      // no double prompt: same day, next day, later in the session, next session
+      assert.equal(PR.shouldPrompt(profile, P_TODAY), false, 'no second prompt the same day');
+      assert.equal(PR.shouldPrompt(profile, '2027-04-02'), false, 'none the next day');
+      assert.equal(PR.shouldPrompt(profile, '2027-12-31'), false, 'none later in the same session year');
+      assert.equal(PR.shouldPrompt(profile, '2028-04-03'), false, 'an accepted student is never prompted again');
+      assert.equal(PR.promotionState(profile, '2027-04-02'), 'accepted', 'a relaunch reads the same accepted state');
+      assert.equal(PR.classPausedFor(profile, '2027-04-02'), null, 'an accepted student is never treated as paused');
+      assert.deepEqual(PR.progressionOf(profile), PR.progressionOf({ ...profile, progression: JSON.parse(JSON.stringify(stored)) }), 'the record round-trips unchanged');
+
+      // regeneration over the NEW map: the archived Class 10 chapters stay out
+      const regen = generateSchedule({
+        syllabus: store.syllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 3,
+        userId: 'u-s5f', today: '2027-04-02', createdAt: '2027-04-02T00:00:00.000Z', examDate: '2028-04-15',
+      });
+      assert.equal(regen.coverage.archivedExcluded, 9, 'every regeneration excludes the archived Class 10 map');
+      assert.ok(!regen.some((r) => /Class 10 fixture|Life Processes|Nationalism in India/.test(String(r.topic || ''))), 'no archived chapter returns to the calendar');
+      assert.ok(regen.some((r) => r.track === 'class' && r.session_type === 'study'), 'the new Class 11 map plans normally');
+      assert.ok(regen.some((r) => r.track === 'olympiad'), 'the olympiad row survived the promotion and still plans');
+      assert.deepEqual(JSON.parse(JSON.stringify(profile.progression)), stored, 'planning never rewrites the progression record');
+      assert.equal(profile.class_level, 'Class 11');
+
+      // UI discipline: the sheet opens once per prompt-day and is ONE shared component
+      assert.ok(ssSrcS.includes('promoAskedRef'), 'ScheduleScreen opens the sheet once per prompt-day (no nag loop on every focus)');
+      assert.ok(ssSrcS.includes('PromotionSheet') && hsSrc.includes('PromotionSheet'), 'Schedule and Home render the SAME sheet component');
+      assert.ok(hsSrc.includes('PromotionSheet'), 'Home carries the banner/sheet too (PO decision 4)');
+      // the shared import replaced the screen-local duplicate
+      assert.ok(sySrc.includes('importPresetRows('), 'SyllabusScreen uses the shared import');
+      assert.ok(!/const rowsToInsert = preset\.rows\.map/.test(sySrc), 'the screen-local duplicate import is gone');
+      assert.ok(sdLibSrc.includes('selectFreshPresetRows'), 'starterData delegates to the ONE dedupe rule');
+      // the schema gate is documented in the repo, not run by the agent
+      const schemaSrc = read('supabase/schema.sql');
+      assert.ok(/progression jsonb/.test(schemaSrc), 'schema.sql documents users.progression');
+      assert.ok(/'archived'/.test(schemaSrc), "schema.sql widens the syllabus.status CHECK to include 'archived'");
+    });
+  }
 
   const failedS = results.filter((r) => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);

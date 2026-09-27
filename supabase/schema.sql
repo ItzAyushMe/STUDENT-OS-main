@@ -34,6 +34,7 @@ create table if not exists public.users (
   preferred_time text,
   prep_level text,
   days_off jsonb default '[]',
+  progression jsonb default null, -- FIX-S S5: { session, promptedAt, status:'accepted'|'declined', stream, fromClass, toClass, declinedOn, promotedOn, archivedRows, importedRows }
   commitments text,
   total_xp integer default 0,
   current_streak integer default 0,
@@ -81,7 +82,11 @@ create table if not exists public.syllabus (
   track text default 'class' check (track in ('class','olympiad','exam') or track like 'custom:%'), -- custom priority tracks (v1.0.2)
   weightage integer default 3 check (weightage between 1 and 5),
   estimated_hours numeric default 4,
-  status text default 'locked' check (status in ('locked','in_progress','completed')),
+  -- FIX-S S5: 'archived' = superseded history (e.g. the Class 10 map kept after
+  -- promotion to Class 11). Archived rows are readable history only: the planner,
+  -- progress, trophies and deadlines all filter them out (config/constants.js
+  -- isArchivedRow / activeSyllabusRows).
+  status text default 'locked' check (status in ('locked','in_progress','completed','archived')),
   progress_percent integer default 0 check (progress_percent between 0 and 100),
   deadline date,
   completed_at timestamptz,
@@ -525,6 +530,48 @@ alter table public.users     add column if not exists olympiad_date date;
 -- arc already migrated above (keep existing statement, do not duplicate per R1 spec)
 alter table public.habits    add column if not exists kind text default 'good';
 alter table public.users     add column if not exists gym_split jsonb default null;
+
+-- ============================================================
+-- FIX-S S5: session progression (Class 10 -> Class 11)
+-- Additive only. Run by the PO against the live database; the app stays DORMANT
+-- until it is applied (isSchemaReady() in src/lib/progression.js probes for the
+-- column read-side, so no prompt/banner appears before this runs).
+--
+--   alter table public.users add column if not exists progression jsonb default null;
+--   alter table public.syllabus drop constraint if exists syllabus_status_check;
+--   alter table public.syllabus add constraint syllabus_status_check
+--     check (status in ('locked','in_progress','completed','archived'));
+--
+-- Pre-check (PO): confirm the live constraint name before dropping it —
+--   select conname, pg_get_constraintdef(oid) from pg_constraint
+--    where conrelid = 'public.syllabus'::regclass and contype = 'c';
+-- RLS needs no change: the syllabus/users policies are row-level
+-- (auth.uid() = user_id / id) and never enumerate columns.
+-- ============================================================
+alter table public.users add column if not exists progression jsonb default null;
+comment on column public.users.progression is
+  'FIX-S S5: { session:"2026-27", promptedAt, status:"accepted"|"declined", stream:"Science"|"Commerce"|"Humanities", declinedOn }';
+
+DO $$
+BEGIN
+  -- widen the status CHECK so 'archived' is storable (idempotent, guard-first)
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.syllabus'::regclass
+       AND conname = 'syllabus_status_check'
+       AND pg_get_constraintdef(oid) NOT LIKE '%archived%'
+  ) THEN
+    ALTER TABLE public.syllabus DROP CONSTRAINT syllabus_status_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.syllabus'::regclass AND conname = 'syllabus_status_check'
+  ) THEN
+    ALTER TABLE public.syllabus
+      ADD CONSTRAINT syllabus_status_check
+      CHECK (status IN ('locked','in_progress','completed','archived'));
+  END IF;
+END $$;
 
 -- v1.0.2 audit HIGH-2 + NEW X R1: allow custom priority tracks (track like 'custom:%')
 -- in schedule/syllabus. Without this, generating a schedule with a custom

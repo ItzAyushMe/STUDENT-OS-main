@@ -19,7 +19,10 @@ import { PixelText } from '../../components/gamer/PixelText';
 import { XPCounter, LevelBadge, StreakFlame, TierBadge } from '../../components/gamer/Badges';
 import { Confetti } from '../../components/gamer/Confetti';
 import { ProgressBar } from '../../components/ui/ProgressBar';
+import { Button } from '../../components/ui/Button';
+import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { useIsOnline } from '../../hooks/useIsOnline';
+import { usePromotion } from '../../hooks/usePromotion';
 
 export function HomeScreen({ navigation }) {
   const { profile, updateProfile } = useAuth();
@@ -33,6 +36,10 @@ export function HomeScreen({ navigation }) {
   const [confetti, setConfetti] = useState(0);
   const [aiDailyMsg, setAiDailyMsg] = useState('');
   const [arcOpen, setArcOpen] = useState(false);
+  // FIX-S S5 (PO decision 4): Home carries a banner; Schedule opens the sheet on
+  // load. Same hook, same sheet — the decision can never disagree between screens.
+  const promo = usePromotion();
+  const [promoOpen, setPromoOpen] = useState(false);
 
   const aiConfigured = settings.aiStatus?.anyConfigured;
   const aiDown = settings.aiHealth && settings.aiHealth.ok === false;
@@ -60,6 +67,19 @@ export function HomeScreen({ navigation }) {
   }, [profile?.id, today]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // FIX-S S5: promotion handlers (all rules live in lib/progression.js)
+  const onPromoAccept = useCallback(async (stream) => {
+    const res = await promo.accept(stream);
+    setPromoOpen(false);
+    if (res?.ok) { setConfetti(Date.now()); await load(); }
+  }, [promo, load]);
+
+  const onPromoDecline = useCallback(async () => {
+    await promo.decline();
+    setPromoOpen(false);
+    await load();
+  }, [promo, load]);
 
   // Personalized AI morning message — uses today's REAL plan + weak areas.
   // Cached per day; degrades silently when AI is offline.
@@ -181,6 +201,96 @@ export function HomeScreen({ navigation }) {
       showsVerticalScrollIndicator={false}
     >
       <Confetti trigger={confetti} origin={{ x: '50%', y: '25%' }} />
+
+      {/* FIX-S S5: promotion banner — Class 10 -> Class 11 once the session rolls */}
+      {promo.ready && promo.state === 'prompt' ? (
+        <View
+          style={{
+            backgroundColor: `${GAMER.primary}22`,
+            borderWidth: 1,
+            borderColor: `${GAMER.primary}66`,
+            borderRadius: radius.lg,
+            padding: 13,
+            marginBottom: 14,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={{ fontSize: 20, marginRight: 9 }}>🎓</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: GAMER.primarySoft }}>
+                Class 10 khatam — {promo.toClass} mein move karo?
+              </Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2, lineHeight: 15 }}>
+                Naya session 1 April se shuru. Class 10 map archive hoga (history safe), {promo.preset?.rowCount ?? 0}{' '}
+                {promo.toClass} chapters import honge. XP, streak aur habits untouched.
+              </Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', marginTop: 10 }}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Button title="Decide karo 🎓" size="sm" mode="gamer" onPress={() => setPromoOpen(true)} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="Abhi nahi"
+                size="sm"
+                variant="ghost"
+                mode="gamer"
+                disabled={promo.busy}
+                onPress={onPromoDecline}
+              />
+            </View>
+          </View>
+          {!!promo.error ? (
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.danger, marginTop: 8, lineHeight: 15 }}>
+              ⚠️ {promo.error}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      {/* FIX-S S5: declined -> class track paused, said out loud */}
+      {promo.paused ? (
+        <Pressable
+          onPress={() => setPromoOpen(true)}
+          style={{
+            backgroundColor: 'rgba(245,158,11,0.12)',
+            borderWidth: 1,
+            borderColor: 'rgba(245,158,11,0.4)',
+            borderRadius: radius.lg,
+            padding: 12,
+            marginBottom: 14,
+            flexDirection: 'row',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ fontSize: 16, marginRight: 9 }}>⏸️</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: GAMER.warn, lineHeight: 17 }}>
+              Class planning paused — {promo.toClass} promotion decline kiya tha
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2, lineHeight: 15 }}>
+              Schedule mein class track ke zero session banenge{promo.paused.since ? ` (${promo.paused.since} se)` : ''}.
+              Olympiad/competitive normal chalenge. Tap karke decide karo.
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
+
+      {promo.msg ? (
+        <View
+          style={{
+            backgroundColor: 'rgba(16,185,129,0.12)',
+            borderWidth: 1,
+            borderColor: 'rgba(16,185,129,0.4)',
+            borderRadius: radius.lg,
+            padding: 12,
+            marginBottom: 14,
+          }}
+        >
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: GAMER.accent, lineHeight: 16 }}>{promo.msg}</Text>
+        </View>
+      ) : null}
 
       {/* active study arc banner */}
       {arc ? (
@@ -572,6 +682,18 @@ export function HomeScreen({ navigation }) {
           </Pressable>
         </Pressable>
       </Modal>
+      {/* FIX-S S5: the promotion sheet (same component Schedule uses) */}
+      <PromotionSheet
+        visible={promoOpen}
+        onClose={() => { setPromoOpen(false); promo.dismiss(); }}
+        streams={promo.streams}
+        toClass={promo.toClass}
+        preset={promo.preset}
+        busy={promo.busy}
+        error={promo.error}
+        onAccept={onPromoAccept}
+        onDecline={onPromoDecline}
+      />
     </ScrollView>
   );
 }

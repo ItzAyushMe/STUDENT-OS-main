@@ -23,6 +23,7 @@ import { aiStatus, isOnline } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, fmtClock, nowIso, seededShuffle } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const MODES = {
   quick: { label: 'Quick Quiz', count: 5, icon: '⚡', hint: '5 questions, warm-up' },
@@ -75,7 +76,8 @@ export function QuizScreen({ navigation, route }) {
     useCallback(() => {
       if (!profile?.id) return;
       db.list('syllabus', { eq: { user_id: profile.id } }).then((rows) => {
-        setSubjects([...new Set(rows.map((r) => r.subject))]);
+        // FIX-S S5: quizzes are built from the ACTIVE map only
+        setSubjects([...new Set(activeSyllabusRows(rows).map((r) => r.subject))]);
       });
     }, [profile?.id])
   );
@@ -95,7 +97,7 @@ export function QuizScreen({ navigation, route }) {
       const status = aiStatus();
       if (status.anyConfigured && (await isOnline())) {
         try {
-          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const syllabusRows = activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })); // FIX-S S5
           const chapters = syllabusRows.slice(0, 60).map((r) => r.chapter);
           const aiQs = await aiGenerateQuiz({
             subject: '',
@@ -117,7 +119,7 @@ export function QuizScreen({ navigation, route }) {
       if (status.anyConfigured && (await isOnline())) {
         try {
           // pull the student's OWN syllabus chapters for this subject
-          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const syllabusRows = activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })); // FIX-S S5
           const trackRows = syllabusRows.filter(
             (r) => !r.track || r.track === 'class' || r.track === 'olympiad' || r.track === 'exam'
           );

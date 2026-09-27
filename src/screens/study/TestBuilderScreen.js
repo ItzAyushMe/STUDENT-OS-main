@@ -23,6 +23,7 @@ import { db } from '../../lib/db';
 import { useHubBack } from '../../hooks/useHubBack';
 import { aiGenerateTest, aiGenerateQuestionBank, aiGenerateMindMap, AIUnavailableError } from '../../lib/aiFeatures';
 import { fonts, radius } from '../../config/theme';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const MODES = [
   { key: 'test', label: '📝 Test (2 sets)' },
@@ -139,7 +140,8 @@ export function TestBuilderScreen({ navigation }) {
     if (!profile?.id) return;
     try {
       const data = await db.list('syllabus', { eq: { user_id: profile.id } });
-      setRows(data.filter((r) => r.status !== 'completed'));
+      // FIX-S S5: a test paper is built from the ACTIVE map — archived chapters out
+      setRows(activeSyllabusRows(data).filter((r) => r.status !== 'completed'));
     } catch (e) {
       console.warn('[F6] TestBuilder load failed', e?.message);
       setError(e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Syllabus load nahi ho paya — dobara try karo');

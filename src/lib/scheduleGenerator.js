@@ -43,7 +43,7 @@
 //   - catch-up (autoRescheduleMissed) when the student falls behind
 // ============================================================
 import dayjs from 'dayjs';
-import { SESSION_TYPES, TRACK_PRIORITY, CLASS_SESSION_END } from '../config/constants';
+import { SESSION_TYPES, TRACK_PRIORITY, CLASS_SESSION_END, isArchivedRow } from '../config/constants';
 import { minutesToTime, todayStr, dateStr, nowIso } from './utils';
 
 const PREFERRED_START = {
@@ -200,6 +200,9 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
   const byTrack = { class: [], olympiad: [], exam: [] };
   for (const row of syllabusRows) {
     if (row.status === 'completed') continue;
+    // FIX-S S5: archived rows are finished history (e.g. the Class 10 map kept
+    // after promotion). They get no deadline and no share of the window.
+    if (isArchivedRow(row)) continue;
     byTrack[rowTrack(row)].push(row);
   }
   const deadlines = {};
@@ -425,13 +428,15 @@ export function classSessionCutoff(today) {
 /**
  * Turns REAL syllabus rows into work items with an honest remaining workload.
  * Excluded (never scheduled again): rows already completed, rows at 100%,
- * rows whose track is disabled or split to 0%, and rows fully covered by
- * sessions the student already completed.
+ * rows whose track is disabled or split to 0%, rows fully covered by
+ * sessions the student already completed, ARCHIVED rows (FIX-S S5) and rows on
+ * a PAUSED class track (promotion declined, FIX-S S5).
  */
 export function buildWorkItems(input) {
   const {
     syllabus = [], existing = [], deadlines = null, prio, factor = 1,
     today, examDate = null, olympiadDate = null, schoolExams = [], allocatable = [],
+    classPaused = null,
   } = input || {};
 
   const exams = Array.isArray(schoolExams) ? schoolExams : allSchoolExams(schoolExams);
@@ -457,6 +462,8 @@ export function buildWorkItems(input) {
   const completedItems = [];
   const excludedItems = [];
   let completedExcluded = 0;
+  let archivedExcluded = 0;
+  let classPausedExcluded = 0;
 
   for (const row of Array.isArray(syllabus) ? syllabus : []) {
     if (!row || typeof row !== 'object') continue;
@@ -464,6 +471,23 @@ export function buildWorkItems(input) {
     if (!chapter) { excludedItems.push({ id: row.id, reason: 'no-chapter' }); continue; }
     const progress = clampNum(row.progress_percent, 0, 100);
     const track = trackOfRow(row, prio);
+    // FIX-S S5 [S5d]: an ARCHIVED chapter is finished history. It must produce no
+    // study block, no chapter test and no spaced revision — so it is dropped
+    // BEFORE the completed/ladder branch below, and it never enters
+    // completedItems (which is what feeds the S3 test+revision ladder).
+    if (isArchivedRow(row)) {
+      archivedExcluded += 1;
+      excludedItems.push({ id: row.id, chapter, reason: 'archived', track });
+      continue;
+    }
+    // FIX-S S5 [S5c]: the promotion was declined for this session, so the CLASS
+    // track is paused — zero class sessions (new content, tests, revisions).
+    // Olympiad and competitive tracks keep running exactly as before.
+    if (classPaused && track === 'class') {
+      classPausedExcluded += 1;
+      excludedItems.push({ id: row.id, chapter, reason: 'class-paused', track });
+      continue;
+    }
     if (String(row.status || '').toLowerCase() === 'completed' || progress >= 100) {
       completedExcluded += 1;
       // FIX-S S3 needs to know WHAT was conquered and WHEN, to build the
@@ -521,7 +545,10 @@ export function buildWorkItems(input) {
         : null,
     });
   }
-  return { items, completedExcluded, completedItems, excludedItems };
+  return {
+    items, completedExcluded, completedItems, excludedItems,
+    archivedExcluded, classPausedExcluded,
+  };
 }
 
 // ---------- the main planner ----------
@@ -535,6 +562,8 @@ export function buildWorkItems(input) {
 //   dailyHours, preferredTime, daysOff[], prepLevel, weeks, userId,
 //   today, createdAt     injectable -> deterministic
 // }
+const PROMOTION_TO_CLASS_LABEL = 'Class 11'; // FIX-S S5 wording only; the planner stays track-based
+
 export function planSchedule(input) {
   const opts = input || {};
   const syllabus = Array.isArray(opts.syllabus) ? opts.syllabus : [];
@@ -588,9 +617,16 @@ export function planSchedule(input) {
   // a 0% split (or a disabled track) means "never schedule this track"
   const allocatable = prio.order.filter((t) => num(prio.timeSplit[t], 0) > 0);
 
+  // FIX-S S5: the class track can be paused (promotion declined this session).
+  // Nothing else in the planner changes: olympiad / competitive dates stay live.
+  const classPaused = opts.classPaused && typeof opts.classPaused === 'object' ? opts.classPaused : null;
+  // Archived syllabus rows are filtered at the item level (buildWorkItems), so an
+  // archived Class 10 map can never plan a class session for the new session.
+  const archivedIn = Array.isArray(syllabus) ? syllabus.filter((r) => r && isArchivedRow(r)).length : 0;
+
   const built = buildWorkItems({
     syllabus, existing: existingRows, deadlines: opts.deadlines || null, prio, factor,
-    today, examDate, olympiadDate, schoolExams: exams, allocatable,
+    today, examDate, olympiadDate, schoolExams: exams, allocatable, classPaused,
   });
   const items = built.items;
   const ctx = { today, horizonDays: totalDays, trackIndex };
@@ -760,7 +796,12 @@ export function planSchedule(input) {
   if (!examDate && !olympiadDate && !exams.length) reasons.push('no-exam-dates');
   if (!opts.priorities) reasons.push('no-priorities');
   if (noCapacity) reasons.push('no-available-time');
-  if (syllabus.length && !items.length) reasons.push('no-pending-work');
+  // FIX-S S5: an all-archived map is NOT "no syllabus" — say which it is
+  if (syllabus.length && !syllabus.some((r) => r && !isArchivedRow(r))) reasons.push('all-syllabus-archived');
+  if (classPaused) reasons.push('class-paused');
+  if (syllabus.length && !items.length && !reasons.includes('class-paused') && !reasons.includes('all-syllabus-archived')) {
+    reasons.push('no-pending-work');
+  }
 
   const rows = [];
   const studied = [];              // {subject, chapter, date, track} for revision cycles
@@ -826,6 +867,12 @@ export function planSchedule(input) {
     const examRelatedDay = schoolExamToday || dayBeforeSchoolExam || inSchoolExamRev || isMockDay || mainExamBufferDay;
     const classBlocked = date > cutoff && !examRelatedDay;
     if (classBlocked) classCutoffDays += 1;
+    // FIX-S S5 [S5c]: a DECLINED promotion switches the class track off for the
+    // whole plan — not just new chapters, but every class-labelled emission below
+    // (exam-day revision, class-track mocks, buffer cleanup, consolidation).
+    // classCutoffDays deliberately still counts only the S4 cutoff, so the two
+    // rules never blur in the summary. Olympiad/competitive tracks are untouched.
+    const classOff = classBlocked || !!classPaused;
     // same honesty rule as pruneExpired, applied to consolidation sessions: once a
     // one-shot event's date has arrived, revising for it is meaningless — no
     // revision / quiz / conquered-chapter ladder rows for that track from then on.
@@ -968,7 +1015,7 @@ export function planSchedule(input) {
         const s = pipeline[0];
         const pkey = [s.subject, s.topic, s.type].join('|');
         if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
-        if (s.track === 'class' && classBlocked) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+        if (s.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
         if (eventPassed(s.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
         if (schoolExamToday && s.kind === 'test') break; // no full chapter test ON an exam day — it waits
         const res = push(s.subject, s.topic, s.type, s.minutes, s.track, s.kind === 'test' ? 'high' : 'normal');
@@ -983,7 +1030,10 @@ export function planSchedule(input) {
     // School exam DAY itself — light revision only, no new topics
     if (schoolExamToday) {
       const exam = exams.find((e) => date >= e.start && date <= e.end);
-      push('School Exam', `${(exam && exam.label) || 'Exam'} — quick recall + formula scan`, 'revision', Math.min(EXAM_DAY_REVISION_MIN, capacity), 'class');
+      // FIX-S S5: with the class track paused the exam day stays free (no class row)
+      if (!classPaused) {
+        push('School Exam', `${(exam && exam.label) || 'Exam'} — quick recall + formula scan`, 'revision', Math.min(EXAM_DAY_REVISION_MIN, capacity), 'class');
+      }
       continue;
     }
 
@@ -995,8 +1045,12 @@ export function planSchedule(input) {
     if (isMockDay) {
       const mockLabel = dayBeforeSchoolExam ? 'Pre-school-exam mock' : 'Full-length mock';
       const mockTrack = examDate != null || dayBeforeSchoolExam || !olympiadDate ? 'class' : 'olympiad';
-      push('Mock Test', `${mockLabel} + analysis`, 'mock', Math.min(MOCK_MIN, capacity), mockTrack, 'high');
-      if (capacity >= 30) push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), mockTrack);
+      // FIX-S S5: a paused class track emits no class mock; an OLYMPIAD-driven mock
+      // is olympiad prep and keeps running (olympiad/competitive unchanged)
+      if (!(classPaused && mockTrack === 'class')) {
+        push('Mock Test', `${mockLabel} + analysis`, 'mock', Math.min(MOCK_MIN, capacity), mockTrack, 'high');
+        if (capacity >= 30) push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), mockTrack);
+      }
       continue;
     }
 
@@ -1004,7 +1058,7 @@ export function planSchedule(input) {
     // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave,
     // so the last fortnight revises what the exam will actually ask. The wave's
     // shape (revision + timed practice, zero new study) is unchanged.
-    if (inSchoolExamRev && !isDayOff && studied.some((s) => s.track === 'class')) {
+    if (inSchoolExamRev && !isDayOff && !classPaused && studied.some((s) => s.track === 'class')) {
       const classTopics = studied.filter((s) => s.track === 'class');
       const recent = classTopics.slice(-REV_WAVE_PICKS);
       const run = runUpFor(date);
@@ -1032,7 +1086,7 @@ export function planSchedule(input) {
 
     // Main-exam buffer days
     if (mainExamBufferDay) {
-      push('Buffer', 'Backlog / weak topics cleanup', 'revision', Math.min(90, capacity), 'class');
+      if (!classPaused) push('Buffer', 'Backlog / weak topics cleanup', 'revision', Math.min(90, capacity), 'class'); // FIX-S S5
       continue;
     }
 
@@ -1097,7 +1151,7 @@ export function planSchedule(input) {
         leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, quota);
         continue;
       }
-      if (track === 'class' && classBlocked) { leftover[track] = 0; continue; } // FIX-S S4
+      if (track === 'class' && classOff) { leftover[track] = 0; continue; } // FIX-S S4 cutoff + FIX-S S5 pause
       const pair = track === 'class' ? classPair : null;
       const lead = pair && pair.length ? pair[0] : null;
       const second = pair && pair.length > 1 ? pair[1] : null;
@@ -1135,7 +1189,7 @@ export function planSchedule(input) {
         const lastTrack = recent[recent.length - 1].track || 'class';
         // FIX-S S4: class-track consolidation stops at the session cutoff, and no
         // track gets consolidation sessions after its own event date
-        if (!(lastTrack === 'class' && classBlocked) && !eventPassed(lastTrack)) {
+        if (!(lastTrack === 'class' && classOff) && !eventPassed(lastTrack)) {
           push(subj, `Revision: ${chapters}`, 'revision', Math.min(40, capacity), lastTrack);
         }
       }
@@ -1144,7 +1198,7 @@ export function planSchedule(input) {
     // short quiz slot when there's leftover time
     if (capacity >= 20 && studied.length) {
       const last = studied[studied.length - 1];
-      if (!(last.track === 'class' && classBlocked) && !eventPassed(last.track)) {
+      if (!(last.track === 'class' && classOff) && !eventPassed(last.track)) {
         push(last.subject, `Quick quiz: ${last.chapter}`, 'quiz', Math.min(20, capacity), last.track);
       }
     }
@@ -1153,7 +1207,7 @@ export function planSchedule(input) {
     // A track that has work keeps its declared share; only unclaimed time moves.
     while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
       for (const t of allocatable) sortQueue(t);
-      const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classBlocked)));
+      const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
       if (!cands.length) break;
       cands.sort((a, b) => compareUrgency(queues[a][0], queues[b][0], ctx));
       const winner = cands[0];
@@ -1256,6 +1310,20 @@ export function planSchedule(input) {
     const cut = `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${cut}` : `⚠️ ${cut}`;
   }
+  // FIX-S S5 [S5c]: a declined promotion pauses the CLASS track. Say it plainly
+  // instead of returning a silently shorter plan. Olympiad/competitive unaffected.
+  if (classPaused) {
+    const since = classPaused.since ? ` (declined ${classPaused.since})` : '';
+    const held = built.classPausedExcluded || 0;
+    const msg = `Class planning is paused${since}: ${held} class chapter(s) were held back — no new class content, chapter tests or spaced revisions were scheduled for the class track. Olympiad and competitive sessions are unaffected. Accept the promotion to start your ${PROMOTION_TO_CLASS_LABEL} plan.`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${msg}` : `⚠️ ${msg}`;
+  }
+  // FIX-S S5 [S5d]: archived history is excluded, and that is stated, not hidden.
+  if ((built.archivedExcluded || archivedIn) > 0) {
+    const n = built.archivedExcluded || archivedIn;
+    const msg = `${n} archived chapter(s) were skipped — archived content (e.g. last year's class map) never generates study, chapter-test or revision sessions.`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ${msg}` : msg;
+  }
   // FIX-S S3: ladder steps that did not fit inside the plan window are named too
   if (pipeline.length) {
     const pend = `${pipeline.length} conquered-chapter session(s) (chapter test / spaced revision) did not fit before this plan's horizon ends — extend the plan window to keep the ladder whole.`;
@@ -1309,6 +1377,10 @@ export function planSchedule(input) {
     completedExcluded: built.completedExcluded,
     completedItems: built.completedItems,
     excludedItems: built.excludedItems,
+    // FIX-S S5: archived history + a paused class track, reported not hidden
+    archivedExcluded: built.archivedExcluded || 0,
+    classPaused: classPaused ? { reason: classPaused.reason || 'promotion-declined', since: classPaused.since || null, session: classPaused.session || null, heldChapters: built.classPausedExcluded || 0 } : null,
+    classPausedExcluded: built.classPausedExcluded || 0,
     existingCount: existingRows.length,
     duplicatesSuppressed,
     protectedBlocksSkipped,
