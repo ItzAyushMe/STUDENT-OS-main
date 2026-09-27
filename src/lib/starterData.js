@@ -11,6 +11,9 @@ import { db } from './db';
 import { nowIso } from './utils';
 import { HABIT_PRESETS } from '../config/constants';
 import { pickSyllabusSet } from '../data/syllabusData';
+// FIX-S S5: the row mapping + the ONE dedupe rule live in a db-free module so
+// they are unit-testable; this file keeps only the effectful half (db writes).
+import { buildPresetRows, selectFreshPresetRows } from './presetRows';
 
 export async function seedHabits(userId) {
   // v1.0.6 Y Round3: make idempotent by name — prevents duplicates if onboarding re-enters or setTimeout fires twice
@@ -31,23 +34,9 @@ export async function seedHabits(userId) {
   return rows.length;
 }
 
-function presetToRows(userId, preset, track) {
-  if (!preset) return [];
-  return preset.rows.map((r) => ({
-    user_id: userId,
-    subject: r.subject,
-    chapter: r.chapter,
-    topic: null,
-    subtopic: null,
-    track, // 'class' | 'olympiad' | 'exam'
-    weightage: r.weightage || 3,
-    estimated_hours: r.estimated_hours || 6,
-    status: 'locked',
-    progress_percent: 0,
-    deadline: null,
-    completed_at: null,
-    created_at: nowIso(),
-  }));
+// Kept for every existing caller; the mapping itself now lives in presetRows.js.
+export function presetToRows(userId, preset, track) {
+  return buildPresetRows(userId, preset, track);
 }
 
 // Legacy single-preset picker kept for compatibility — class FIRST now.
@@ -83,13 +72,50 @@ export async function seedSyllabusTrack(userId, profile, track) {
   if (!preset?.rows?.length) return 0;
 
   const existingRows = await db.list('syllabus', { eq: { user_id: userId, track } });
-  const existingKeys = new Set(existingRows.map((r) => `${r.subject}::${r.chapter}`));
-
-  // Only insert chapters that don't already exist for this track
-  const allRows = presetToRows(userId, preset, track);
-  const fresh = allRows.filter((r) => !existingKeys.has(`${r.subject}::${r.chapter}`));
+  // Only insert chapters that don't already exist for this track. FIX-S S5: an
+  // ARCHIVED row is superseded history and never blocks a fresh chapter of the
+  // same name (selectFreshPresetRows holds that rule for every caller).
+  const { fresh } = selectFreshPresetRows(userId, preset, track, existingRows);
 
   if (!fresh.length) return 0;
   await db.insertMany('syllabus', fresh);
   return fresh.length;
+}
+
+// ============================================================
+// FIX-S S5: the ONE dedupe-safe preset import.
+// Extracted from SyllabusScreen's screen-local importPreset so the promotion
+// accept path and the syllabus screen share identical behaviour (NEW Y note).
+//
+// ARCHIVED rows are superseded history (e.g. Class 10 rows kept after promotion
+// to Class 11): they never block a fresh import of the same subject::chapter and
+// they are never reported as "already imported". Without this, an archived
+// Class 10 "Science::Life Processes" row would silently swallow the Class 11
+// chapter of the same name.
+//
+// @param {string} userId
+// @param {{label?:string, rows:Array}} preset  e.g. CLASS_SYLLABI['Class 11']
+// @param {string} track                       'class' | 'olympiad' | 'exam'
+// @param {object} opts  { existing?: Array }  pre-fetched rows for this track
+//                       (tests inject these; the app lets it read the db)
+// @returns {Promise<{inserted:number, skipped:number, rows:Array}>}
+// ============================================================
+export async function importPresetRows(userId, preset, track, opts = {}) {
+  const presetRows = preset && Array.isArray(preset.rows) ? preset.rows : [];
+  if (!userId || !presetRows.length) return { inserted: 0, skipped: 0, rows: [] };
+
+  const existingRows = Array.isArray(opts.existing)
+    ? opts.existing
+    : await db.list('syllabus', { eq: { user_id: userId, track } });
+
+  // pure decision (unit-tested in presetRows.js), then the only write
+  const { all, fresh } = selectFreshPresetRows(userId, preset, track, existingRows, { stamp: opts.stamp });
+  if (!fresh.length) return { inserted: 0, skipped: all.length, rows: [] };
+
+  const inserted = await db.insertMany('syllabus', fresh);
+  return {
+    inserted: fresh.length,
+    skipped: all.length - fresh.length,
+    rows: Array.isArray(inserted) && inserted.length ? inserted : fresh,
+  };
 }

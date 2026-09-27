@@ -21,6 +21,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Confetti } from '../../components/gamer/Confetti';
 import { uuid, nowIso, hashString, fmtClock, seededShuffle } from '../../lib/utils';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const PER_Q_SECONDS = 20;
 const BATTLE_COUNT = 5;
@@ -106,7 +107,7 @@ export function BattleScreen({ navigation }) {
       if (status.anyConfigured && (await isOnline())) {
         setPrepping(true);
         const syllabusRows = profile?.id
-          ? await db.list('syllabus', { eq: { user_id: profile.id } })
+          ? activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })) // FIX-S S5: archived chapters out
           : [];
         const qs = await aiChallengeQuestions({
           profile: profile || {},

@@ -21,6 +21,7 @@ import { autoSetDeadlines } from '../../lib/scheduleGenerator';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, daysBetween, pct } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 export function DeadlinesScreen({ navigation }) {
   const { profile } = useAuth();
@@ -36,7 +37,8 @@ export function DeadlinesScreen({ navigation }) {
     setLoading(true);
     try {
       const data = await db.list('syllabus', { eq: { user_id: profile.id } });
-      setRows(data);
+      // FIX-S S5: archived chapters have no deadline to chase
+      setRows(activeSyllabusRows(data));
     } finally {
       setLoading(false);
     }

@@ -19,6 +19,8 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines } from '../../lib/scheduleGenerator';
+import { usePromotion } from '../../hooks/usePromotion';
+import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
 import { SESSION_TYPES, TRACK_PRIORITY, arcOf, effectiveDailyHours } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
@@ -28,6 +30,11 @@ import { useHubBack } from '../../hooks/useHubBack';
 export function ScheduleScreen({ navigation, route }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
+  // FIX-S S5: Class 10 -> Class 11 promotion. One controller for the whole app;
+  // this screen is where the sheet opens on load (PO decision 4).
+  const promo = usePromotion();
+  const [promoOpen, setPromoOpen] = useState(false);
+  const promoAskedRef = useRef(''); // open the sheet once per prompt-day
   const [view, setView] = useState('daily');
   const [selected, setSelected] = useState(todayStr());
   const [monthOffset, setMonthOffset] = useState(0);
@@ -91,6 +98,30 @@ export function ScheduleScreen({ navigation, route }) {
   const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  // FIX-S S5: prompt ON SCHEDULE LOAD once the class session is over (1 Apr+).
+  // `promo.needsPrompt` already carries the rules (Class 10 only, nothing decided
+  // this session, a decline re-fires NEXT day, dormant until the schema gate is
+  // applied) and reads todayStr(), so the FIX-F dev-date offset exercises it.
+  useEffect(() => {
+    if (loading || !promo.needsPrompt) return;
+    if (promoAskedRef.current === promo.today) return;
+    promoAskedRef.current = promo.today;
+    setPromoOpen(true);
+  }, [loading, promo.needsPrompt, promo.today]);
+
+  const onPromoAccept = useCallback(async (stream) => {
+    const res = await promo.accept(stream);
+    setPromoOpen(false);
+    setCoverage(null); // the old coverage no longer describes the new class map
+    if (res?.ok) await load();
+  }, [promo, load]);
+
+  const onPromoDecline = useCallback(async () => {
+    await promo.decline();
+    setPromoOpen(false);
+    setCoverage(null);
+  }, [promo]);
+
   // BUG 10: navigated here after saving priorities (Settings → regenerate) —
   // open the regen dialog (Replace all / Keep completed) once, automatically.
   useEffect(() => {
@@ -111,7 +142,8 @@ export function ScheduleScreen({ navigation, route }) {
     autoRolledRef.current = true;
     (async () => {
       try {
-        const schoolExams = Array.isArray(profile?.school_exams) ? profile.school_exams : [];
+          // FIX-S S5: retired Class 10 school exams must not move new sessions either
+        const schoolExams = promo.schoolExamsForPlanning();
         const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile?.daily_study_hours || 3, schoolExams });
         if (moved.length) {
           for (const m of moved) {
@@ -196,13 +228,12 @@ export function ScheduleScreen({ navigation, route }) {
       // FIX-H: deadlines are computed BEFORE planning. They used to be written
       // after generateSchedule(), so the plan that was just created never knew
       // about them and urgency ordering was impossible.
+      // FIX-S S5 (PO decision 5): school exams saved for the FINISHED Class 10 year
+      // stay on the profile but stop driving planning after promotion. Olympiad and
+      // competitive dates are untouched. A declined promotion pauses the class track.
+      const planSchoolExams = promo.schoolExamsForPlanning();
       const computedDeadlines = syllabus.length
-        ? autoSetDeadlines(
-            syllabus,
-            profile.exam_date,
-            profile.daily_study_hours,
-            Array.isArray(profile.school_exams) ? profile.school_exams : []
-          )
+        ? autoSetDeadlines(syllabus, profile.exam_date, profile.daily_study_hours, planSchoolExams)
         : {};
       const plannedSyllabus = syllabus.map((r) =>
         !r.deadline && computedDeadlines[r.id] ? { ...r, deadline: computedDeadlines[r.id] } : r
@@ -215,7 +246,10 @@ export function ScheduleScreen({ navigation, route }) {
         today: planToday, // one date system — honours the FIX-F dev-date offset
         examDate: profile.exam_date,
         olympiadDate: profile.olympiad_date || null,
-        schoolExams: Array.isArray(profile.school_exams) ? profile.school_exams : [],
+        schoolExams: planSchoolExams,
+        // FIX-S S5 [S5c]: promotion declined -> zero class sessions (new content,
+        // chapter tests, spaced revisions); olympiad/competitive keep running
+        classPaused: promo.paused,
         priorities: profile.priorities || null,
         // STUDY ARC active? -> boosted daily hours (v1.0.2)
         dailyHours: effectiveDailyHours(profile),
@@ -275,7 +309,7 @@ export function ScheduleScreen({ navigation, route }) {
   const rescheduleMissed = async () => {
     setAiPlanBusy(true);
     try {
-      const schoolExams = Array.isArray(profile.school_exams) ? profile.school_exams : [];
+      const schoolExams = promo.schoolExamsForPlanning(); // FIX-S S5: retired exams excluded
       const { moved } = autoRescheduleMissed(sessions, { dailyHours: profile.daily_study_hours, schoolExams });
       for (const m of moved) await db.update('schedule', m.id, { date: m.date, status: 'pending' });
       await load();
@@ -325,6 +359,52 @@ export function ScheduleScreen({ navigation, route }) {
         mode="light"
         style={{ marginBottom: 14 }}
       />
+
+      {/* FIX-S S5: promotion decision — paused class track / result / error */}
+      {promo.paused ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#92400E', lineHeight: 18 }}>
+            ⏸️ Class planning paused — tumne {promo.toClass} promotion decline kiya tha
+            {promo.paused.since ? ` (${promo.paused.since})` : ''}
+          </Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B45309', marginTop: 4, lineHeight: 16 }}>
+            Generate karne par class track ke ZERO session banenge — koi naya chapter, chapter test ya spaced
+            revision nahi. Olympiad aur competitive sessions pehle jaise chalenge. {(promo.progression &&
+            promo.progression.fromClass) || 'Class 10'} ka data safe hai, kuch delete nahi hua.
+          </Text>
+          <View style={{ height: 8 }} />
+          <Button title="🎓 Promotion decide karo" size="sm" mode="light" onPress={() => setPromoOpen(true)} />
+        </Card>
+      ) : null}
+
+      {promo.state === 'prompt' && !promoOpen ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#5B21B6', lineHeight: 18 }}>
+            🎓 Naya session shuru — {promo.toClass} mein move karna hai?
+          </Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
+            Sheet band kar di? Koi baat nahi — yahan se kholo. Kal phir yaad dila denge.
+          </Text>
+          <View style={{ height: 8 }} />
+          <Button title="Decide karo" size="sm" mode="light" onPress={() => setPromoOpen(true)} />
+        </Card>
+      ) : null}
+
+      {promo.msg ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }}>
+          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#065F46', lineHeight: 18 }}>{promo.msg}</Text>
+          <View style={{ height: 8 }} />
+          <Button title="Naya plan generate karo ⚡" size="sm" mode="light" onPress={() => setRegenChoiceOpen(true)} />
+        </Card>
+      ) : null}
+
+      {promo.error ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B91C1C', lineHeight: 17 }}>⚠️ {promo.error}</Text>
+          <View style={{ height: 8 }} />
+          <Button title="Dobara try karo" size="sm" variant="secondary" mode="light" onPress={() => setPromoOpen(true)} />
+        </Card>
+      ) : null}
 
       {/* BUG 10: live priority order — proof the setting is applied */}
       <View
@@ -567,6 +647,19 @@ export function ScheduleScreen({ navigation, route }) {
         userId={profile?.id}
         defaultDate={selected}
         onAdded={load}
+      />
+
+      {/* FIX-S S5: the promotion sheet (same component Home uses) */}
+      <PromotionSheet
+        visible={promoOpen}
+        onClose={() => { setPromoOpen(false); promo.dismiss(); }}
+        streams={promo.streams}
+        toClass={promo.toClass}
+        preset={promo.preset}
+        busy={promo.busy}
+        error={promo.error}
+        onAccept={onPromoAccept}
+        onDecline={onPromoDecline}
       />
     </Screen>
   );

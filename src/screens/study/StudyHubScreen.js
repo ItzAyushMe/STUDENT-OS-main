@@ -11,6 +11,7 @@ import { SectionTitle } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { pct, sum, todayStr } from '../../lib/utils';
 import { fonts } from '../../config/theme';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const TOOLS = [
   { key: 'Syllabus', title: 'Syllabus Map', desc: 'Subjects → chapters → topics', icon: '🗺️', tint: '#7C3AED' },
@@ -34,9 +35,12 @@ export function StudyHubScreen({ navigation }) {
         db.list('syllabus', { eq: { user_id: profile.id } }),
         db.list('schedule', { eq: { user_id: profile.id, date: todayStr() } }),
       ]);
+      // FIX-S S5 (PO decision 3): archived chapters are history — they never count
+      // toward progress or trophies.
+      const activeSyll = activeSyllabusRows(syll);
       setStats({
-        total: syll.length,
-        completed: syll.filter((r) => r.status === 'completed').length,
+        total: activeSyll.length,
+        completed: activeSyll.filter((r) => r.status === 'completed').length,
         todayPending: sched.filter((r) => r.status === 'pending').length,
         todayDone: sched.filter((r) => r.status === 'completed').length,
       });

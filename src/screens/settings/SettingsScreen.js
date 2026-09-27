@@ -19,7 +19,7 @@ import { infoAlert, confirmAlert } from '../../lib/alert';
 import { db, wipeLocalData } from '../../lib/db';
 import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { normalizePriorities } from '../../lib/scheduleGenerator';
-import { APP_NAME, APP_TAGLINE, APP_VERSION } from '../../config/constants';
+import { APP_NAME, APP_TAGLINE, APP_VERSION, activeSyllabusRows } from '../../config/constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setDevDateOffset, getDevDateOffset, loadDevDateOffset, todayStr } from '../../lib/utils';
 import { clearXpOnceCache } from '../../lib/xpOnce';
@@ -91,7 +91,8 @@ export function SettingsScreen({ navigation }) {
     setNewTrackSubjects([]);
     try {
       const rows = await db.list('syllabus', { eq: { user_id: profile.id } });
-      setSyllabusSubjects([...new Set(rows.map((r) => r.subject).filter(Boolean))]);
+      // FIX-S S5: archived subjects must not be claimable by a custom track
+      setSyllabusSubjects([...new Set(activeSyllabusRows(rows).map((r) => r.subject).filter(Boolean))]);
     } catch {
       setSyllabusSubjects([]);
     }

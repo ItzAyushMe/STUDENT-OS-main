@@ -21,6 +21,7 @@ import { Card } from '../../components/ui/Card';
 import { Confetti } from '../../components/gamer/Confetti';
 import { ProgressBar } from '../../components/ui/ProgressBar';
 import { todayStr, fmtClock, nowIso, localDateOf, dayjs } from '../../lib/utils';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const PER_Q_SECONDS = 15;
 
@@ -66,7 +67,7 @@ export function ArenaScreen({ navigation }) {
           return;
         }
         const syllabusRows = profile?.id
-          ? await db.list('syllabus', { eq: { user_id: profile.id } })
+          ? activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })) // FIX-S S5: archived chapters out
           : [];
         const qs = await aiChallengeQuestions({ profile: profile || {}, syllabusRows, count: 5 });
         if (!cancelled && qs.length >= 3) {
