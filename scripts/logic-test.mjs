@@ -3001,6 +3001,380 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedS.length, 0, `FIX-S: ${failedS.length} check(s) failed -> ${failedS.map((f) => f.id).join(', ')}`);
 }
 
+// ---------- FIX-H: REALTIME BATTLES — handshake, presence start, one outcome, XP ledger ----------
+// Handoff acceptance IDs H1–H15 map to BH1–BH15 here: the committed scheduler suite
+// already owns the plain H3–H11 ids, so battle checks carry the BH prefix (declared
+// deviation). DEVICE-marked handoff tests (H1/H2/H12/H14) are verified here as
+// source-wiring probes and are labelled as such — they do NOT pretend to prove UI.
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  // imported dynamically so a missing module is a recorded failure, not a suite crash
+  // — this is also the fail-before mechanism: at 6e8627c battleRules.js does not exist.
+  let BR = null; let brErr = '';
+  try { BR = await import('./../src/lib/battleRules.js'); }
+  catch (e) { brErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+  const bsSrcH = safeRead('src/screens/guild/BattleScreen.js');
+  const brtSrc = safeRead('src/lib/battleRealtime.js');
+  const gsSrcH = safeRead('src/screens/guild/GuildScreen.js');
+  const schemaSrcH = safeRead('supabase/schema.sql');
+  const needsBR = () => assert.ok(BR, `battleRules.js import failed: ${brErr}`);
+
+  // deterministic fixtures — server-style timestamps only, never a device clock
+  const NOW = '2026-09-28T12:00:00.000Z';
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const plus = (ms) => new Date(new Date(NOW).getTime() + ms).toISOString();
+  const mkQuestions = (seed) => BR.normalizeQuestions(seededShuffle(QUIZ_BANK, seed).slice(0, 8), 5);
+  const mkChallenge = (over = {}) => ({
+    id: 'chal-1', from_user: A, to_user: B, status: 'pending', questions: null,
+    created_at: NOW, updated_at: NOW, expires_at: BR.expiryFrom(NOW), ...over,
+  });
+  const mkBattle = (over = {}) => ({
+    id: 'btl-1', challenge_id: 'chal-1', challenger: A, invitee: B, status: 'active',
+    questions: [], winner: null, created_at: NOW, completed_at: null, ...over,
+  });
+  const mkResults = (sa, sb, ta, tb) => ([
+    { battle_id: 'btl-1', user_id: A, score: sa, time_ms: ta, completed_at: NOW },
+    { battle_id: 'btl-1', user_id: B, score: sb, time_ms: tb, completed_at: NOW },
+  ]);
+
+  // ---------- BH3 (handoff H3): expiry is pure, idempotent and blocks everything ----------
+  check('BH3', 'challenge TTL: expiryFrom anchors +120s on the SERVER timestamp; pending flips expired exactly at the deadline; terminal states never re-expire', () => {
+    needsBR();
+    assert.equal(BR.CHALLENGE_TTL_MS, 120000, 'PO decision (d): 120 s TTL');
+    assert.equal(BR.ABANDON_GRACE_MS, 30000, 'PO decision (d): 30 s grace');
+    assert.equal(BR.expiryFrom(NOW), plus(120000), 'expiry = created_at + 120 s (server-anchored)');
+    assert.equal(BR.isChallengeExpired(mkChallenge(), plus(119999)), false, 'still live 1 ms before the deadline');
+    assert.equal(BR.isChallengeExpired(mkChallenge(), plus(120000)), true, 'expired exactly at the deadline');
+    assert.equal(BR.isChallengeExpired(mkChallenge({ status: 'accepted' }), plus(999999)), false, 'accepted is terminal');
+    assert.equal(BR.isChallengeExpired(mkChallenge({ status: 'declined' }), plus(999999)), false, 'declined is terminal');
+    assert.equal(BR.msUntilExpiry(mkChallenge(), plus(30000)), 90000, 'countdown from server timestamps');
+    assert.equal(BR.msUntilExpiry(mkChallenge(), plus(999999)), 0, 'countdown clamps at 0, never negative');
+    // re-challenge after expiry: the reuse predicate only accepts LIVE pending rows
+    const dead = mkChallenge({ status: 'pending' });
+    const live = [dead].filter((c) => c.status === 'pending' && !BR.isChallengeExpired(c, plus(120001)));
+    assert.equal(live.length, 0, 'an expired pending row is never reused — a fresh challenge is allowed');
+    // the flip itself is guarded in transport: only a pending row can expire
+    assert.ok(/update\(\{ status: 'expired'[\s\S]{0,120}?\.eq\('status', 'pending'\)/.test(brtSrc), 'expireChallenge is idempotent (.eq status pending)');
+    assert.ok(/createChallenge[\s\S]*expiryFrom\(data\.created_at/.test(brtSrc), 'createChallenge re-anchors expires_at on the SERVER created_at');
+    assert.equal(BR.challengeStateLabel(mkChallenge(), NOW), 'Waiting… 120s left', 'honest countdown label');
+    assert.equal(BR.challengeStateLabel(mkChallenge(), plus(121000)), 'Expired — dobara challenge bhejo', 'honest expired label');
+  });
+
+  // ---------- BH4 (H4): accept copies ONE question set to both phones ----------
+  check('BH4', 'accept handshake: the accepter normalizes exactly 5 playable questions; both rows carry the identical set and order; junk never becomes playable', () => {
+    needsBR();
+    const set = mkQuestions('chal-1');
+    assert.equal(set.length, 5, 'BATTLE_QUESTION_COUNT = 5');
+    assert.ok(BR.isPlayableSet(set), 'a full normalized bank set is playable');
+    assert.ok(BR.sameQuestionSet(set, JSON.parse(JSON.stringify(set))), 'a JSON round-trip (what the DB stores) is the same set');
+    assert.equal(BR.sameQuestionSet(set, [...set].reverse()), false, 'order matters — a re-rolled order is NOT the same set');
+    const tampered = JSON.parse(JSON.stringify(set)); tampered[2].options[0] = 'changed';
+    assert.equal(BR.sameQuestionSet(set, tampered), false, 'a changed option is NOT the same set');
+    const junk = BR.normalizeQuestions([
+      null, { q: '', options: ['a', 'b'], answer: 0 }, { q: 'x', options: ['only-one'], answer: 0 },
+      { q: 'y', options: ['a', 'b'], answer: 5 }, { q: 'z', options: ['a', 'b'], answer: 'not-a-number' },
+    ], 5);
+    assert.equal(junk.length, 0, 'malformed questions are filtered, never played');
+    assert.equal(BR.isPlayableSet(junk), false, 'an empty/short set is not playable — accept refuses');
+    // transport wiring: accepter writes the set to BOTH rows and only the invitee may accept
+    assert.ok(brtSrc.includes("update({ status: 'accepted', questions: set") && /from\('battles'\)\s*\n?\s*\.insert\(\{[\s\S]*?questions: set,/.test(brtSrc), 'acceptChallenge stores the same set on the challenge AND the battle row');
+    assert.ok(/to_user\)\s*!==\s*String\(meId\)/.test(brtSrc), 'only the addressed invitee can accept (client-side honesty on top of RLS)');
+    assert.ok(bsSrcH.includes('acceptChallenge(') && gsSrcH.includes('acceptChallenge('), 'Battle AND Guild accept through the same transport call');
+  });
+
+  // ---------- BH5 (H5): auto-start ONLY when both are tracked ----------
+  check('BH5', 'presence start: bothPresent is false for empty/one-sided state and true only when BOTH user ids are tracked; the screen flips waiting->play on that signal alone', () => {
+    needsBR();
+    const both = { [A]: [{ user_id: A, name: 'A', ts: NOW }], [B]: [{ user_id: B, name: 'B', ts: NOW }] };
+    const oneSided = { [A]: [{ user_id: A, name: 'A', ts: NOW }] };
+    assert.equal(BR.bothPresent(both, A, B), true, 'both tracked -> start');
+    assert.equal(BR.bothPresent(oneSided, A, B), false, 'one side tracked -> NEVER starts');
+    assert.equal(BR.bothPresent({}, A, B), false, 'empty state -> no start');
+    assert.equal(BR.bothPresent(both, A, 'user-c'), false, 'a stranger in the state does not count');
+    assert.equal(BR.bothPresent(null, A, B), false, 'null state -> no start, no crash');
+    assert.equal(BR.lastSeenOf(both, B), NOW, 'lastSeenOf finds the tracked meta');
+    assert.equal(BR.lastSeenOf(oneSided, B), null, 'an untracked user has no lastSeen (membership, not ts)');
+    assert.equal(BR.opponentIdOf(mkChallenge(), A), B, 'opponent of the challenger is the invitee');
+    assert.equal(BR.opponentIdOf(mkBattle({}), B), A, 'opponentIdOf works on battle rows too');
+    assert.equal(BR.opponentIdOf(mkChallenge(), 'user-c'), null, 'a non-participant has no opponent');
+    // wiring: the phase flip is guarded by bothPresent and can only leave 'waiting'
+    assert.ok(/bothPresent\(state, me, oppId\)\)\s*setPhase\(\(p\) => \(p === 'waiting' \? 'play' : p\)\)/.test(bsSrcH), 'BattleScreen auto-starts only via bothPresent, only from waiting');
+  });
+
+  // ---------- BH6 (H6): each player upserts exactly one result row ----------
+  check('BH6', 'results: retries collapse onto the composite PK (one row per player, last write wins); the upsert targets battle_id,user_id — never the opponent row', () => {
+    needsBR();
+    const first = { battle_id: 'btl-1', user_id: A, score: 3, time_ms: 60000 };
+    const retry = { battle_id: 'btl-1', user_id: A, score: 4, time_ms: 50000 };
+    const opp = { battle_id: 'btl-1', user_id: B, score: 2, time_ms: 70000 };
+    const by = BR.resultsByUser([first, opp, retry]); // a retry arrives after the first write
+    assert.equal(Object.keys(by).length, 2, 'two players -> exactly two rows, no duplicate');
+    assert.equal(by[A].score, 4, 'my retry overwrites MY row only (idempotent by PK)');
+    assert.equal(by[B].score, 2, "the opponent's row is untouched");
+    assert.equal(BR.canFinalize(mkBattle(), [first, opp, retry]), true, 'both submitted -> finalizable');
+    assert.equal(BR.canFinalize(mkBattle(), [retry]), false, 'one row alone never finalizes');
+    assert.ok(brtSrc.includes("onConflict: 'battle_id,user_id'"), 'saveBattleResult upserts on the composite PK (db.upsert cannot — there is no id column)');
+    assert.ok(/score: Math\.max\(0, Math\.min\(R\.BATTLE_QUESTION_COUNT/.test(brtSrc), 'the score is clamped to 0..5 client-side too');
+  });
+
+  // ---------- BH7 (H7): simultaneous finalize -> one winner, second writer no-op ----------
+  check('BH7', 'finalize: both phones compute the SAME winner from the same two rows regardless of row order; the patch only applies to an active battle so the second finalizer is a no-op', () => {
+    needsBR();
+    const battle = mkBattle();
+    const results = mkResults(4, 3, 50000, 60000);
+    const phoneA = BR.finalizePatch(battle, results, plus(61000));
+    const phoneB = BR.finalizePatch(battle, [...results].reverse(), plus(61500)); // same rows, other order
+    assert.equal(phoneA.status, 'complete');
+    assert.equal(phoneA.winner, A, 'higher score wins');
+    assert.equal(phoneB.winner, phoneA.winner, 'both phones name the identical winner (pure rule)');
+    assert.equal(BR.finalizePatch(mkBattle({ status: 'complete' }), results, NOW), null, 'an already-complete battle yields no patch — the second writer does nothing');
+    assert.equal(BR.finalizePatch(battle, [results[0]], NOW), null, 'one result row -> no patch');
+    assert.ok(/finalizeBattle[\s\S]*?\.eq\('status', 'active'\)/.test(brtSrc), 'the DB update is guarded to active rows (race-proof)');
+  });
+
+  // ---------- BH8 (H8): higher score wins ----------
+  check('BH8', 'win/loss: higher score wins regardless of time; the two views of one battle mirror exactly', () => {
+    needsBR();
+    assert.equal(BR.resolveOutcome({ myScore: 5, oppScore: 2, myTimeMs: 99000, oppTimeMs: 10000 }).result, 'win', '5 > 2 wins even with slower time');
+    assert.equal(BR.resolveOutcome({ myScore: 2, oppScore: 5, myTimeMs: 10000, oppTimeMs: 99000 }).result, 'loss');
+    const battle = mkBattle({ status: 'complete', completed_at: plus(60000) });
+    const results = mkResults(4, 3, 50000, 60000);
+    const viewA = BR.outcomeForMe(battle, results, A);
+    const viewB = BR.outcomeForMe(battle, results, B);
+    assert.equal(viewA.result, 'win'); assert.equal(viewB.result, 'loss', 'one battle, two mirrored views');
+    assert.equal(viewA.state, 'final'); assert.equal(viewB.state, 'final');
+    assert.equal(viewA.winner, A); assert.equal(viewB.winner, A, 'both phones display the SAME winner id');
+    assert.equal(BR.winnerIdOf(battle, results), A);
+  });
+
+  // ---------- BH9 (H9): equal score -> lower total time wins ----------
+  check('BH9', 'tie-break: equal scores go to the lower total time_ms', () => {
+    needsBR();
+    const out = BR.resolveOutcome({ myScore: 4, oppScore: 4, myTimeMs: 50000, oppTimeMs: 60000 });
+    assert.equal(out.result, 'win'); assert.equal(out.reason, 'lower-time');
+    assert.equal(BR.resolveOutcome({ myScore: 4, oppScore: 4, myTimeMs: 60000, oppTimeMs: 50000 }).result, 'loss');
+    const battle = mkBattle({ status: 'complete' });
+    assert.equal(BR.winnerIdOf(battle, mkResults(4, 4, 50000, 60000)), A, 'faster player is the winner row');
+  });
+
+  // ---------- BH10 (H10): exact-equal score AND time -> DRAW, no win XP (PO decision c) ----------
+  check('BH10', 'exact tie: equal score AND equal time is a DRAW — winner stays null and the win bonus is 0 for BOTH players', () => {
+    needsBR();
+    const out = BR.resolveOutcome({ myScore: 4, oppScore: 4, myTimeMs: 50000, oppTimeMs: 50000 });
+    assert.equal(out.result, 'draw'); assert.equal(out.reason, 'exact-equal');
+    const battle = mkBattle({ status: 'complete' });
+    const results = mkResults(4, 4, 50000, 50000);
+    assert.equal(BR.winnerIdOf(battle, results), null, 'no winner row on a draw');
+    assert.equal(BR.finalizePatch(mkBattle(), results, NOW).winner, null, 'finalize stores winner = null');
+    const dA = BR.battleXpDecision({ battle, result: 'draw', alreadyEarnedToday: false, ledgerEntry: null });
+    assert.equal(dA.award, true); assert.equal(dA.complete, 25); assert.equal(dA.win, 0); assert.equal(dA.total, 25, 'a draw pays +25 complete and NO +60 win bonus');
+  });
+
+  // ---------- BH11 (H11): XP once/day + per-battle ledger + reload safety ----------
+  await record('BH11', 'XP: first completed battle pays 25 (+60 on a win) once per day via xpOnce key battle; a second same-day battle pays 0 but still records history; a result-screen reload reads the ledger and NEVER re-awards; award failure never marks the ledger; void pays nothing', async () => {
+    needsBR();
+    assert.equal(BR.XP_BATTLE_COMPLETE, 25, 'PO decision (b): +25 BATTLE_COMPLETE');
+    assert.equal(BR.XP_BATTLE_WIN, 60, 'PO decision (b): +60 BATTLE_WIN');
+    assert.equal(BR.XP_KEY_BATTLE, 'battle', 'the F7 xpOnce key is unchanged');
+    assert.equal(BR.battleLedgerKey('btl-1'), 'sos.battleXP.btl-1', 'per-battle ledger key');
+
+    const mkFakes = ({ earned = false, awardFails = false } = {}) => {
+      const calls = { award: [], mark: 0, history: 0, historyCtx: null };
+      let ledger = null;
+      let earnedFlag = earned;
+      const deps = {
+        hasEarnedToday: async () => earnedFlag,
+        markEarnedToday: async () => { calls.mark += 1; earnedFlag = true; },
+        awardXP: async (code, opts) => {
+          calls.award.push(code);
+          if (awardFails) return null; // GameContext returns null on failure
+          return { gained: code === 'BATTLE_WIN' ? 60 : Number(opts?.amount) || 0 };
+        },
+        ledgerGet: async () => ledger,
+        ledgerSet: async (id, payload) => { ledger = payload; return true; },
+        insertQuizResult: async (ctx) => { calls.history += 1; calls.historyCtx = ctx; },
+      };
+      return { calls, deps, getLedger: () => ledger };
+    };
+    const battle = mkBattle({ status: 'complete', completed_at: plus(60000) });
+    const winResults = mkResults(4, 3, 50000, 60000);
+
+    // (a) first battle of the day, won -> 25 + 60, marked once, ledger written, history saved
+    const f1 = mkFakes();
+    const r1 = await BR.applyBattleXp({ battle, results: winResults, meId: A, completedAt: plus(60000), opponentName: 'Bob', ...f1.deps });
+    assert.equal(r1.awardedXp, 85, 'win pays 25 complete + 60 win');
+    assert.deepEqual(f1.calls.award, ['BATTLE_COMPLETE', 'BATTLE_WIN'], 'exactly the F7 award sequence');
+    assert.equal(f1.calls.mark, 1, 'xpOnce marked once');
+    assert.equal(f1.getLedger()?.xp, 85, 'ledger written ONLY on a confirmed award');
+    assert.equal(f1.calls.history, 1, 'history row saved for the complete battle');
+    assert.equal(f1.calls.historyCtx.xpEarned, 85, 'the persisted xp equals the awarded value');
+
+    // (b) reload of the SAME result screen -> ledger short-circuits, zero new awards
+    const r2 = await BR.applyBattleXp({ battle, results: winResults, meId: A, completedAt: plus(60000), opponentName: 'Bob', ...f1.deps });
+    assert.equal(r2.reason, 'ledger', 'the ledger wins over everything');
+    assert.equal(r2.awardedXp, 85, 'the screen still DISPLAYS the recorded 85');
+    assert.deepEqual(f1.calls.award, ['BATTLE_COMPLETE', 'BATTLE_WIN'], 'no new award on reload');
+    assert.equal(f1.calls.history, 1, 'no duplicate history row on reload');
+
+    // (c) second battle the same day (no ledger for it) -> 0 XP, history still recorded
+    const battle2 = mkBattle({ id: 'btl-2', status: 'complete', completed_at: plus(3600000) });
+    const f3 = mkFakes({ earned: true });
+    const r3 = await BR.applyBattleXp({ battle: battle2, results: winResults, meId: A, completedAt: plus(3600000), ...f3.deps });
+    assert.equal(r3.awardedXp, 0, 'daily cap pays 0');
+    assert.equal(r3.capped, true);
+    assert.deepEqual(f3.calls.award, [], 'awardXP is never called on a capped day');
+    assert.equal(f3.calls.history, 1, 'the capped game STILL counts in history (F7 behaviour preserved)');
+    assert.equal(f3.getLedger(), null, 'nothing to ledger when nothing was awarded');
+
+    // (d) awardXP failure -> no mark, NO ledger write, history still saved with 0
+    const f4 = mkFakes({ awardFails: true });
+    const r4 = await BR.applyBattleXp({ battle, results: winResults, meId: A, completedAt: plus(60000), ...f4.deps });
+    assert.equal(r4.awardedXp, 0);
+    assert.equal(f4.calls.mark, 0, 'a failed award never marks the daily key');
+    assert.equal(f4.getLedger(), null, 'the ledger marks ONLY a confirmed award');
+    assert.equal(f4.calls.history, 1, 'XP failure never blocks the result/history (F7 pattern)');
+
+    // (e) draw pays complete only
+    const f5 = mkFakes();
+    const r5 = await BR.applyBattleXp({ battle, results: mkResults(4, 4, 50000, 50000), meId: A, completedAt: plus(60000), ...f5.deps });
+    assert.equal(r5.awardedXp, 25, 'draw = +25, no win bonus');
+    assert.deepEqual(f5.calls.award, ['BATTLE_COMPLETE']);
+
+    // (f) quiz_results row shape mirrors the accepted F7 row exactly
+    const row = BR.quizResultRow({ battle, results: winResults, meId: A, xpEarned: 85, createdAt: plus(60000), opponentName: 'Bob' });
+    assert.deepEqual(
+      { ...row, weak_topics: row.weak_topics },
+      { user_id: A, subject: null, topic: 'Bob', mode: 'battle', total_questions: 5, correct_answers: 4, accuracy: 80, time_taken: 50, xp_earned: 85, weak_topics: [], created_at: plus(60000) },
+      'the battle history row keeps the existing shape (mode battle, seconds, xp_earned)'
+    );
+  });
+
+  // ---------- BH12 (H12): abandon/void — no results counted, no XP, no history ----------
+  await record('BH12', 'abandon: a void battle pays 0, saves no history and marks no ledger; the 30 s grace is measured on last-seen membership; the transport guards the abandon to active battles', async () => {
+    needsBR();
+    assert.equal(BR.isVoid(mkBattle({ status: 'abandoned' })), true);
+    assert.equal(BR.isVoid(mkBattle({ status: 'complete' })), false);
+    const dec = BR.battleXpDecision({ battle: mkBattle({ status: 'abandoned' }), result: 'win', alreadyEarnedToday: false, ledgerEntry: null });
+    assert.equal(dec.award, false); assert.equal(dec.total, 0); assert.equal(dec.reason, 'void', 'even a "win" score on an abandoned battle pays nothing');
+
+    // behaviour: applyBattleXp on a void battle — with results present! — still pays 0
+    let history = 0; let awarded = 0;
+    const out = await BR.applyBattleXp({
+      battle: mkBattle({ status: 'abandoned' }),
+      results: mkResults(5, 0, 10000, 0),
+      meId: A,
+      hasEarnedToday: async () => false,
+      markEarnedToday: async () => {},
+      awardXP: async () => { awarded += 1; return { gained: 25 }; },
+      ledgerGet: async () => null,
+      ledgerSet: async () => true,
+      insertQuizResult: async () => { history += 1; },
+    });
+    assert.equal(out.void, true);
+    assert.equal(awarded, 0, 'awardXP never called on a void battle');
+    assert.equal(history, 0, 'no quiz_results row for a void battle');
+    assert.ok(/void/i.test(out.msg), 'the screen gets an honest void message');
+
+    // grace window: 30 s (PO decision d), measured from the last observed membership
+    assert.equal(BR.graceExceeded(NOW, plus(29000)), false, '29 s drop -> still alive');
+    assert.equal(BR.graceExceeded(NOW, plus(30000)), false, 'exactly 30 s -> not yet exceeded');
+    assert.equal(BR.graceExceeded(NOW, plus(31000)), true, '31 s drop -> void');
+    assert.equal(BR.graceExceeded(null, plus(999999)), false, 'unknown last-seen never voids a battle');
+
+    // wiring: the transport only abandons ACTIVE battles, and the screen runs a watchdog
+    assert.ok(/abandonBattle[\s\S]*?\.eq\('status', 'active'\)/.test(brtSrc), 'abandon is guarded to active battles (idempotent)');
+    assert.ok(bsSrcH.includes('graceExceeded(') && bsSrcH.includes('ABANDON_GRACE_MS') && /voidBattle\(/.test(bsSrcH), 'BattleScreen watchdog voids on presence drop beyond the grace');
+    assert.ok(/battle void/i.test(bsSrcH), 'the void state is shown honestly');
+  });
+
+  // ---------- BH1/BH2/BH14 (DEVICE in the handoff): verified as source-wiring probes ----------
+  check('BH1*', '[wiring probe — DEVICE test H1] challenge create: presence is checked BEFORE any insert; an offline target produces the honest message and zero rows', () => {
+    needsBR();
+    const src = brtSrc.slice(brtSrc.indexOf('export async function createChallenge'), brtSrc.indexOf('export async function listChallenges'));
+    const atCheck = src.indexOf('isUserOnline(toUser)');
+    const atInsert = src.indexOf(".insert(");
+    assert.ok(atCheck >= 0 && atInsert >= 0 && atCheck < atInsert, 'the offline check runs BEFORE the insert — nothing is created');
+    assert.ok(src.includes("reason: 'opponent-offline'") && src.includes('User not available. Try again later.'), 'the offline answer is the exact honest message');
+    assert.ok(src.includes('Apne aap ko challenge nahi kar sakte'), 'self-challenge is refused');
+    assert.ok(/status === 'pending' && String\(c\.to_user\) === String\(toUser\) && !R\.isChallengeExpired/.test(src), 'a live pending challenge is reused, never stacked');
+  });
+  check('BH2*', '[wiring probe — DEVICE test H2] decline: the row flips to declined with a pending guard, no battle is ever created, and the challenger is told', () => {
+    needsBR();
+    const src = brtSrc.slice(brtSrc.indexOf('export async function declineChallenge'), brtSrc.indexOf('export async function cancelChallenge'));
+    assert.ok(src.includes("status: 'declined'") && src.includes(".eq('status', 'pending')"), 'decline is guarded to pending rows');
+    assert.ok(!src.includes("from('battles')"), 'the decline path never touches the battles table');
+    assert.ok(bsSrcH.includes("row.status === 'declined'"), 'the challenger screen detects and reports the decline');
+  });
+  check('BH14*', '[wiring probe — DEVICE test H14] local mode: battles are ONLINE ONLY with an honest message; the hash sim and DEMO_RIVALS are provably gone from BattleScreen', () => {
+    needsBR();
+    assert.ok(!bsSrcH.includes('DEMO_RIVALS'), 'no demo rivals in BattleScreen');
+    assert.ok(!bsSrcH.includes('hashString'), 'the hashString fake-rival sim is gone');
+    assert.ok(!bsSrcH.includes('rivalScore'), 'no simulated rival score');
+    assert.ok(bsSrcH.includes('LOCAL_MODE_MESSAGE') && bsSrcH.includes('BATTLES = ONLINE ONLY'), 'the offline screen states it plainly');
+    assert.ok(brtSrc.includes('BATTLES_ONLINE_ONLY = true'), 'PO decision (a) is declared in the transport');
+    assert.ok(/online only/i.test(gsSrcH), 'Guild also says battles are online-only in local mode');
+    assert.ok(gsSrcH.includes('battleInvites.length ? ('), 'Guild renders the invite card only with real pending invites');
+  });
+
+  // ---------- BH13 (PO SQL check): the schema FILE carries the gate — live RLS verification is the PO's ----------
+  check('BH13*', '[schema-file probe — live RLS check is PO-side after running the DDL] three tables, composite PK with score/time checks, participant RLS, own-row-only results, realtime publication, and an explicit "never run by the agent" gate note', () => {
+    needsBR();
+    const s = schemaSrcH;
+    for (const t of ['public.battle_challenges', 'public.battles', 'public.battle_results']) {
+      assert.ok(s.includes(`create table if not exists ${t}`), `${t} DDL present`);
+      assert.ok(new RegExp(`alter table ${t.replace(/\./g, '\\.')}\\s+enable row level security`).test(s), `${t} RLS enabled`);
+    }
+    assert.ok(s.includes('primary key (battle_id, user_id)'), 'battle_results has the composite PK (no id column — db.upsert cannot be used)');
+    assert.ok(s.includes('check (score between 0 and 5)') && s.includes('check (time_ms >= 0)'), 'score/time bounds enforced in the DB');
+    for (const p of ['bc_participants', 'bc_insert_own', 'bc_update_participants', 'b_participants', 'b_insert_participant', 'b_update_participants', 'br_select_participants', 'br_insert_own', 'br_update_own']) {
+      assert.ok(s.includes(`"${p}"`), `policy ${p} present`);
+    }
+    assert.ok(/br_insert_own[\s\S]*?auth\.uid\(\) = user_id/, 'a player can only INSERT their own result row');
+    assert.ok(/br_update_own[\s\S]*?using \(auth\.uid\(\) = user_id\)/, 'a player can only UPDATE their own result row');
+    assert.ok(s.includes('alter publication supabase_realtime add table public.battle_challenges') && s.includes('alter publication supabase_realtime add table public.battles'), 'realtime publication covers both handshake tables');
+    assert.ok(/SCHEMA GATE/i.test(s) && /did NOT run any DDL/i.test(s), 'the schema gate is documented — the PO runs it, never the agent');
+  });
+
+  // ---------- BH15 (H15): regression guards around the battle round ----------
+  check('BH15', 'regression: one outcome rule everywhere (no second winner computation), XP key/guard reuse the F7 machinery, quiz_results battle rows exist only for complete battles, Arena untouched', () => {
+    needsBR();
+    // exactly ONE outcome rule: the screen must not re-implement winner logic
+    const cmp = (bsSrcH.match(/myScore > oppScore|correct > rivalScore|\.score > /g) || []).length;
+    assert.equal(cmp, 0, 'BattleScreen contains no local winner comparison — resolveOutcome is the only rule');
+    assert.ok(bsSrcH.includes('applyBattleXp(') && bsSrcH.includes('hasEarnedToday') && bsSrcH.includes('markEarnedToday'), 'the F7 guard->XP->save machinery is reused, not duplicated');
+    assert.ok(/xp_earned:\s*awardedXp/.test(bsSrcH), 'the persisted xp_earned is literally the awarded value (G6 guardrail)');
+    // complete-only history is behavioural: void battles insert nothing (BH12) and the
+    // decision object only sets recordHistory on complete battles
+    const dVoid = BR.battleXpDecision({ battle: mkBattle({ status: 'abandoned' }), result: 'win', alreadyEarnedToday: false, ledgerEntry: null });
+    assert.notEqual(dVoid.recordHistory, true, 'an abandoned battle never records history');
+    const dActive = BR.battleXpDecision({ battle: mkBattle({ status: 'active' }), result: 'win', alreadyEarnedToday: false, ledgerEntry: null });
+    assert.equal(dActive.reason, 'not-complete', 'a still-active battle pays nothing');
+    // Arena once/day + its guard are the committed behaviour — untouched files
+    const arenaSrcH = safeRead('src/screens/guild/ArenaScreen.js');
+    assert.ok(arenaSrcH.includes('hasEarnedToday') && arenaSrcH.includes('alreadyEarnedNote'), 'ArenaScreen still carries its own once/day guard');
+    assert.ok(arenaSrcH.includes('pickDailyArena'), 'Arena still uses the global daily question set');
+  });
+
+  const failedH = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedH.length, 0, `FIX-H battles: ${failedH.length} check(s) failed -> ${failedH.map((f) => f.id).join(', ')}`);
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 

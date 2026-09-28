@@ -613,3 +613,113 @@ alter table public.xp_events    add column if not exists updated_at timestamptz 
 alter table public.mood_logs    add column if not exists updated_at timestamptz default now();
 alter table public.workout_logs add column if not exists updated_at timestamptz default now();
 
+
+-- ============================================================
+-- FIX-H: REALTIME BATTLES (challenge -> battle -> per-player result)
+--
+-- Additive only: three NEW tables, no existing table or policy is altered.
+-- THREE tables on purpose — a shared `scores jsonb` column on the battle row would
+-- let either player overwrite the opponent's score, because RLS is row-level and
+-- cannot restrict a field. Per-player `battle_results` rows with
+-- `with check (auth.uid() = user_id)` make "your own score only" enforceable.
+--
+-- SCHEMA GATE: NEW X wrote this file and did NOT run any DDL. The PO runs it live
+-- (pre-check the publication state first):
+--   select * from pg_publication_tables where pubname = 'supabase_realtime';
+-- Until then battles stay OFFLINE-ONLY and disabled in the app (PO decision a).
+-- ============================================================
+create table if not exists public.battle_challenges (
+  id uuid primary key default gen_random_uuid(),
+  from_user uuid not null references auth.users(id) on delete cascade,
+  to_user   uuid not null references auth.users(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending','accepted','declined','expired','cancelled')),
+  questions jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  expires_at timestamptz not null
+);
+
+create table if not exists public.battles (
+  id uuid primary key default gen_random_uuid(),
+  challenge_id uuid not null unique references public.battle_challenges(id) on delete cascade,
+  challenger uuid not null references auth.users(id) on delete cascade,
+  invitee    uuid not null references auth.users(id) on delete cascade,
+  status text not null default 'active' check (status in ('active','complete','abandoned')),
+  questions jsonb not null,
+  winner uuid,
+  created_at timestamptz default now(),
+  completed_at timestamptz
+);
+
+create table if not exists public.battle_results (
+  battle_id uuid not null references public.battles(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  score integer not null check (score between 0 and 5),
+  time_ms integer not null check (time_ms >= 0),
+  completed_at timestamptz default now(),
+  primary key (battle_id, user_id)
+);
+
+create index if not exists battle_challenges_to_status on public.battle_challenges (to_user, status);
+create index if not exists battle_challenges_from_status on public.battle_challenges (from_user, status);
+create index if not exists battles_challenger_status on public.battles (challenger, status);
+create index if not exists battles_invitee_status on public.battles (invitee, status);
+
+alter table public.battle_challenges enable row level security;
+alter table public.battles          enable row level security;
+alter table public.battle_results   enable row level security;
+
+-- battle_challenges: participants read, only the sender creates, participants update
+drop policy if exists "bc_participants" on public.battle_challenges;
+create policy "bc_participants" on public.battle_challenges for select to authenticated
+  using (auth.uid() = from_user or auth.uid() = to_user);
+
+drop policy if exists "bc_insert_own" on public.battle_challenges;
+create policy "bc_insert_own" on public.battle_challenges for insert to authenticated
+  with check (auth.uid() = from_user);
+
+drop policy if exists "bc_update_participants" on public.battle_challenges;
+create policy "bc_update_participants" on public.battle_challenges for update to authenticated
+  using (auth.uid() = from_user or auth.uid() = to_user)
+  with check (auth.uid() = from_user or auth.uid() = to_user);
+
+-- battles: participants read / create / update (the ACCEPTER creates the row)
+drop policy if exists "b_participants" on public.battles;
+create policy "b_participants" on public.battles for select to authenticated
+  using (auth.uid() = challenger or auth.uid() = invitee);
+
+drop policy if exists "b_insert_participant" on public.battles;
+create policy "b_insert_participant" on public.battles for insert to authenticated
+  with check (auth.uid() = challenger or auth.uid() = invitee);
+
+drop policy if exists "b_update_participants" on public.battles;
+create policy "b_update_participants" on public.battles for update to authenticated
+  using (auth.uid() = challenger or auth.uid() = invitee)
+  with check (auth.uid() = challenger or auth.uid() = invitee);
+
+-- battle_results: BOTH participants may read the two rows (that is how the two
+-- phones agree on one outcome), but a player may only INSERT/UPDATE their OWN row.
+drop policy if exists "br_select_participants" on public.battle_results;
+create policy "br_select_participants" on public.battle_results for select to authenticated
+  using (exists (
+    select 1 from public.battles b
+     where b.id = battle_id and (auth.uid() = b.challenger or auth.uid() = b.invitee)
+  ));
+
+drop policy if exists "br_insert_own" on public.battle_results;
+create policy "br_insert_own" on public.battle_results for insert to authenticated
+  with check (
+    auth.uid() = user_id and exists (
+      select 1 from public.battles b
+       where b.id = battle_id and (auth.uid() = b.challenger or auth.uid() = b.invitee)
+    )
+  );
+
+drop policy if exists "br_update_own" on public.battle_results;
+create policy "br_update_own" on public.battle_results for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Realtime delivery (PO pre-checks the publication state before running these)
+alter publication supabase_realtime add table public.battle_challenges;
+alter publication supabase_realtime add table public.battles;

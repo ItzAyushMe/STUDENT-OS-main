@@ -25,7 +25,15 @@ import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { Loading } from '../../components/ui/EmptyState';
 import { SegmentedControl } from '../../components/ui/SegmentedControl';
-import { todayStr, weekStartStr, fmtDate, groupBy, nowIso } from '../../lib/utils';
+import { todayStr, weekStartStr, fmtDate, groupBy, nowIso, seededShuffle } from '../../lib/utils';
+import { QUIZ_BANK } from '../../lib/quizBank';
+// FIX-H: realtime battle invites surface here (badge + accept/decline card).
+// All decisions live in battleRules/battleRealtime — this screen only renders them.
+import {
+  battlesAvailable, trackPresence, untrackPresence, pendingInvites,
+  acceptChallenge, declineChallenge, expireDueChallenges, subscribeInvites,
+  msUntilExpiry, normalizeQuestions, isPlayableSet, BATTLE_QUESTION_COUNT,
+} from '../../lib/battleRealtime';
 
 export function GuildScreen({ navigation }) {
   useTheme('gamer');
@@ -42,6 +50,11 @@ export function GuildScreen({ navigation }) {
   const [addMsg, setAddMsg] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [cheered, setCheered] = useState({});
+  // FIX-H: pending battle challenges addressed to me — [{ row, name, username }]
+  const [battleInvites, setBattleInvites] = useState([]);
+  const [battleMsg, setBattleMsg] = useState('');
+  const [battleBusy, setBattleBusy] = useState('');
+  const [, setBTick] = useState(0); // countdown re-render while an invite is live
 
   const load = useCallback(async () => {
     if (!profile?.id) return;
@@ -169,6 +182,101 @@ export function GuildScreen({ navigation }) {
   }, [profile?.id, profile]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // ---------- FIX-H: battle invites (realtime + 10 s polling fallback) ----------
+  const loadBattleInvites = useCallback(async () => {
+    if (!profile?.id || !battlesAvailable()) { setBattleInvites([]); return; }
+    try {
+      const rows = await pendingInvites(profile.id, nowIso());
+      const ids = [...new Set(rows.map((r) => r.from_user).filter(Boolean))];
+      let byId = {};
+      if (ids.length) {
+        try {
+          const us = await db.list('users', { in: { id: ids } });
+          us.forEach((u) => (byId[u.id] = u));
+        } catch { byId = {}; }
+      }
+      setBattleInvites(rows.map((r) => ({
+        row: r,
+        name: byId[r.from_user]?.display_name || byId[r.from_user]?.username || 'A friend',
+        username: byId[r.from_user]?.username || 'player',
+      })));
+    } catch {
+      setBattleInvites([]); // RLS/socket down -> empty, never a crash
+    }
+  }, [profile?.id]);
+
+  useFocusEffect(useCallback(() => {
+    if (!profile?.id) return;
+    let sub = null;
+    let poll = null;
+    if (battlesAvailable()) {
+      // presence: A can only challenge B while B is tracked (handoff §5 — Guild AND
+      // Battle track; battleRealtime refcounts so blur order can't drop the signal)
+      trackPresence({ userId: profile.id, name: profile.display_name || profile.username || 'You' });
+      loadBattleInvites();
+      expireDueChallenges(profile.id, nowIso())
+        .then(() => loadBattleInvites())
+        .catch(() => {});
+      sub = subscribeInvites(profile.id, () => { loadBattleInvites(); });
+      poll = setInterval(async () => {
+        try { await expireDueChallenges(profile.id, nowIso()); } catch {}
+        await loadBattleInvites();
+      }, 10_000);
+    } else {
+      setBattleInvites([]); // PO decision (a): local mode has no battles, honestly
+    }
+    return () => {
+      if (battlesAvailable()) untrackPresence();
+      try { sub?.unsubscribe(); } catch {}
+      if (poll) clearInterval(poll);
+    };
+  }, [profile?.id, loadBattleInvites]));
+
+  // countdown ticks only while a live invite is on screen
+  const hasBattleInvites = battleInvites.length > 0;
+  useEffect(() => {
+    if (!hasBattleInvites) return;
+    const t = setInterval(() => setBTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [hasBattleInvites]);
+
+  // accepting HERE generates the same seeded bank set and hands the battle to
+  // BattleScreen (it resumes the active battle on focus). The accepter writes the
+  // questions, so both phones always play the identical set. [H4]
+  const acceptBattle = async (inv) => {
+    try {
+      setBattleBusy(inv.row.id);
+      setBattleMsg('');
+      const set = normalizeQuestions(seededShuffle(QUIZ_BANK, inv.row.id).slice(0, BATTLE_QUESTION_COUNT), BATTLE_QUESTION_COUNT);
+      if (!isPlayableSet(set)) { setBattleMsg('Questions ready nahi hue — dobara try karo.'); return; }
+      const res = await acceptChallenge({ challenge: inv.row, questions: set, meId: profile.id });
+      if (!res.ok) {
+        setBattleMsg(res.message || 'Accept nahi ho paya.');
+        await loadBattleInvites();
+        return;
+      }
+      setBattleInvites((prev) => prev.filter((x) => x.row.id !== inv.row.id));
+      navigation.navigate('Battle');
+    } catch (e) {
+      setBattleMsg(e?.message || 'Accept fail hua.');
+    } finally {
+      setBattleBusy('');
+    }
+  };
+
+  const declineBattle = async (inv) => {
+    try {
+      setBattleBusy(inv.row.id);
+      setBattleMsg('');
+      await declineChallenge(inv.row.id);
+      setBattleInvites((prev) => prev.filter((x) => x.row.id !== inv.row.id));
+    } catch (e) {
+      setBattleMsg(e?.message || 'Decline fail hua.');
+    } finally {
+      setBattleBusy('');
+    }
+  };
 
   // accept / decline incoming requests — v1.0.6 J: RLS allows friend_id to update
   // FIX-F6 + FIX-F5: respondRequest with identity guard and visible error
@@ -324,11 +432,39 @@ export function GuildScreen({ navigation }) {
         <EntryCard
           icon="🤺"
           title="BATTLE"
-          sub="Challenge a friend"
+          sub={isRemote() ? 'Challenge a friend' : 'Online only — connect Supabase'}
           onPress={() => navigation.navigate('Battle')}
           color={GAMER.secondary}
+          badge={battleInvites.length}
         />
       </View>
+
+      {/* FIX-H: incoming battle challenges — accept/decline + live countdown */}
+      {battleInvites.length ? (
+        <Card mode="gamer" style={{ marginBottom: 14, borderColor: GAMER.gold }}>
+          <PixelText size={9} color={GAMER.gold} style={{ marginBottom: 10 }}>
+            BATTLE CHALLENGES ⚔️ ({battleInvites.length})
+          </PixelText>
+          {battleInvites.map((inv) => (
+            <View key={inv.row.id} style={{ marginBottom: 12 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: GAMER.text }}>
+                {inv.name} <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext }}>@{inv.username}</Text>
+              </Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.subtext, marginTop: 3, lineHeight: 16 }}>
+                {BATTLE_QUESTION_COUNT} same questions, same timer — dono phone par ek jaisa result.{' '}
+                <Text style={{ color: GAMER.gold }}>{Math.ceil(msUntilExpiry(inv.row, nowIso()) / 1000)}s</Text> mein expire hoga.
+              </Text>
+              <View style={{ flexDirection: 'row', marginTop: 8 }}>
+                <Button title="Accept ⚔️" size="sm" mode="gamer" disabled={!!battleBusy} onPress={() => acceptBattle(inv)} style={{ flex: 1, marginRight: 8 }} />
+                <Button title="Decline" size="sm" variant="ghost" mode="gamer" disabled={!!battleBusy} onPress={() => declineBattle(inv)} style={{ flex: 1 }} />
+              </View>
+            </View>
+          ))}
+          {battleMsg ? (
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: GAMER.warn, lineHeight: 16 }}>{battleMsg}</Text>
+          ) : null}
+        </Card>
+      ) : null}
 
       <SegmentedControl
         options={[
@@ -591,7 +727,7 @@ function LeaderRow({ row }) {
   );
 }
 
-function EntryCard({ icon, title, sub, onPress, color }) {
+function EntryCard({ icon, title, sub, onPress, color, badge = 0 }) {
   return (
     <Pressable
       onPress={onPress}
@@ -606,6 +742,17 @@ function EntryCard({ icon, title, sub, onPress, color }) {
         opacity: pressed ? 0.7 : 1,
       })}
     >
+      {badge > 0 ? (
+        <View
+          style={{
+            position: 'absolute', top: 8, right: 8, minWidth: 20, height: 20,
+            backgroundColor: GAMER.gold, borderRadius: 999, paddingHorizontal: 5,
+            alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#0D1117' }}>{badge}</Text>
+        </View>
+      ) : null}
       <Text style={{ fontSize: 24, marginBottom: 8 }}>{icon}</Text>
       <PixelText size={9} color={color}>
         {title}
