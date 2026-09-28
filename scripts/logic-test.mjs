@@ -3375,6 +3375,455 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedH.length, 0, `FIX-H battles: ${failedH.length} check(s) failed -> ${failedH.map((f) => f.id).join(', ')}`);
 }
 
+// ---------- FIX-J: CONTENT LOCKER — real uploads, daily XP guard, dedupe, search, metadata, malformed rows, ordering ----------
+// Handoff acceptance IDs J1–J7 map to the checks below. DEVICE/PO-RUNTIME items
+// (a real upload on a phone, the storage isolation 403 test, picker-cancel = no
+// row) are verified here as SOURCE-WIRING probes and labelled as such — they do
+// NOT pretend to prove device behaviour. Pure rules are proven directly against
+// src/lib/contentLocker.js (plain-Node importable).
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  // imported dynamically so a missing module is a recorded failure, not a suite crash
+  // — this is also the fail-before mechanism: at aaff30e contentLocker.js does not exist.
+  let CL = null; let clErr = '';
+  try { CL = await import('./../src/lib/contentLocker.js'); }
+  catch (e) { clErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+  const csSrcJ = safeRead('src/screens/study/ContentScreen.js');
+  const clSrc = safeRead('src/lib/contentLocker.js');
+  const schemaSrcJ = safeRead('supabase/schema.sql');
+  const needsCL = () => assert.ok(CL, `contentLocker.js import failed: ${clErr}`);
+  // slice of source between two markers — for "X happens BEFORE Y" ordering probes
+  const sliceFn = (src, startMark, endMark) => {
+    const i = src.indexOf(startMark);
+    assert.ok(i >= 0, `marker missing: ${startMark}`);
+    const j = endMark ? src.indexOf(endMark, i + startMark.length) : -1;
+    return src.slice(i, j > i ? j : src.length);
+  };
+
+  const UID = '11111111-1111-4111-8111-111111111111';
+  const NOWJ = '2026-09-28T12:00:00.000Z';
+
+  // ---------- J0: the pure core exists, is importable and has NO platform imports ----------
+  check('J0', 'contentLocker.js imports cleanly in plain Node and is pure — the ONLY import is config/constants.js (no react-native, no supabase, no AsyncStorage, no picker)', () => {
+    needsCL();
+    assert.ok(clSrc.includes('FIX-J: CONTENT LOCKER RULES (pure core)'), 'the lib declares itself the pure core');
+    const imports = clSrc.match(/^import .*$/gm) || [];
+    assert.ok(imports.length >= 1, 'at least one import');
+    for (const line of imports) assert.ok(line.includes("from '../config/constants.js'"), `unexpected import: ${line}`);
+    assert.equal(CL.CONTENT_BUCKET, 'content', 'the private bucket id is `content`');
+    assert.equal(CL.MAX_UPLOAD_BYTES, 10 * 1024 * 1024, 'J1: 10 MB limit');
+    assert.equal(CL.SIGNED_URL_TTL_SECONDS, 300, 'reads use SHORT-LIVED signed URLs');
+    assert.equal(CL.NOTE_XP_KEY, 'note', 'J2: the mandated xpOnce key — not an invented one');
+    assert.equal(CL.XP_NOTE_CREATE, XP_RULES.NOTE_CREATE.amount, 'the XP amount comes from XP_RULES.NOTE_CREATE (5)');
+    assert.deepEqual(CL.FILE_TYPES, ['pdf', 'image', 'audio'], 'the three upload kinds');
+  });
+
+  // ---------- J1a: the validation gate — BEFORE any network call ----------
+  check('J1a', 'validateUpload: title non-empty, extension allowlist (pdf/png/jpg/jpeg/webp/mp3/m4a/wav), 0 < size <= 10 MB — every rejection has an honest message and the OK result carries ext/type/contentType', () => {
+    needsCL();
+    const ok = CL.validateUpload({ title: '  Physics PDF  ', fileName: 'notes.PDF', mimeType: 'application/pdf', size: 5 * 1024 * 1024 });
+    assert.equal(ok.ok, true, '5 MB PDF passes');
+    assert.equal(ok.ext, 'pdf', 'extension lowercased');
+    assert.equal(ok.type, 'pdf', 'locker type');
+    assert.equal(ok.title, 'Physics PDF', 'title trimmed');
+    assert.equal(ok.sizeBytes, 5 * 1024 * 1024);
+    assert.equal(ok.contentType, 'application/pdf');
+    // mime-only detection (picker sometimes knows mime but the name is odd)
+    const mimeOnly = CL.validateUpload({ title: 't', fileName: 'download', mimeType: 'image/png', size: 100 });
+    assert.equal(mimeOnly.ok, true, 'mime fallback works');
+    assert.equal(mimeOnly.ext, 'png');
+    assert.equal(mimeOnly.type, 'image');
+    // exactly at the limit passes; one byte over fails
+    assert.equal(CL.validateUpload({ title: 't', fileName: 'a.pdf', size: CL.MAX_UPLOAD_BYTES }).ok, true, '10 MB exactly is allowed');
+    const big = CL.validateUpload({ title: 't', fileName: 'a.pdf', size: CL.MAX_UPLOAD_BYTES + 1 });
+    assert.equal(big.ok, false); assert.equal(big.reason, 'too-big', '10 MB + 1 B rejected');
+    assert.ok(/10 MB/.test(big.message), 'the rejection names the limit');
+    // empty title / bad type / empty file
+    assert.equal(CL.validateUpload({ title: '   ', fileName: 'a.pdf', size: 10 }).reason, 'empty-title', 'J6: empty-after-trim title rejected');
+    assert.equal(CL.validateUpload({ title: 't', fileName: 'a.exe', mimeType: 'application/x-msdownload', size: 10 }).reason, 'bad-type', 'exe rejected');
+    assert.equal(CL.validateUpload({ title: 't', fileName: 'a.pdf', size: 0 }).reason, 'empty-file', 'zero bytes rejected');
+    assert.equal(CL.validateUpload({ title: 't', fileName: 'a.pdf', size: NaN }).reason, 'empty-file', 'unknown size rejected');
+    // helper functions
+    assert.equal(CL.extOf('a.PDF'), 'pdf'); assert.equal(CL.extOf('noext'), ''); assert.equal(CL.extOf('trailing.'), '');
+    assert.equal(CL.extFromMime('audio/x-m4a'), 'm4a'); assert.equal(CL.extFromMime('image/jpeg'), 'jpg');
+    assert.equal(CL.typeForExt('jpeg'), 'image', 'jpeg kept as the jpg alias (declared deviation)');
+    assert.equal(CL.typeForExt('exe'), null);
+    assert.equal(CL.fmtFileSize(10 * 1024 * 1024), '10 MB');
+    // every picker mime maps back to its own kind — the picker offer and the gate agree
+    for (const kind of CL.FILE_TYPES) {
+      for (const mime of CL.PICKER_MIME[kind]) {
+        assert.equal(CL.typeForExt(CL.extFromMime(mime)), kind, `${mime} -> ${kind}`);
+      }
+    }
+  });
+
+  // ---------- J1b: storage path shape + the row an upload produces ----------
+  check('J1b', 'storageObjectName = {uid}/{id}.{ext} with uid ALWAYS the first path segment (what content_storage_own pins); junk ids/exts are sanitized; no uid -> null; fileRowFrom stores the object NAME (never a URL) with the exact content columns', () => {
+    needsCL();
+    const name = CL.storageObjectName(UID, 'pdf', 'ID-42');
+    assert.equal(name, `${UID}/ID-42.pdf`, 'exact {uid}/{uuid}.{ext} shape');
+    assert.equal(CL.firstSegmentIsUser(name, UID), true, 'segment 1 is the user id');
+    assert.equal(CL.firstSegmentIsUser(name, 'someone-else'), false, 'another uid never owns the path');
+    const dirty = CL.storageObjectName(UID, 'pd/f', '../../evil');
+    assert.equal(CL.firstSegmentIsUser(dirty, UID), true, 'path-traversal junk still lands under the uid folder');
+    assert.ok(!dirty.includes('..'), 'no traversal survives safeId');
+    assert.equal(CL.storageObjectName('', 'pdf', 'id'), null, 'no uid -> no path -> the screen refuses the upload');
+    assert.equal(CL.storageFullPath(UID, 'pdf', 'ID-42'), `content/${UID}/ID-42.pdf`, 'display path is bucket + name');
+    // the row
+    const row = CL.fileRowFrom({ userId: UID, title: '  My PDF ', type: 'pdf', sizeBytes: 5 * 1024 * 1024, objectName: name, subject: ' Physics ', topic: '', createdAt: NOWJ });
+    assert.deepEqual(Object.keys(row).sort(), ['ai_summary', 'created_at', 'file_size', 'subject', 'text', 'title', 'topic', 'type', 'url', 'user_id'].sort(), 'exactly the content-table columns — nothing extra (db.insert spread-order trap avoided)');
+    assert.equal(row.url, name, 'url column holds the storage object NAME');
+    assert.equal(row.text, null);
+    assert.equal(row.title, 'My PDF', 'title trimmed');
+    assert.equal(row.subject, 'Physics', 'subject trimmed');
+    assert.equal(row.topic, null, 'empty topic -> null');
+    assert.equal(row.file_size, 5 * 1024 * 1024);
+    assert.equal(row.created_at, NOWJ);
+    assert.equal(CL.isStoredFileRow(row), true, 'the row is recognized as an uploaded file');
+    // an http link that merely ENDS in .pdf is NOT a stored file — it stays a link
+    assert.equal(CL.isStoredFileRow({ type: 'pdf', url: 'https://x.com/a.pdf' }), false, 'http(s) urls are never treated as storage names');
+    assert.equal(CL.isStoredFileRow({ type: 'note', url: name }), false, 'only file kinds count');
+    assert.equal(CL.isStoredFileRow(null), false, 'junk -> false, no crash');
+  });
+
+  // ---------- J1*: DEVICE upload flow — verified as source-wiring probes ----------
+  check('J1*', '[wiring probe — DEVICE/PO-RUNTIME: a real upload + the 403 isolation test happen on a device after the PO runs the DDL] the screen validates BEFORE any network call, uploads {uid}/{uuid}.{ext} with upsert:false into the private bucket, opens files via short-lived signed URLs only, and never touches getPublicUrl/createBucket/service_role', () => {
+    needsCL();
+    assert.ok(csSrcJ.includes("import { getDocumentAsync } from 'expo-document-picker'"), 'the ONLY new dependency is expo-document-picker');
+    const pick = sliceFn(csSrcJ, 'const pickFile = async (kind)', 'const uploadBody');
+    const iLoc = pick.indexOf('LOCAL_UPLOAD_MESSAGE'); const iPick = pick.indexOf('getDocumentAsync(');
+    assert.ok(iLoc >= 0 && iPick >= 0 && iLoc < iPick, 'local mode gets the honest cloud-only message BEFORE the picker opens');
+    assert.ok(/if \(res\?\.canceled[^\n]*\) return;/.test(pick), 'DEVICE test: a CANCELLED picker returns silently — no row, no upload, no XP');
+    assert.ok(pick.includes('copyToCacheDirectory: true'), 'the picked file is copied to cache so the native upload can read its uri');
+    assert.ok(pick.includes('typeForExt(ext)') && pick.includes('MAX_UPLOAD_BYTES'), 'type + size are gated immediately after picking');
+    const save = sliceFn(csSrcJ, 'const saveFile = async () => {', '// ---------- opening items');
+    const iV = save.indexOf('validateUpload('); const iU = save.indexOf('.upload(');
+    assert.ok(iV >= 0 && iU >= 0 && iV < iU, 'the FULL validateUpload gate runs BEFORE any network call [J1a]');
+    assert.ok(/storageObjectName\(profile\.id, v\.ext, uuid\(\)\)/.test(save), 'object name = {uid}/{uuid}.{ext}');
+    assert.ok(save.includes('upsert: false') && save.includes('contentType: v.contentType'), 'upload is create-only with the right content type');
+    assert.ok(save.includes(`from(CONTENT_BUCKET)`), 'uploads target the `content` bucket constant');
+    assert.ok(save.includes('fileRowFrom('), 'the inserted row is built by the pure lib');
+    // native + web body shapes
+    assert.ok(csSrcJ.includes("fd.append('', {"), 'native body = FormData with the RN {uri,name,type} file part under the EMPTY field name — exactly the shape storage-js itself builds for Blobs (verified in the installed client source)');
+    assert.ok(csSrcJ.includes('cacheControl'), 'the multipart body carries cacheControl like storage-js does');
+    // opening files: signed URLs ONLY
+    assert.ok(csSrcJ.includes('createSignedUrl(item.url, SIGNED_URL_TTL_SECONDS)'), 'opens via a short-lived signed URL');
+    assert.ok(!csSrcJ.includes('getPublicUrl'), 'NEVER a public URL (the bucket is private)');
+    assert.ok(!csSrcJ.includes('service_role') && !clSrc.includes('service_role'), 'no service-role key anywhere in this round');
+    assert.ok(!csSrcJ.includes('createBucket') && !clSrc.includes('createBucket'), 'the app NEVER creates buckets — that is PO-executed DDL');
+    // audio playback toggle + cleanup
+    assert.ok(csSrcJ.includes('toggleAudio') && csSrcJ.includes('stopAudio'), 'audio rows play/stop through one helper');
+    assert.ok(csSrcJ.includes('return () => stopAudio();'), 'leaving the screen stops playback');
+  });
+
+  // ---------- J1†: schema-file probe — the storage DDL is written but NEVER run by the agent ----------
+  check('J1†', '[schema-file probe — live Storage checks are PO-side after running the DDL] private `content` bucket + content_storage_own policy pinned to (storage.foldername(name))[1] = auth.uid()::text, idempotent, with the explicit agent-never-ran-this gate note', () => {
+    needsCL();
+    const s = schemaSrcJ;
+    assert.ok(s.includes('insert into storage.buckets (id, name, public)'), 'bucket insert present');
+    assert.ok(s.includes("values ('content', 'content', false)"), 'the bucket is PRIVATE (public = false)');
+    assert.ok(s.includes('on conflict (id) do nothing'), 'idempotent re-run');
+    assert.ok(s.includes('drop policy if exists "content_storage_own" on storage.objects;'), 'policy creation is idempotent');
+    assert.ok(s.includes('create policy "content_storage_own"'), 'policy present');
+    assert.ok(s.includes('(storage.foldername(name))[1] = auth.uid()::text'), 'every operation is pinned to the caller\'s own uid folder');
+    assert.ok(/content_storage_own[\s\S]*?using \(bucket_id = 'content'[\s\S]*?with check \(bucket_id = 'content'/m.test(s), 'USING and WITH CHECK both scope to the content bucket');
+    assert.ok(/SCHEMA GATE/i.test(s) && /did NOT run any DDL/i.test(s), 'the gate note states the agent never ran this');
+    assert.ok(/MUST stay private/i.test(s), 'the privacy requirement is written down');
+  });
+
+  // ---------- J2: NOTE_CREATE daily guard (xpOnce key 'note') — decision + injected effects ----------
+  await record('J2', 'applyNoteXp: first save today awards +5 via the injected awardXP and marks the ledger; a later same-day save awards 0 with the exact honest message; awardXP failure or guard-read failure NEVER blocks the save (display-only result); no second guard mechanism exists', async () => {
+    needsCL();
+    const mkFakes = ({ earned = false, awardThrows = false } = {}) => {
+      const state = { earned, marks: 0, awards: 0 };
+      return {
+        state,
+        hasEarnedToday: async () => { if (state.earned === 'throw') throw new Error('guard read boom'); return state.earned; },
+        markEarnedToday: async () => { state.marks += 1; state.earned = true; },
+        awardXP: async () => { state.awards += 1; if (awardThrows) throw new Error('award boom'); return { gained: 5 }; },
+      };
+    };
+    // first save today
+    const f1 = mkFakes();
+    const r1 = await CL.applyNoteXp({ userId: UID, hasEarnedToday: f1.hasEarnedToday, markEarnedToday: f1.markEarnedToday, awardXP: f1.awardXP });
+    assert.equal(r1.reason, 'first-today'); assert.equal(r1.awardedXp, 5, '+5 XP on the first save');
+    assert.equal(f1.state.awards, 1); assert.equal(f1.state.marks, 1, 'the ledger is marked only after a successful award');
+    // second save the same day -> 0 XP, still succeeds
+    const r2 = await CL.applyNoteXp({ userId: UID, hasEarnedToday: f1.hasEarnedToday, markEarnedToday: f1.markEarnedToday, awardXP: f1.awardXP });
+    assert.equal(r2.reason, 'daily-cap'); assert.equal(r2.awardedXp, 0, 'later saves pay 0');
+    assert.equal(f1.state.awards, 1, 'awardXP is never called again the same day');
+    assert.ok(r2.msg.includes('Aaj ka note XP mil chuka'), 'the exact honest daily-cap message');
+    // award failure: save still fine, ledger NOT marked (a retry can earn later)
+    const f2 = mkFakes({ awardThrows: true });
+    const r3 = await CL.applyNoteXp({ userId: UID, hasEarnedToday: f2.hasEarnedToday, markEarnedToday: f2.markEarnedToday, awardXP: f2.awardXP });
+    assert.equal(r3.awardedXp, 0); assert.equal(f2.state.marks, 0, 'a failed award never marks the day as earned');
+    assert.ok(/save phir bhi/i.test(r3.msg), 'the message says the SAVE still happened');
+    // guard-read failure: treated as not-earned, the award proceeds — the save never depends on XP machinery
+    const f3 = mkFakes({ earned: 'throw' });
+    const r4 = await CL.applyNoteXp({ userId: UID, hasEarnedToday: f3.hasEarnedToday, markEarnedToday: f3.markEarnedToday, awardXP: f3.awardXP });
+    assert.equal(r4.reason, 'first-today'); assert.equal(f3.state.awards, 1, 'a broken guard read cannot block the flow');
+    // the decision itself is pure
+    assert.equal(CL.noteXpDecision({ alreadyEarnedToday: false }).amount, 5);
+    assert.equal(CL.noteXpDecision({ alreadyEarnedToday: true }).award, false);
+  });
+
+  check('J2*', '[wiring probe] the screen runs guard->award->mark through the ONE xpOnce mechanism (key \'note\'), inserts the row FIRST so the save never depends on XP, and contains no direct awardXP(\'NOTE_CREATE\') call or second guard', () => {
+    needsCL();
+    assert.ok(csSrcJ.includes("import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce'"), 'the existing xpOnce module is reused — not reinvented');
+    assert.ok(csSrcJ.includes('applyNoteXp('), 'both add() and saveFile() go through applyNoteXp');
+    assert.ok(!csSrcJ.includes("awardXP('NOTE_CREATE')"), 'no unguarded direct NOTE_CREATE award remains');
+    assert.ok(/hasEarnedToday\(userId, NOTE_XP_KEY\)/.test(clSrc) && /markEarnedToday\(userId, NOTE_XP_KEY\)/.test(clSrc), 'the lib uses the mandated key \'note\' for both guard calls');
+    const add = sliceFn(csSrcJ, 'const add = async () => {', 'const remove = async (item)');
+    const iIns = add.indexOf("db.insert('content'"); const iXp = add.indexOf('applyNoteXp(');
+    assert.ok(iIns >= 0 && iXp >= 0 && iIns < iXp, 'add(): the row is inserted BEFORE XP is even considered');
+    const save = sliceFn(csSrcJ, 'const saveFile = async () => {', '// ---------- opening items');
+    assert.ok(save.indexOf("db.insert('content'") < save.indexOf('applyNoteXp('), 'saveFile(): upload+insert happen BEFORE XP');
+  });
+
+  // ---------- J3: dedupe ----------
+  check('J3', 'findDuplicate: same URL modulo case/scheme/trailing-slash is ONE item; same note title+text modulo case/whitespace is ONE item; uploaded-file rows never collide (unique storage names); deleting the original frees the key; the message is exactly "Already saved in your locker"', () => {
+    needsCL();
+    assert.equal(CL.DUPLICATE_MESSAGE, 'Already saved in your locker', 'exact copy per spec');
+    const stored = { id: 'l1', type: 'youtube', title: 'Old title', url: 'https://YouTube.com/Watch?v=1/', text: null };
+    // case + scheme + trailing slash all collapse
+    assert.ok(CL.findDuplicate([stored], { type: 'link', title: 'Whatever', url: 'http://youtube.com/watch?v=1' }), 'http vs https + case + trailing slash = duplicate');
+    assert.ok(CL.findDuplicate([stored], { type: 'youtube', title: 'X', url: 'youtube.com/watch?v=1' }), 'a scheme-less retype is the same link');
+    assert.equal(CL.findDuplicate([stored], { type: 'link', title: 'X', url: 'https://youtube.com/watch?v=2' }), null, 'a different URL is not a duplicate');
+    // notes: title + text, whitespace-collapsed, case-insensitive
+    const noteRow = { id: 'n1', type: 'note', title: 'My Note', text: 'Hello   World', url: null };
+    assert.ok(CL.findDuplicate([noteRow], { type: 'note', title: '  my NOTE ', text: 'hello world' }), 'case/whitespace variants are the same note');
+    assert.equal(CL.findDuplicate([noteRow], { type: 'note', title: 'My Note', text: 'hello world!' }), null, 'different text is not a duplicate');
+    // the title alone does not make notes duplicates, and vice versa
+    assert.equal(CL.findDuplicate([noteRow], { type: 'note', title: 'My Note', text: 'totally different' }), null);
+    // uploaded files never dedupe — every upload has a unique {uid}/{uuid}.{ext} name
+    const fileRow = CL.fileRowFrom({ userId: UID, title: 'Same title', type: 'pdf', sizeBytes: 10, objectName: CL.storageObjectName(UID, 'pdf', 'ID-1'), createdAt: NOWJ });
+    assert.equal(CL.dedupeKeyOf(fileRow), null, 'file rows have no dedupe key');
+    assert.equal(CL.findDuplicate([fileRow], { ...fileRow, id: 'other' }), null, 're-uploading the same document is allowed');
+    // deleting the original frees the key -> re-save works
+    assert.ok(CL.findDuplicate([noteRow], { type: 'note', title: 'My Note', text: 'Hello World' }), 'blocked while the original exists');
+    assert.equal(CL.findDuplicate([], { type: 'note', title: 'My Note', text: 'Hello World' }), null, 'after delete the same note saves again');
+    // junk never crashes
+    assert.equal(CL.dedupeKeyOf(null), null);
+    assert.equal(CL.dedupeKeyOf({ type: 'note' }), null, 'an empty note has no key');
+    assert.equal(CL.findDuplicate(null, null), null);
+    assert.equal(CL.findDuplicate([null, undefined, 'junk'], { type: 'note', title: 'a', text: 'b' }), null, 'garbage rows are skipped');
+  });
+
+  check('J3*', '[wiring probe] add() dedupes BEFORE the insert and shows the exact duplicate message; the DUPLICATE path performs zero writes', () => {
+    needsCL();
+    const add = sliceFn(csSrcJ, 'const add = async () => {', 'const remove = async (item)');
+    const iDup = add.indexOf('findDuplicate(items || []');
+    const iIns = add.indexOf("db.insert('content'");
+    assert.ok(iDup >= 0 && iIns >= 0 && iDup < iIns, 'the duplicate check runs before any insert');
+    assert.ok(/if \(findDuplicate\([^\n]*\)\) \{ setAiMsg\(DUPLICATE_MESSAGE\); return; \}/.test(add), 'a duplicate shows the exact message and RETURNS — no insert, no XP');
+    assert.ok(add.includes('normalizeUrl(form.body)'), 'the candidate URL is normalized before dedupe/insert');
+  });
+
+  // ---------- J4: search ----------
+  check('J4', 'matchesSearch: substring over title/text/subject, case-insensitive, empty query matches everything, URLs are NOT searched; filterItems composes search WITH the type chip and survives junk rows — all client-side, zero server calls', () => {
+    needsCL();
+    const rows = [
+      { id: '1', type: 'note', title: 'Thermodynamics Notes', text: 'laws of energy', subject: 'Physics' },
+      { id: '2', type: 'link', title: 'Thermo video', text: null, subject: 'Physics', url: 'https://youtu.be/x' },
+      { id: '3', type: 'note', title: 'Algebra', text: 'quadratic equations', subject: 'Maths' },
+    ];
+    assert.equal(CL.matchesSearch(rows[0], 'thermo'), true, 'title substring');
+    assert.equal(CL.matchesSearch(rows[0], 'ENERGY'), true, 'text substring, case-insensitive');
+    assert.equal(CL.matchesSearch(rows[0], 'physics'), true, 'subject substring');
+    assert.equal(CL.matchesSearch(rows[0], 'chem'), false, 'no match');
+    assert.equal(CL.matchesSearch(rows[0], ''), true, 'empty query matches all');
+    assert.equal(CL.matchesSearch(rows[0], '   '), true, 'whitespace query matches all');
+    assert.equal(CL.matchesSearch(rows[0], null), true, 'null query matches all');
+    assert.equal(CL.matchesSearch({ title: null, text: null, subject: null, url: 'https://thermo.com' }, 'thermo'), false, 'the URL is NOT part of the search fields');
+    assert.equal(CL.matchesSearch({}, 'x'), false, 'junk row: no crash, no match');
+    // composition with the type filter
+    assert.deepEqual(CL.filterItems(rows, { type: 'All', query: 'thermo' }).map((r) => r.id), ['1', '2'], 'search across all types');
+    assert.deepEqual(CL.filterItems(rows, { type: 'note', query: 'thermo' }).map((r) => r.id), ['1'], 'type chip AND search compose');
+    assert.deepEqual(CL.filterItems(rows, { type: 'note', query: '' }).map((r) => r.id), ['1', '3'], 'chip alone still works');
+    assert.deepEqual(CL.filterItems(rows, {}).map((r) => r.id), ['1', '2', '3'], 'defaults = show all');
+    assert.deepEqual(CL.filterItems(null, { query: 'x' }), [], 'null list -> empty, no crash');
+    assert.deepEqual(CL.filterItems([null, rows[0]], { query: 'thermo' }).map((r) => r.id), ['1'], 'junk rows are skipped');
+  });
+
+  check('J4*', '[wiring probe] the screen renders filterItems(items, { type: filter, query }) and has a search Input bound to setQuery — no server-side search, no schema change', () => {
+    needsCL();
+    assert.ok(csSrcJ.includes('const shown = filterItems(items, { type: filter, query });'), 'the list is filtered+searched through the pure lib');
+    assert.ok(csSrcJ.includes('onChangeText={setQuery}'), 'a search Input exists');
+    assert.ok(/Search locker/i.test(csSrcJ), 'the search box is labelled');
+    assert.ok(!csSrcJ.includes('.ilike(') && !csSrcJ.includes('.textSearch('), 'no server-side search calls');
+    assert.ok(!schemaSrcJ.includes('to_tsvector'), 'no schema change for search');
+  });
+
+  // ---------- J5: syllabus metadata ----------
+  check('J5', 'syllabusChoices: subjects/chapters come from the student\'s OWN syllabus rows; ARCHIVED rows are excluded even if the caller forgets activeSyllabusRows; duplicates collapse; junk/empty rows are skipped; the choice shape feeds subject + chaptersBySubject', () => {
+    needsCL();
+    const syl = [
+      { id: 's1', subject: 'Physics', chapter: 'Kinematics', status: 'active' },
+      { id: 's2', subject: 'Physics', chapter: 'Kinematics', status: 'in_progress' }, // duplicate chapter
+      { id: 's3', subject: 'Physics', chapter: 'Laws of Motion', status: 'active' },
+      { id: 's4', subject: 'Maths', chapter: 'Trigonometry', status: 'archived' },    // S5 archived history
+      { id: 's5', subject: 'Bio', chapter: 'Cells', status: 'ARCHIVED' },             // case-variant archived
+      { id: 's6', subject: 'Chem', chapter: 'Bonding', status: 'completed' },
+      null, { id: 's7', subject: '  ', chapter: 'Nothing' },                          // empty subject skipped
+      { id: 's8', subject: 'Chem', chapter: '' },                                     // empty chapter skipped
+    ];
+    const ch = CL.syllabusChoices(syl);
+    assert.deepEqual(ch.subjects, ['Physics', 'Chem'], 'archived subjects (Maths, Bio) never offered; uniques only; empty skipped');
+    assert.deepEqual(ch.chaptersBySubject.Physics, ['Kinematics', 'Laws of Motion'], 'chapters unique, in row order');
+    assert.deepEqual(ch.chaptersBySubject.Chem, ['Bonding'], 'an empty chapter does not create an entry');
+    assert.equal(ch.chaptersBySubject.Maths, undefined, 'no archived chapters leak');
+    assert.deepEqual(CL.syllabusChoices(null), { subjects: [], chaptersBySubject: {} }, 'null input -> empty choices, no crash');
+    assert.deepEqual(CL.syllabusChoices('junk'), { subjects: [], chaptersBySubject: {} }, 'junk input -> empty choices');
+  });
+
+  check('J5*', '[wiring probe] the screen loads choices via syllabusChoices(activeSyllabusRows(syl)), persists topic on insert, renders subject+topic on the card, and clears the chapter when the subject changes', () => {
+    needsCL();
+    assert.ok(csSrcJ.includes('syllabusChoices(activeSyllabusRows(syl))'), 'choices = the student\'s OWN active syllabus rows (S5 helper)');
+    assert.ok(csSrcJ.includes('topic: form.topic.trim() || null'), 'add() persists the chapter into the EXISTING topic column');
+    assert.ok(csSrcJ.includes('topic: form.topic'), 'saveFile persists it too via form state');
+    assert.ok(/\[c\.subject, c\.topic\]\.filter\(Boolean\)\.join\(' · '\)/.test(csSrcJ), 'subject · topic is shown on the card');
+    assert.ok(csSrcJ.includes("onChangeText={(v) => setForm({ ...form, subject: v, topic: '' })}"), 'changing the subject clears the stale chapter');
+    assert.ok(csSrcJ.includes('chaptersBySubject[form.subject]'), 'chapter chips come from the chosen subject');
+    // no new columns — the FIX-J storage block must not touch the content table at all
+    // (pre-existing defensive `alter table public.content … created_at` migrations predate this round)
+    const fixJBlock = schemaSrcJ.slice(schemaSrcJ.indexOf('FIX-J: CONTENT STORAGE'), schemaSrcJ.indexOf('Done! 🎉'));
+    assert.ok(fixJBlock.length > 100, 'the FIX-J schema block was located');
+    assert.ok(!/alter table|create table/i.test(fixJBlock), 'FIX-J adds NO table/column changes — the existing subject/topic fields are reused');
+  });
+
+  // ---------- J6: malformed input ----------
+  check('J6', 'normalizeUrl: bare hosts get https:// (BUG-5 kept), host/scheme case folds, trailing slash drops, path case survives; javascript:/data:/ftp:/whitespace are REJECTED (null); safeCard is total — null/junk/unknown-type/missing-fields all produce a renderable fallback card and never throw', () => {
+    needsCL();
+    assert.equal(CL.normalizeUrl('YouTube.com/watch?v=1'), 'https://youtube.com/watch?v=1', 'bare host -> https, host lowercased, path kept');
+    assert.equal(CL.normalizeUrl('HTTPS://X.com/A/'), 'https://x.com/A', 'scheme+host fold, trailing slash drops, PATH case preserved for display/open');
+    assert.equal(CL.normalizeUrl('http://x.com/a/'), 'http://x.com/a', 'http stays http (only the KEY is scheme-insensitive)');
+    assert.equal(CL.normalizeUrl('https://x.com:8080/a'), 'https://x.com:8080/a', 'ports are fine');
+    assert.equal(CL.normalizeUrl('https://x.com/a//'), 'https://x.com/a', 'repeated trailing slashes drop');
+    assert.equal(CL.normalizeUrl('javascript:alert(1)'), null, 'J6: javascript: rejected');
+    assert.equal(CL.normalizeUrl('data:text/html,<script>'), null, 'data: rejected');
+    assert.equal(CL.normalizeUrl('ftp://files.example.com/a'), null, 'ftp: rejected');
+    assert.equal(CL.normalizeUrl(''), null); assert.equal(CL.normalizeUrl('   '), null); assert.equal(CL.normalizeUrl(null), null);
+    assert.equal(CL.normalizeUrl('https://x .com/a'), null, 'whitespace anywhere -> rejected');
+    assert.equal(CL.normalizeUrl('https:///path'), null, 'empty host -> rejected');
+    assert.equal(CL.urlDedupeKey('https://X.com/a/'), 'x.com/a', 'the dedupe key drops scheme+trailing slash');
+    assert.equal(CL.urlDedupeKey('https://X.com/A/'), 'x.com/a', 'the dedupe key ALSO folds path case (J3: fully case-insensitive)');
+    assert.equal(CL.urlDedupeKey('javascript:x'), null);
+    // safeCard totality
+    for (const junk of [null, undefined, 42, 'str', {}, [], { type: 'weird' }, { type: 'pdf', url: null, title: null, text: null, file_size: 'big' }]) {
+      const c = CL.safeCard(junk);
+      assert.ok(c && typeof c === 'object' && typeof c.title === 'string' && c.title.length > 0, `safeCard(${JSON.stringify(junk)}) -> renderable card`);
+      assert.equal(typeof c.canOpen, 'boolean');
+      assert.equal(typeof c.isFile, 'boolean');
+    }
+    assert.equal(CL.safeCard(null).malformed, true, 'null row = the fallback card');
+    assert.equal(CL.safeCard(null).title, 'Unknown item');
+    assert.equal(CL.safeCard({ type: 'weird', title: 'X' }).type, 'note', 'unknown types degrade to a note-style card');
+    assert.equal(CL.safeCard({ type: 'weird', title: 'X' }).malformed, true);
+    assert.equal(CL.safeCard({ type: 'note', title: '  ' }).title, '(Untitled)', 'blank titles render (Untitled)');
+    const fc = CL.safeCard(CL.fileRowFrom({ userId: UID, title: 'F', type: 'audio', sizeBytes: 2048, objectName: `${UID}/i.mp3`, createdAt: NOWJ }));
+    assert.equal(fc.isFile, true); assert.equal(fc.fileSizeLabel, '2 KB', 'file rows show a size label');
+    assert.equal(fc.canOpen, true, 'a file row is openable (signed URL path)');
+  });
+
+  check('J6*', '[wiring probe] the screen rejects empty titles / non-http(s) links / empty note text with visible messages, renders every row through safeCard with a row-${idx} key fallback, guards open() with normalizeUrl, and keeps exactly ONE normalizeUrl implementation (the lib)', () => {
+    needsCL();
+    const add = sliceFn(csSrcJ, 'const add = async () => {', 'const remove = async (item)');
+    assert.ok(/if \(!title\) \{ setAiMsg\('Title khali nahi ho sakta\.'\); return; \}/.test(add), 'empty-after-trim title is rejected visibly');
+    assert.ok(/if \(!url\) \{ setAiMsg\('Link http\(s\) hona chahiye/.test(add), 'non-http(s) links are rejected visibly');
+    assert.ok(add.includes("if (!isLink && !text) { setAiMsg('Note text khali nahi ho sakta.')"), 'empty note text is rejected visibly');
+    // list rendering
+    assert.ok(csSrcJ.includes('const c = safeCard(item);'), 'rows render through safeCard');
+    assert.ok(csSrcJ.includes('key={item?.id || `row-${idx}`}'), 'rows without ids still get a stable key');
+    assert.ok(csSrcJ.includes('localDateOf(item?.created_at)'), 'missing created_at cannot crash the date label');
+    // open() guards
+    const openFn = sliceFn(csSrcJ, 'const open = async (item) => {', 'if (!items) {');
+    assert.ok(openFn.includes('const c = safeCard(item);'), 'open() decides from the safe card');
+    assert.ok(/const u = normalizeUrl\(c\.url\);[\s\S]*?if \(u\) Linking\.openURL\(u\)/.test(openFn), 'garbage URLs never reach Linking');
+    assert.ok(openFn.includes("setAiMsg('Is item mein kholne ko kuch nahi hai (adhoora row).')"), 'a row with nothing to open says so honestly');
+    // one implementation only
+    assert.ok(!/const normalizeUrl =/.test(csSrcJ), 'the screen no longer re-implements normalizeUrl — the lib is the single source');
+    assert.ok(csSrcJ.includes('const u = normalizeUrl(url); if (u) Linking.openURL(u)'), 'FreeLibrary links are guarded too');
+    assert.ok(csSrcJ.includes('const detectType'), 'detectType (link vs youtube) is untouched');
+  });
+
+  // ---------- J7: ordering + persistence + delete-with-storage ----------
+  check('J7', 'sortItemsDesc: created_at DESC with a stable id tie-break, input never mutated, deterministic across runs, junk/null-safe (missing created_at sinks); compareCreatedDesc agrees', () => {
+    needsCL();
+    const rows = [
+      { id: 'b', created_at: '2026-09-27T10:00:00Z' },
+      { id: 'a', created_at: '2026-09-28T10:00:00Z' },
+      { id: 'c2', created_at: '2026-09-27T10:00:00Z' },
+      { id: 'c1', created_at: '2026-09-27T10:00:00Z' },
+    ];
+    const sorted = CL.sortItemsDesc(rows);
+    assert.deepEqual(sorted.map((r) => r.id), ['a', 'b', 'c1', 'c2'], 'newest first; equal timestamps tie-break by id ASC (stable)');
+    assert.deepEqual(rows.map((r) => r.id), ['b', 'a', 'c2', 'c1'], 'the input array is NEVER mutated');
+    assert.deepEqual(CL.sortItemsDesc(rows).map((r) => r.id), sorted.map((r) => r.id), 'deterministic across runs');
+    assert.deepEqual(CL.sortItemsDesc(null), [], 'null -> []');
+    assert.doesNotThrow(() => CL.sortItemsDesc([null, { id: 'x' }, { id: 'y', created_at: NOWJ }]));
+    const withMissing = CL.sortItemsDesc([{ id: 'old' }, { id: 'new', created_at: NOWJ }]);
+    assert.deepEqual(withMissing.map((r) => r.id), ['new', 'old'], 'a missing created_at sinks to the bottom instead of crashing');
+    assert.equal(CL.compareCreatedDesc(null, null), 0);
+    assert.ok(CL.compareCreatedDesc({ created_at: '2026-01-02' }, { created_at: '2026-01-01' }) < 0, 'newer sorts first');
+  });
+
+  check('J7*', '[wiring probe — DEVICE test: cloud+local persistence across reload, and the storage 403 isolation check, are PO/device-side] the screen sorts every load through sortItemsDesc, and remove() deletes the STORAGE OBJECT first (visible error + abort on failure) so a deleted upload never leaves an orphan', () => {
+    needsCL();
+    assert.ok(csSrcJ.includes('setItems(sortItemsDesc(rows));'), 'the loaded list is ordered created_at desc through the lib (cloud AND local go through db.list)');
+    assert.ok(csSrcJ.includes("db.list('content'") && csSrcJ.includes("db.remove('content'"), 'persistence stays on the existing db layer — cloud supabase / local AsyncStorage, unchanged');
+    const rem = sliceFn(csSrcJ, 'const remove = async (item) => {', '// BUG 5 behaviour');
+    const iSt = rem.indexOf('.remove([item.url])'); const iDb = rem.indexOf("db.remove('content'");
+    assert.ok(iSt >= 0 && iDb >= 0 && iSt < iDb, 'the storage object is removed BEFORE the row — no orphan objects');
+    assert.ok(rem.includes('isStoredFileRow(item) && isRemote()'), 'only uploaded cloud files touch storage (links/notes/local rows do not)');
+    const iErr = rem.indexOf('if (error) {'); const iMsg = rem.indexOf('setAiMsg(', iErr); const iRet = rem.indexOf('return;', iErr);
+    assert.ok(iErr >= 0 && iMsg > iErr && iRet > iMsg, 'a storage-remove failure is VISIBLE (setAiMsg) and ABORTS the row delete (return) — F6 pattern');
+    assert.ok(rem.includes(`from(CONTENT_BUCKET)`), 'the delete targets the same private bucket');
+  });
+
+  // ---------- JREG: regression guards around the locker round ----------
+  check('JREG', 'regression: note/link save+open flows intact, the F6 visible-error pattern and the FIX-D2 full-screen reader survive, files are the ONLY cloud-gated kind (local mode still saves notes/links), and no scope creep (no new tables, no schema edits beyond the gated storage block)', () => {
+    needsCL();
+    // F6 + reader probes (committed constraints)
+    assert.ok(csSrcJ.includes('FIX-F6') && csSrcJ.includes('silent failure audit'), 'the F6 audit comments survive');
+    for (const p of ['noteOpen', 'fullReaderOpen', 'full-screen note reader', 'maxHeight="92%"', 'maxHeight: 520', 'selectable', 'numberOfLines']) {
+      assert.ok(csSrcJ.includes(p), `reader probe survives: ${p}`);
+    }
+    // local mode: notes/links keep working offline; only uploads are cloud-gated
+    const add = sliceFn(csSrcJ, 'const add = async () => {', 'const remove = async (item)');
+    assert.ok(!add.includes('LOCAL_UPLOAD_MESSAGE') && !add.includes('isRemote'), 'add() has NO cloud gate — local students keep saving notes/links');
+    assert.ok(csSrcJ.includes('LOCAL_UPLOAD_MESSAGE'), 'the honest cloud-only message exists for file kinds');
+    // error surfaces remain visible, never silent
+    assert.ok(/catch \(e\) \{\s*console\.warn\('\[F6\] Content add failed'/.test(csSrcJ), 'add keeps its visible catch');
+    assert.ok(/catch \(e\) \{\s*console\.warn\('\[F6\] Content remove failed'/.test(csSrcJ), 'remove keeps its visible catch');
+    assert.ok(csSrcJ.includes("console.warn('[J1] upload failed'"), 'upload failures are visible too');
+    // scope: no new tables this round; the only schema addition is the gated storage block
+    const contentTables = (schemaSrcJ.match(/create table if not exists public\.content/g) || []).length;
+    assert.equal(contentTables, 1, 'the content table DDL is untouched/unchanged (no new locker tables)');
+    assert.ok(schemaSrcJ.includes('FIX-J: CONTENT STORAGE'), 'the only FIX-J schema text is the gated storage block');
+    // the dependency footprint is exactly one new package
+    const pkg = JSON.parse(safeRead('package.json'));
+    assert.ok(pkg.dependencies['expo-document-picker'], 'expo-document-picker declared in package.json');
+  });
+
+  const failedJ = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedJ.length, 0, `FIX-J: ${failedJ.length} check(s) failed -> ${failedJ.map((f) => f.id).join(', ')}`);
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 

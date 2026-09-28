@@ -470,17 +470,27 @@ create policy "workout_logs_own"
   with check (auth.uid() = user_id);
 
 -- ============================================================
--- (Optional) STORAGE bucket for content files
--- Run manually if you plan to upload PDFs/images from the app.
+-- FIX-J: CONTENT STORAGE — private bucket for Locker file uploads
+-- SCHEMA GATE: NEW X wrote this file and did NOT run any DDL. The PO runs it
+-- live, AFTER the FIX-J commit review and BEFORE device tests. Pre-checks:
+--   select id, public from storage.buckets;
+--   select policyname from pg_policies where schemaname = 'storage';
+-- The bucket MUST stay private (public = false). Objects live under
+-- content/{auth.uid()}/<uuid>.<ext> — the policy below pins every operation to
+-- the caller's own uid folder; the app never creates buckets, never generates
+-- public URLs, and reads only via short-lived signed URLs.
+-- (Formalizes the previously commented "(Optional) STORAGE bucket" proposal —
+-- same bucket id, same policy text, drop-if-exists added for idempotency.)
 -- ============================================================
--- insert into storage.buckets (id, name, public)
---   values ('content', 'content', false)
---   on conflict (id) do nothing;
---
--- create policy "content_storage_own"
---   on storage.objects for all to authenticated
---   using (bucket_id = 'content' and (storage.foldername(name))[1] = auth.uid()::text)
---   with check (bucket_id = 'content' and (storage.foldername(name))[1] = auth.uid()::text);
+insert into storage.buckets (id, name, public)
+  values ('content', 'content', false)
+  on conflict (id) do nothing;
+
+drop policy if exists "content_storage_own" on storage.objects;
+create policy "content_storage_own"
+  on storage.objects for all to authenticated
+  using (bucket_id = 'content' and (storage.foldername(name))[1] = auth.uid()::text)
+  with check (bucket_id = 'content' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ============================================================
 -- Done! 🎉

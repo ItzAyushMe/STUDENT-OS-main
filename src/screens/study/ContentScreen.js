@@ -1,9 +1,17 @@
 // CONTENT LOCKER — notes, links, YouTube refs with optional AI
 // summaries (AI summarize arrives with Layer 4; data model ready).
-import { useCallback, useState } from 'react';
-import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
+// FIX-J: + real file uploads to the PRIVATE `content` bucket (PO-gated DDL —
+// the app never creates buckets and never makes public URLs), NOTE_CREATE XP
+// behind the xpOnce daily guard (key 'note'), dedupe, search, syllabus
+// chapter/topic metadata, malformed-row fallback cards. Every DECISION lives in
+// src/lib/contentLocker.js (pure, unit-tested J1–J7); this screen renders and
+// moves bytes. Existing note/link behavior and the F6 error surfaces are kept.
+import { useCallback, useRef, useState } from 'react';
+import { Linking, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { getDocumentAsync } from 'expo-document-picker';
+import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
 import { Screen } from '../../components/ui/Screen';
@@ -14,13 +22,22 @@ import { Chip } from '../../components/ui/Chip';
 import { ModalSheet } from '../../components/ui/ModalSheet';
 import { Input } from '../../components/ui/Input';
 import { Loading } from '../../components/ui/EmptyState';
-import { db } from '../../lib/db';
+import { db, isRemote } from '../../lib/db';
+import { supabase } from '../../lib/supabase';
+import { hasEarnedToday, markEarnedToday } from '../../lib/xpOnce';
 import { aiSummarizeContent, AIUnavailableError } from '../../lib/aiFeatures';
 import { aiStatus } from '../../lib/aiService';
-import { CONTENT_TYPES } from '../../config/constants';
+import { CONTENT_TYPES, activeSyllabusRows } from '../../config/constants';
 import { FREE_LIBRARY, LIB_KIND_ICON, CLASS10_LIBRARY } from '../../data/contentLibrary';
+import {
+  CONTENT_BUCKET, MAX_UPLOAD_BYTES, SIGNED_URL_TTL_SECONDS, DUPLICATE_MESSAGE,
+  LOCAL_UPLOAD_MESSAGE, PICKER_MIME, extOf, extFromMime, typeForExt, fmtFileSize,
+  validateUpload, storageObjectName, isStoredFileRow, normalizeUrl, findDuplicate,
+  fileRowFrom, filterItems, safeCard, syllabusChoices, applyNoteXp, FILE_TYPES,
+  sortItemsDesc,
+} from '../../lib/contentLocker';
 import { fonts } from '../../config/theme';
-import { nowIso, localDateOf } from '../../lib/utils';
+import { nowIso, localDateOf, uuid } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
 
 export function ContentScreen({ navigation }) {
@@ -28,12 +45,18 @@ export function ContentScreen({ navigation }) {
   const { awardXP } = useGame();
   const [items, setItems] = useState(null);
   const [filter, setFilter] = useState('All');
+  const [query, setQuery] = useState('');                 // FIX-J4: client-side search
   const [tab, setTab] = useState('locker'); // 'locker' | 'library'
   const [openSubject, setOpenSubject] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
   const [aiBusyId, setAiBusyId] = useState(null);
   const [aiMsg, setAiMsg] = useState('');
-  const [form, setForm] = useState({ kind: 'note', title: '', body: '', subject: '' });
+  const [form, setForm] = useState({ kind: 'note', title: '', body: '', subject: '', topic: '' });
+  const [choices, setChoices] = useState({ subjects: [], chaptersBySubject: {} }); // FIX-J5
+  const [picked, setPicked] = useState(null);             // FIX-J1: picked file asset
+  const [uploading, setUploading] = useState(false);
+  const [playingId, setPlayingId] = useState(null);       // FIX-J1: audio playback
+  const audioRef = useRef(null);                          // { stop() } of the live player
   // v1.0.6 recovery: readable note view
   const [noteOpen, setNoteOpen] = useState(false);
   const [selectedNote, setSelectedNote] = useState(null);
@@ -42,11 +65,28 @@ export function ContentScreen({ navigation }) {
   const load = useCallback(async () => {
     if (!profile?.id) return;
     const rows = await db.list('content', { eq: { user_id: profile.id }, order: { col: 'created_at', asc: false } });
-    setItems(rows);
+    setItems(sortItemsDesc(rows)); // FIX-J7: created_at desc, stable tie-break
+    // FIX-J5: chapter/topic choices come from the student's OWN active syllabus
+    // rows (S5 activeSyllabusRows — archived history is never offered)
+    try {
+      const syl = await db.list('syllabus', { eq: { user_id: profile.id } });
+      setChoices(syllabusChoices(activeSyllabusRows(syl)));
+    } catch {
+      setChoices({ subjects: [], chaptersBySubject: {} });
+    }
   }, [profile?.id]);
 
+  const stopAudio = () => {
+    try { audioRef.current?.stop?.(); } catch {}
+    audioRef.current = null;
+    setPlayingId(null);
+  };
+
   const onBack = useHubBack(navigation, 'StudyHub');
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => {
+    load();
+    return () => stopAudio(); // never keep playing after leaving the Locker
+  }, [load]));
 
   const detectType = (url) => {
     const u = url.toLowerCase();
@@ -58,24 +98,44 @@ export function ContentScreen({ navigation }) {
   };
 
   // FIX-F6: silent failure audit — add/remove had no visible catch
+  // FIX-J2: NOTE_CREATE behind the xpOnce daily guard (key 'note'); the save
+  // itself never depends on XP. FIX-J3: dedupe before insert. FIX-J6: validation.
   const add = async () => {
-    if (!form.title.trim()) return;
-    const type = form.kind === 'link' ? detectType(form.body) : 'note';
+    const title = String(form.title || '').trim();
+    if (!title) { setAiMsg('Title khali nahi ho sakta.'); return; } // J6: empty-after-trim rejected
+    const isLink = form.kind === 'link';
+    let url = null;
+    if (isLink) {
+      url = normalizeUrl(form.body); // J6: canonical http(s) or null — bare hosts get https://
+      if (!url) { setAiMsg('Link http(s) hona chahiye — URL check karo (javascript:/ftp:/khaali nahi).'); return; }
+    }
+    const text = !isLink ? String(form.body || '').trim() : null;
+    if (!isLink && !text) { setAiMsg('Note text khali nahi ho sakta.'); return; }
+    const type = isLink ? detectType(url) : 'note';
+    // J3: same normalized URL (links) or same title+text (notes) is blocked — no insert
+    if (findDuplicate(items || [], { type, url, text, title })) { setAiMsg(DUPLICATE_MESSAGE); return; }
     try {
       await db.insert('content', {
         user_id: profile.id,
-        title: form.title.trim(),
+        title,
         type,
-        url: form.kind === 'link' ? normalizeUrl(form.body.trim()) : null,
-        text: form.kind === 'note' ? form.body.trim() : null,
+        url,
+        text,
         subject: form.subject.trim() || null,
-        topic: null,
+        topic: form.topic.trim() || null, // FIX-J5: chapter from the active syllabus
         ai_summary: null,
         file_size: null,
         created_at: nowIso(),
       });
-      await awardXP('NOTE_CREATE');
-      setForm({ kind: 'note', title: '', body: '', subject: '' });
+      // J2: guard -> award -> mark, every effect injected; failures never block the save
+      const xp = await applyNoteXp({
+        userId: profile.id,
+        hasEarnedToday: (uid, key) => hasEarnedToday(uid, key),
+        markEarnedToday: (uid, key) => markEarnedToday(uid, key),
+        awardXP: (code) => awardXP(code),
+      });
+      setAiMsg(xp.reason === 'daily-cap' ? `Saved ✅ — ${xp.msg}` : `Saved ✅ +${xp.awardedXp} XP`);
+      setForm({ kind: 'note', title: '', body: '', subject: '', topic: '' });
       setAddOpen(false);
       await load();
     } catch (e) {
@@ -86,7 +146,20 @@ export function ContentScreen({ navigation }) {
 
   const remove = async (item) => {
     try {
+      // FIX-J7: deleting an uploaded file removes the STORAGE OBJECT first — the
+      // row is only deleted once the object is gone, so no orphan is ever left.
+      // (A missing object is not an error — supabase remove is idempotent.)
+      if (isStoredFileRow(item) && isRemote() && supabase) {
+        const { error } = await supabase.storage.from(CONTENT_BUCKET).remove([item.url]);
+        if (error) {
+          console.warn('[J7] storage remove failed', error?.message);
+          setAiMsg(`Storage object delete nahi hua — item abhi hai, dobara try karo. (${error.message})`);
+          return;
+        }
+      }
       await db.remove('content', item.id);
+      if (playingId === item.id) stopAudio();
+      setAiMsg('Item delete ho gaya ✅');
       await load();
     } catch (e) {
       console.warn('[F6] Content remove failed', e?.message);
@@ -109,20 +182,163 @@ export function ContentScreen({ navigation }) {
     }
   };
 
-  // BUG 5: user-typed links like "youtube.com/..." fail without a scheme.
-  const normalizeUrl = (u) => {
-    const s = String(u || '').trim();
-    if (!s) return s;
-    return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+  // BUG 5 behaviour (scheme-less "youtube.com/..." links) now lives in the pure
+  // lib: normalizeUrl() prepends https:// and REJECTS anything not http(s) — J6.
+
+  // ---------- FIX-J1: real file uploads (private bucket, PO-gated DDL) ----------
+  const pickFile = async (kind) => {
+    if (!isRemote() || !supabase) { setAiMsg(LOCAL_UPLOAD_MESSAGE); return; }
+    setAiMsg('');
+    try {
+      const res = await getDocumentAsync({ type: PICKER_MIME[kind] || '*/*', copyToCacheDirectory: true, multiple: false });
+      // cancelled picker -> NO row, NO upload, NO XP
+      if (res?.canceled || !Array.isArray(res?.assets) || !res.assets.length) return;
+      const a = res.assets[0];
+      // type/size gate immediately (the FULL validateUpload — including the title —
+      // runs again in saveFile BEFORE any network call [J1a])
+      const ext = extOf(a.name) || extFromMime(a.mimeType);
+      if (!typeForExt(ext)) { setAiMsg('Ye file type allowed nahi hai. Sirf PDF, PNG/JPG/WEBP, MP3/M4A/WAV.'); return; }
+      const bytes = Number(a.size);
+      if (!Number.isFinite(bytes) || bytes <= 0) { setAiMsg('File khaali hai ya size pata nahi chala.'); return; }
+      if (bytes > MAX_UPLOAD_BYTES) { setAiMsg(`File ${fmtFileSize(bytes)} hai — limit ${fmtFileSize(MAX_UPLOAD_BYTES)} hai.`); return; }
+      setPicked({
+        uri: a.uri, name: a.name || `file.${ext}`, size: bytes, ext,
+        mimeType: String(a.mimeType || '').trim() || null, file: a.file || null,
+      });
+      if (!String(form.title || '').trim()) {
+        setForm((f) => ({ ...f, title: String(a.name || '').replace(/\.[^.]+$/, '').slice(0, 80) })); // filename as a title draft
+      }
+    } catch (e) {
+      console.warn('[J1] pick failed', e?.message);
+      setAiMsg(e?.message || 'File pick nahi hui — dobara try karo.');
+    }
   };
 
-  const open = (item) => {
-    if (item.url) {
-      Linking.openURL(normalizeUrl(item.url)).catch(() => {});
-    } else if (item.text) {
+  // Bytes for supabase storage, per platform:
+  //   web    -> the picker's real File object (storage-js Blob path builds the multipart body)
+  //   native -> FormData whose file part is the RN {uri} descriptor — the NATIVE
+  //             networking layer reads the picked file itself (RequestBodyUtil on
+  //             Android / RCTNetworking on iOS), and storage-js passes FormData
+  //             straight through (verified in the installed client's source).
+  // storage-js docs suggest base64->ArrayBuffer for RN; that route needs
+  // expo-file-system, which this round's single-dependency budget does not allow
+  // (declared in the FIX-J report; device test is PO-side either way).
+  const uploadBody = async (p) => {
+    if (Platform.OS === 'web') {
+      if (p.file) return p.file;
+      const r = await fetch(p.uri);
+      if (!r.ok) throw new Error('picked file read fail (web)');
+      return r.blob();
+    }
+    const fd = new FormData();
+    fd.append('cacheControl', '3600');
+    fd.append('', { uri: p.uri, name: p.name || 'file', type: p.mimeType || 'application/octet-stream' });
+    return fd;
+  };
+
+  const saveFile = async () => {
+    if (!picked) return;
+    if (!isRemote() || !supabase) { setAiMsg(LOCAL_UPLOAD_MESSAGE); return; }
+    // [J1a] the FULL validation gate runs BEFORE any network call
+    const v = validateUpload({ title: form.title, fileName: picked.name, mimeType: picked.mimeType, size: picked.size });
+    if (!v.ok) { setAiMsg(v.message); return; }
+    setUploading(true);
+    setAiMsg('');
+    try {
+      // [J1] object name = {uid}/{uuid}.{ext} — first path segment is the user id,
+      // exactly what the content_storage_own policy pins; upsert:false so a name
+      // collision (astronomically unlikely with uuids) fails instead of overwriting.
+      const objectName = storageObjectName(profile.id, v.ext, uuid());
+      if (!objectName) throw new Error('storage path nahi bana (session check karo)');
+      const { error } = await supabase.storage
+        .from(CONTENT_BUCKET)
+        .upload(objectName, await uploadBody(picked), { contentType: v.contentType, upsert: false });
+      if (error) throw new Error(error.message);
+      await db.insert('content', fileRowFrom({
+        userId: profile.id, title: v.title, type: v.type, sizeBytes: v.sizeBytes,
+        objectName, subject: form.subject, topic: form.topic, createdAt: nowIso(),
+      }));
+      // [J2] same daily guard as notes/links — the upload never depends on XP
+      const xp = await applyNoteXp({
+        userId: profile.id,
+        hasEarnedToday: (uid, key) => hasEarnedToday(uid, key),
+        markEarnedToday: (uid, key) => markEarnedToday(uid, key),
+        awardXP: (code) => awardXP(code),
+      });
+      setAiMsg(xp.reason === 'daily-cap' ? `Uploaded ✅ — ${xp.msg}` : `Uploaded ✅ +${xp.awardedXp} XP`);
+      setPicked(null);
+      setForm({ kind: 'note', title: '', body: '', subject: '', topic: '' });
+      setAddOpen(false);
+      await load();
+    } catch (e) {
+      console.warn('[J1] upload failed', e?.message); // F6 pattern: VISIBLE error
+      setAiMsg(String(e?.message || '').includes('Session expired')
+        ? 'Session expired — please login again'
+        : `Upload fail hua — ${e?.message || 'dobara try karo'}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // ---------- opening items: signed URLs for files, normalized URLs for links ----------
+  const signedUrlFor = async (item) => {
+    if (!isRemote() || !supabase) return null;
+    // private bucket: SHORT-LIVED signed URL only — never a public URL
+    const { data, error } = await supabase.storage.from(CONTENT_BUCKET).createSignedUrl(item.url, SIGNED_URL_TTL_SECONDS);
+    if (error || !data?.signedUrl) throw new Error(error?.message || 'signed URL nahi mila');
+    return data.signedUrl;
+  };
+
+  const toggleAudio = async (item, signed) => {
+    if (playingId === item.id) { stopAudio(); return; }
+    stopAudio();
+    try {
+      if (Platform.OS === 'web') {
+        const el = new Audio(signed); // web: HTMLAudioElement (soundService pattern)
+        el.onended = () => { audioRef.current = null; setPlayingId(null); };
+        await el.play();
+        audioRef.current = { stop: () => { try { el.pause(); } catch {} } };
+      } else {
+        const expoAudio = require('expo-audio'); // native: expo-audio (already a dependency)
+        const p = expoAudio.createAudioPlayer(signed);
+        p.play();
+        audioRef.current = { stop: () => { try { p.pause(); } catch {} try { p.remove?.(); } catch {} } };
+      }
+      setPlayingId(item.id);
+    } catch (e) {
+      setAiMsg(`Audio play nahi hua — ${e?.message || 'dobara try karo'}`);
+      audioRef.current = null;
+      setPlayingId(null);
+    }
+  };
+
+  const open = async (item) => {
+    const c = safeCard(item); // J6: whatever the row looks like, opening never crashes
+    if (c.isFile) {
+      try {
+        setAiMsg('');
+        const signed = await signedUrlFor(item);
+        if (!signed) { setAiMsg('File cloud mode mein nahi khul sakti (Storage chahiye).'); return; }
+        if (c.type === 'audio') { await toggleAudio(item, signed); return; }
+        // PDF / image: open the signed URL in the browser (in-app tab on device)
+        if (WebBrowser?.openBrowserAsync) await WebBrowser.openBrowserAsync(signed);
+        else Linking.openURL(signed).catch(() => {});
+      } catch (e) {
+        console.warn('[J1] open failed', e?.message);
+        setAiMsg(`File open nahi hui — ${e?.message || 'dobara try karo'}`);
+      }
+      return;
+    }
+    if (c.url) {
+      const u = normalizeUrl(c.url); // J6: garbage URLs never reach Linking
+      if (u) Linking.openURL(u).catch(() => {});
+      else setAiMsg('Ye link khul nahi sakta (invalid URL) — row adhoora lag raha hai.');
+    } else if (c.text) {
       // v1.0.6 recovery: tapping a note opens readable note view
       setSelectedNote(item);
       setNoteOpen(true);
+    } else {
+      setAiMsg('Is item mein kholne ko kuch nahi hai (adhoora row).'); // J6 honest fallback
     }
   };
 
@@ -136,13 +352,14 @@ export function ContentScreen({ navigation }) {
   }
 
   const types = ['All', ...Object.keys(CONTENT_TYPES)];
-  const shown = filter === 'All' ? items : items.filter((i) => i.type === filter);
+  // FIX-J4: search composes with the type chip — both client-side, no server call
+  const shown = filterItems(items, { type: filter, query });
 
   return (
     <Screen mode="light">
       <ScreenHeader
         title="Content Locker"
-        subtitle="Notes, links, YouTube — sab ek jagah"
+        subtitle="Notes, links, files, YouTube — sab ek jagah"
         onBack={onBack}
         right={
           <Pressable onPress={() => setAddOpen(true)} hitSlop={8} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
@@ -158,9 +375,13 @@ export function ContentScreen({ navigation }) {
       </View>
 
       {tab === 'library' ? (
-        <FreeLibrary openSubject={openSubject} setOpenSubject={setOpenSubject} onOpen={(url) => Linking.openURL(normalizeUrl(url)).catch(() => {})} />
+        <FreeLibrary openSubject={openSubject} setOpenSubject={setOpenSubject} onOpen={(url) => { const u = normalizeUrl(url); if (u) Linking.openURL(u).catch(() => {}); }} />
       ) : (
       <>
+      {/* FIX-J4: substring search over title / note text / subject */}
+      <View style={{ marginBottom: 10 }}>
+        <Input value={query} onChangeText={setQuery} placeholder="🔍 Search locker… (title / text / subject)" />
+      </View>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 }}>
         {types.map((t) => (
           <Chip
@@ -177,54 +398,70 @@ export function ContentScreen({ navigation }) {
         <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#0891B2', marginBottom: 10, lineHeight: 18 }}>{aiMsg}</Text>
       ) : null}
 
-      {shown.length === 0 ? (
+      {items.length === 0 ? (
         <Card mode="light">
           <Text style={{ fontSize: 40, textAlign: 'center', marginBottom: 8 }}>🗂️</Text>
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', textAlign: 'center' }}>
             Locker khali hai
           </Text>
           <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#64748B', textAlign: 'center', marginTop: 4, marginBottom: 12 }}>
-            Notes, PDF links, YouTube playlists — yahan store karo. +5 XP per save.
+            Notes, links, PDFs, images, audio — yahan store karo. Pehle save par +5 XP (din mein ek baar).
           </Text>
           <Button title="Add Something" size="sm" mode="light" onPress={() => setAddOpen(true)} />
         </Card>
+      ) : shown.length === 0 ? (
+        <Card mode="light">
+          <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#64748B', textAlign: 'center' }}>
+            {query ? `Kuch nahi mila “${query}” ke liye.` : 'Is type ka item nahi hai.'}
+          </Text>
+        </Card>
       ) : (
-        shown.map((item) => {
-          const t = CONTENT_TYPES[item.type] || CONTENT_TYPES.note;
+        shown.map((item, idx) => {
+          // FIX-J6: whatever shape the stored row has (null url/text, unknown
+          // type, missing fields), safeCard() turns it into something renderable
+          const c = safeCard(item);
+          const t = CONTENT_TYPES[c.type] || CONTENT_TYPES.note;
           return (
-            <Card key={item.id} mode="light" onPress={() => open(item)} style={{ marginBottom: 10 }}>
+            <Card key={item?.id || `row-${idx}`} mode="light" onPress={() => open(item)} style={{ marginBottom: 10 }}>
               <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
                 <Text style={{ fontSize: 24, marginRight: 12 }}>{t.icon}</Text>
                 <View style={{ flex: 1 }}>
                   <Text numberOfLines={1} style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#1E293B' }}>
-                    {item.title}
+                    {c.title}
                   </Text>
-                  {item.subject ? (
-                    <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#6D28D9', marginTop: 2 }}>{item.subject}</Text>
+                  {c.subject || c.topic ? (
+                    <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#6D28D9', marginTop: 2 }}>
+                      {[c.subject, c.topic].filter(Boolean).join(' · ')}
+                    </Text>
                   ) : null}
-                  {item.text ? (
+                  {c.text ? (
                     <Text numberOfLines={2} style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#64748B', marginTop: 5, lineHeight: 18 }}>
-                      {item.text}
+                      {c.text}
                     </Text>
                   ) : null}
-                  {item.url ? (
+                  {c.url && !c.isFile ? (
                     <Text numberOfLines={1} style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 5 }}>
-                      {item.url}
+                      {c.url}
                     </Text>
                   ) : null}
-                  {item.ai_summary ? (
+                  {c.isFile ? (
+                    <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 5 }}>
+                      {c.fileSizeLabel}{playingId === c.id ? '  ·  🔊 playing…' : ''}
+                    </Text>
+                  ) : null}
+                  {item?.ai_summary ? (
                     <View style={{ backgroundColor: '#F0FDFA', borderRadius: 8, padding: 8, marginTop: 8 }}>
                       <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#0891B2', marginBottom: 3 }}>🤖 AI Summary</Text>
                       <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#134E4A', lineHeight: 17 }}>{item.ai_summary}</Text>
                     </View>
                   ) : null}
                   <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 6 }}>
-                    {localDateOf(item.created_at)}
+                    {localDateOf(item?.created_at)}
                   </Text>
                 </View>
-                {item.text && !item.ai_summary ? (
-                  <Pressable onPress={() => summarize(item)} disabled={aiBusyId === item.id} hitSlop={8} style={{ padding: 6 }}>
-                    <Ionicons name={aiBusyId === item.id ? 'hourglass-outline' : 'sparkles-outline'} size={16} color="#0891B2" />
+                {c.text && !item?.ai_summary && !c.isFile ? (
+                  <Pressable onPress={() => summarize(item)} disabled={aiBusyId === item?.id} hitSlop={8} style={{ padding: 6 }}>
+                    <Ionicons name={aiBusyId === item?.id ? 'hourglass-outline' : 'sparkles-outline'} size={16} color="#0891B2" />
                   </Pressable>
                 ) : null}
                 <Pressable onPress={() => remove(item)} hitSlop={8} style={{ padding: 6 }}>
@@ -239,21 +476,111 @@ export function ContentScreen({ navigation }) {
       </>
       )}
 
-      <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title="Add to Locker" mode="light">
-        <View style={{ flexDirection: 'row', marginBottom: 14 }}>
-          <Chip label="📝 Note" selected={form.kind === 'note'} onPress={() => setForm({ ...form, kind: 'note' })} mode="light" />
-          <Chip label="🔗 Link / URL" selected={form.kind === 'link'} onPress={() => setForm({ ...form, kind: 'link' })} mode="light" />
+      {/* FIX-J: Add modal — note / link / PDF / image / audio + syllabus metadata */}
+      <ModalSheet visible={addOpen} onClose={() => { setAddOpen(false); stopAudio(); }} title="Add to Locker" mode="light">
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 }}>
+          <Chip label="📝 Note" small selected={form.kind === 'note'} onPress={() => setForm({ ...form, kind: 'note' })} mode="light" />
+          <Chip label="🔗 Link / URL" small selected={form.kind === 'link'} onPress={() => setForm({ ...form, kind: 'link' })} mode="light" />
+          {FILE_TYPES.map((k) => (
+            <Chip
+              key={k}
+              label={`${(CONTENT_TYPES[k] || {}).icon || '📄'} ${(CONTENT_TYPES[k] || {}).label || k}`}
+              small
+              selected={form.kind === k}
+              onPress={() => setForm((f) => {
+                // switching file kind: drop a picked file that no longer matches
+                if (picked && typeForExt(picked.ext) !== k) setPicked(null);
+                return { ...f, kind: k };
+              })}
+              mode="light"
+            />
+          ))}
         </View>
-        <Input label="Title" value={form.title} onChangeText={(v) => setForm({ ...form, title: v })} placeholder="e.g. Thermodynamics — Priya Ma'am notes" />
+
         <Input
-          label={form.kind === 'note' ? 'Note text' : 'URL'}
-          value={form.body}
-          onChangeText={(v) => setForm({ ...form, body: v })}
-          placeholder={form.kind === 'note' ? 'Likho ya paste karo…' : 'https://…'}
-          multiline={form.kind === 'note'}
+          label="Title"
+          value={form.title}
+          onChangeText={(v) => setForm({ ...form, title: v })}
+          placeholder="e.g. Thermodynamics — Priya Ma'am notes"
         />
-        <Input label="Subject (optional)" value={form.subject} onChangeText={(v) => setForm({ ...form, subject: v })} placeholder="Physics" />
-        <Button title="Save (+5 XP)" mode="light" onPress={add} disabled={!form.title.trim() || (form.kind === 'link' && !form.body.trim())} />
+
+        {FILE_TYPES.includes(form.kind) ? (
+          <View style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12, padding: 12, marginBottom: 14 }}>
+            {picked ? (
+              <>
+                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: '#1E293B' }} numberOfLines={1}>
+                  {(CONTENT_TYPES[form.kind] || {}).icon || '📄'} {picked.name}
+                </Text>
+                <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
+                  {fmtFileSize(picked.size)} · limit {fmtFileSize(MAX_UPLOAD_BYTES)}
+                </Text>
+                <View style={{ flexDirection: 'row', marginTop: 8 }}>
+                  <Button title="Change file" size="sm" mode="light" onPress={() => pickFile(form.kind)} disabled={uploading} />
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#64748B', marginBottom: 8 }}>
+                  PDF · PNG/JPG/WEBP · MP3/M4A/WAV — max {fmtFileSize(MAX_UPLOAD_BYTES)}. Private bucket, sirf tum dekh sakte ho.
+                </Text>
+                <Button title={`Pick ${((CONTENT_TYPES[form.kind] || {}).label || 'file')}`} size="sm" mode="light" onPress={() => pickFile(form.kind)} disabled={uploading} />
+              </>
+            )}
+            {!isRemote() ? (
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B45309', marginTop: 8 }}>{LOCAL_UPLOAD_MESSAGE}</Text>
+            ) : null}
+          </View>
+        ) : (
+          <Input
+            label={form.kind === 'note' ? 'Note text' : 'URL'}
+            value={form.body}
+            onChangeText={(v) => setForm({ ...form, body: v })}
+            placeholder={form.kind === 'note' ? 'Likho ya paste karo…' : 'https://…'}
+            multiline={form.kind === 'note'}
+          />
+        )}
+
+        {/* FIX-J5: subject (free text + own-syllabus chips) and chapter/topic chips */}
+        <Input
+          label="Subject (optional)"
+          value={form.subject}
+          onChangeText={(v) => setForm({ ...form, subject: v, topic: '' })} // changing subject clears the chapter
+          placeholder="Physics"
+        />
+        {choices.subjects.length ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 10 }}>
+            {choices.subjects.map((s) => (
+              <Chip key={s} label={s} small selected={form.subject === s} onPress={() => setForm({ ...form, subject: s, topic: '' })} mode="light" />
+            ))}
+          </View>
+        ) : null}
+        {form.subject && (choices.chaptersBySubject[form.subject] || []).length ? (
+          <View style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12.5, color: '#475569', marginBottom: 6 }}>Chapter / topic (apne syllabus se)</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+              {(choices.chaptersBySubject[form.subject] || []).map((ch) => (
+                <Chip key={ch} label={ch} small selected={form.topic === ch} onPress={() => setForm({ ...form, topic: ch })} mode="light" />
+              ))}
+            </View>
+          </View>
+        ) : null}
+        {form.topic ? (
+          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#6D28D9', marginBottom: 10 }}>Selected topic: {form.topic}</Text>
+        ) : null}
+
+        <Button
+          title={uploading ? 'Uploading…' : FILE_TYPES.includes(form.kind) ? 'Upload file' : 'Save'}
+          mode="light"
+          onPress={FILE_TYPES.includes(form.kind) ? saveFile : add}
+          disabled={
+            uploading ||
+            !form.title.trim() ||
+            (FILE_TYPES.includes(form.kind) ? !picked : form.kind === 'link' && !form.body.trim())
+          }
+        />
+        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#94A3B8', textAlign: 'center', marginTop: 8 }}>
+          +5 XP din mein ek baar (pehle save par) — baaki saves bhi pakke, bina XP ke.
+        </Text>
       </ModalSheet>
 
       {/* FIX-D2: full-screen note reader — readable, scrollable, selectable, full height */}
