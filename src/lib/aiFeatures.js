@@ -178,7 +178,7 @@ Return JSON: {"habits":[{"name":"...","icon":"one emoji","category":"health|stud
     target_time: /^\d{2}:\d{2}$/.test(String(h.target_time || '')) ? h.target_time : null,
     why: String(h.why || '').slice(0, 120),
   }));
-  if (!clean.length) throw new AIUnavailableError('AI habit suggestions nahi aaye.');
+  if (!clean.length) throw new AIUnavailableError('No AI habit suggestions came back.');
   return clean;
 }
 
@@ -313,10 +313,10 @@ Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"an
     }
   }
 
-  if (!result.clean.length) throw new AIUnavailableError('AI ka quiz samajh nahi aaya — bank se laa raha hoon.');
+  if (!result.clean.length) throw new AIUnavailableError("Couldn't parse the AI's quiz — pulling from the bank instead.");
 
   if (result.clean.length < Math.ceil(count * 0.5)) {
-    throw new AIUnavailableError(`AI ne sirf ${result.clean.length}/${count} questions diye — thoda chhota count try karo ya dobara try karo.`);
+    throw new AIUnavailableError(`The AI returned only ${result.clean.length}/${count} questions — try a smaller count or try again.`);
   }
 
   return result.clean.slice(0, count);
@@ -336,7 +336,7 @@ Return JSON: {"cards":[{"front":"...","back":"...","type":"qa|definition|formula
   const cards = Array.isArray(data?.cards) ? data.cards : [];
   // NEW X R6: filter out empties, trim length ≥1
   const clean = cards.filter((c) => c?.front && c?.back && String(c.front).trim().length >=1 && String(c.back).trim().length >=1);
-  if (!clean.length) throw new AIUnavailableError('AI deck generate nahi ho paya — khaali cards aaye.');
+  if (!clean.length) throw new AIUnavailableError('AI deck generation failed — empty cards came back.');
   return clean.map((c) => ({
     front_text: String(c.front).trim(),
     back_text: String(c.back).trim(),
@@ -371,7 +371,7 @@ Return JSON: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"an
     .map((q) => normalizeQuestionShape(q, 'Challenge', topic || 'Mixed', 2))
     .filter(Boolean)
     .map((q) => ({ ...q, source: 'ai' }));
-  if (clean.length < 3) throw new AIUnavailableError('AI challenge questions nahi mile.');
+  if (clean.length < 3) throw new AIUnavailableError('No AI challenge questions came back.');
   return clean.slice(0, count);
 }
 
@@ -399,7 +399,7 @@ Return JSON: {"moves":[{"topic":"...","action":"prioritise|merge|drop|keep","rea
     schemaHint: '{"moves":[{topic, action, reason}],"advice":"..."}',
     temperature: 0.4,
   });
-  if (!data || !Array.isArray(data.moves)) throw new AIUnavailableError('AI reschedule plan nahi ban paya.');
+  if (!data || !Array.isArray(data.moves)) throw new AIUnavailableError("The AI couldn't build a reschedule plan.");
   return data;
 }
 
@@ -417,7 +417,7 @@ Return JSON: {"summary":"...","win":"...","improve":"...","plan":"..."}`,
     schemaHint: '{"summary":"","win":"","improve":"","plan":""}',
     temperature: 0.6,
   });
-  if (!data?.summary) throw new AIUnavailableError('Weekly reflection nahi ban payi.');
+  if (!data?.summary) throw new AIUnavailableError("The weekly reflection couldn't be generated.");
   return data;
 }
 
@@ -433,7 +433,7 @@ Return JSON: {"rows":[{"subject":"...","chapter":"...","weightage":4,"estimated_
   });
   const rows = Array.isArray(data?.rows) ? data.rows : [];
   const clean = rows.filter((r) => r?.subject && r?.chapter);
-  if (!clean.length) throw new AIUnavailableError('AI syllabus nahi bana.');
+  if (!clean.length) throw new AIUnavailableError("The AI couldn't build a syllabus.");
   return clean.map((r) => ({
     subject: String(r.subject),
     chapter: String(r.chapter),
@@ -563,7 +563,7 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer. If you 
     }
   }
 
-  if (!data?.sets?.length) throw new Error('AI ne khaali paper bheja — thoda chhota try karo.');
+  if (!data?.sets?.length) throw new Error('The AI returned an empty paper — try a smaller count.');
 
   const totalQs = data.sets.reduce((a, s) => a + s.sections.reduce((aa, sec) => aa + (sec.questions?.length || 0), 0), 0);
   // Check for still empty expected sections
@@ -571,12 +571,12 @@ IMPORTANT: Return EXACTLY ${totalQuestions} questions per set, no fewer. If you 
     const presentTypes = (set.sections || []).map(s => String(s.type||'').toLowerCase());
     const stillMissing = expectedTypes.filter(t => !presentTypes.some(pt => pt.includes(t)));
     if (stillMissing.length) {
-      throw new AIUnavailableError(`AI ne ${stillMissing.join(', ').toUpperCase()} section nahi bheja — retry karo. Present: ${presentTypes.join(', ') || 'none'}`);
+      throw new AIUnavailableError(`The AI didn't return the ${stillMissing.join(', ').toUpperCase()} section — please retry. Present: ${presentTypes.join(', ') || 'none'}`);
     }
   }
 
   if (totalQs < Math.ceil(totalQuestions * 0.5)) {
-    throw new AIUnavailableError(`AI ne sirf ${totalQs}/${totalQuestions} questions diye — chhota count try karo ya dobara try karo.`);
+    throw new AIUnavailableError(`The AI returned only ${totalQs}/${totalQuestions} questions — try a smaller count or try again.`);
   }
 
   // FIX-G0: report how many malformed questions the normalizer dropped
@@ -672,7 +672,7 @@ Every question MUST have a non-empty "q" stem — a question with no stem is unu
   });
   const questions = win.questions;
 
-  if (!questions.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
+  if (!questions.length) throw new Error('The AI returned an empty question bank — please try again.');
 
   const perType = countByType(questions);
   const base = {
@@ -695,7 +695,7 @@ Every question MUST have a non-empty "q" stem — a question with no stem is unu
     return {
       ...base,
       _partial: true,
-      _banner: `${questions.length}/${totalQuestions} questions mile${missLine ? ` — baaki: ${missLine}` : ''}${skipLine} — dobara try karo`,
+      _banner: `${questions.length}/${totalQuestions} questions returned${missLine ? ` — missing: ${missLine}` : ''}${skipLine} — please try again`,
     };
   }
 
@@ -826,12 +826,12 @@ Structure: a central idea with ${shape}. Short phrases only (3–7 words), the k
   }
 
   if (!out.length) {
-    throw new Error('Mind map nahi bana — dobara try karo');
+    throw new Error("Mind map couldn't be generated — please try again");
   }
   const result = { chapters: out };
   if (shortfalls.length) {
     result._short = shortfalls;
-    result._banner = `Mind map chhota reh gaya — ${shortfalls.join('; ')} — dobara try karo`;
+    result._banner = `Mind map came back small — ${shortfalls.join('; ')} — please try again`;
   }
   return result;
 }

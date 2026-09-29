@@ -18,7 +18,7 @@ export async function callProvider(models, requester, args) {
     const waits = [0, 2000, 4000];
     for (let a = 0; a < attempts; a++) {
       if (Date.now() - start > MAX_TOTAL_MS) {
-        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded, dobara try karo`);
+        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded. Please try again.`);
       }
       if (waits[a]) await sleep(waits[a]);
       try {

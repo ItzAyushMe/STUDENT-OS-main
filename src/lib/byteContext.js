@@ -319,7 +319,12 @@ export function sanitizeMarkdownStray(text) {
   t = t.replace(/```[a-z]*\n?/gi, '');                                  // code fences
   t = t.replace(/^#{1,6}\s+/gm, '');                                    // headings
   t = t.replace(/\*\*([^*\n]+?)\*\*/g, '$1');                           // **bold** -> bold
-  t = t.replace(/(^|\s)\*([^*\n]+?)\*(?=\s|$|[.,!?])/g, '$1$2');        // *italic* -> italic
-  t = t.replace(/^[ \t]*[-*][ \t]+/gm, '• ');                           // leading -/* bullets -> •
+  // FIX-BYTE2 (Item C): italic content must start AND end on a non-space and
+  // contain a LETTER (Latin or Devanagari) — spaced arithmetic like
+  // '2 * 3 * 4 = 24' or '3 * 4, then 5 * 6' is math, not emphasis, and survives.
+  t = t.replace(/(^|\s)\*(?=[^*\n]*[A-Za-z\u0900-\u097F])(\S[^*\n]*?\S|\S)\*(?=\s|$|[.,!?])/g, '$1$2');
+  // FIX-BYTE2 (Item C): a leading -/* bullet must be followed by a LETTER —
+  // math continuation lines like '- 3 = 2' are never converted to '• 3 = 2'.
+  t = t.replace(/^[ \t]*[-*][ \t]+(?=[A-Za-z\u0900-\u097F])/gm, '• ');
   return t;
 }

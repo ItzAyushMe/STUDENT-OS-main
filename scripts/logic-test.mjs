@@ -665,7 +665,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.strictEqual(QB_BATCH_SIZE, 10, 'FIX-G1: batch size is 10');
   assert.ok(batchCapFor(100, QB_BATCH_SIZE) >= Math.ceil(100 / QB_BATCH_SIZE), 'cap allows at least the minimum batches needed');
   assert.ok(Number.isFinite(batchCapFor(1000, QB_BATCH_SIZE)) && batchCapFor(1000, QB_BATCH_SIZE) < 400, 'cap stays finite/bounded for large targets');
-  assert.ok(src.includes('_banner') && src.includes('questions mile'), 'Partial banner honest message exists');
+  assert.ok(src.includes('_banner') && src.includes('questions returned'), 'Partial banner honest message exists'); // FIX-BYTE2: probe tracks the PO-ordered neutral English copy (was 'questions mile')
   assert.ok(src.includes('difficultyBand') && src.includes('foundation recall') && src.includes('olympiad HOTS'), 'Difficulty bands mapped to concrete text');
   assert.ok(src.includes('answerLengthHint') || src.includes('VSAQ = one line'), 'Answer length hints baked into prompts');
   assert.ok(src.includes('EMPTY section') || src.includes('stillMissing') || src.includes('VSAQ section nahi bheja'), 'Empty section retry logic exists');
@@ -4130,6 +4130,96 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const failedPB = results.filter((r) => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failedPB.length, 0, `FIX-BYTE: ${failedPB.length} check(s) failed -> ${failedPB.map((f) => f.id).join(', ')}`);
+}
+
+// ---------- FIX-BYTE2: Item A (residual Hinglish strings) + Item C (sanitizer regex hardening) ----------
+// PO decisions executed: (a) DO the 17-string neutralization, (d) aiModelGuard.js
+// allowlisted for this round ONLY, (c) HARDEN the sanitizer riding along, (b) B1
+// accept-and-declare the persist order — ZERO code change (the existing PB-F*
+// probe already locks sanitize-before-persist, which IS the B1-accepted behaviour).
+// Red-before: at c64900b the 17 strings exist and '2 * 3 * 4 = 24' is mangled.
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+  const asSrc2 = safeRead('src/lib/aiService.js');
+  const afSrc2 = safeRead('src/lib/aiFeatures.js');
+  const agSrc2 = safeRead('src/lib/aiModelGuard.js');
+
+  // dynamically imported so a broken module is a recorded failure, not a crash
+  let BC2 = null; let bc2Err = '';
+  try { BC2 = await import('./../src/lib/byteContext.js'); }
+  catch (e) { bc2Err = String(e && e.message ? e.message : e).split('\n')[0]; }
+
+  // ---------- PB-H (Item A): the locked §13-5 neutralization is now COMPLETE ----------
+  check('PB-H', 'Item A: aiService.js + aiFeatures.js + aiModelGuard.js (PO-allowlisted, this round only) contain NONE of the residual Hinglish fallback tokens, and every template interpolation survived the swap exactly', () => {
+    const FORBIDDEN = ['karo', 'nahi aaye', 'nahi mile', 'nahi bana', 'ban paya', 'ban payi', 'bheja', 'diye', 'samajh nahi', 'kat gaya', 'chhota', 'baaki:'];
+    const files = [['aiService.js', asSrc2], ['aiFeatures.js', afSrc2], ['aiModelGuard.js', agSrc2]];
+    for (const [name, src] of files) {
+      assert.ok(src.length > 500, `${name} was read`);
+      for (const tok of FORBIDDEN) assert.ok(!src.includes(tok), `${name} still contains "${tok}"`);
+    }
+    // interpolations preserved exactly (no template variable lost in the swap)
+    assert.ok(asSrc2.includes("The AI's answer was cut off mid-generation (truncated). Please try again — the generation limit has been raised!"), 'aiService truncation string neutralized (#1)');
+    assert.ok(agSrc2.includes('AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded. Please try again.'), 'aiModelGuard timeout keeps ${MAX_TOTAL_MS / 1000}s (#17)');
+    assert.ok(afSrc2.includes('The AI returned only ${result.clean.length}/${count} questions — try a smaller count or try again.'), 'quiz-count string keeps ${result.clean.length}/${count} (#4)');
+    assert.ok(afSrc2.includes("The AI didn't return the ${stillMissing.join(', ').toUpperCase()} section — please retry. Present: ${presentTypes.join(', ') || 'none'}"), 'paper-section string keeps both interpolations (#11)');
+    assert.ok(afSrc2.includes('The AI returned only ${totalQs}/${totalQuestions} questions — try a smaller count or try again.'), 'paper-count string keeps ${totalQs}/${totalQuestions} (#12)');
+    assert.ok(afSrc2.includes('_banner: `${questions.length}/${totalQuestions} questions returned${missLine ? ` — missing: ${missLine}` : \'\'}${skipLine} — please try again`'), 'partial banner keeps ${questions.length}/${totalQuestions} + missLine + skipLine (#14)');
+    assert.ok(afSrc2.includes("Mind map came back small — ${shortfalls.join('; ')} — please try again"), 'mind-map banner keeps ${shortfalls.join} (#16)');
+    // the neutralized plain strings (spot-check the rest of the inventory)
+    for (const s of ['No AI habit suggestions came back.', "Couldn't parse the AI's quiz — pulling from the bank instead.",
+      'AI deck generation failed — empty cards came back.', 'No AI challenge questions came back.',
+      "The AI couldn't build a reschedule plan.", "The weekly reflection couldn't be generated.",
+      "The AI couldn't build a syllabus.", 'The AI returned an empty paper — try a smaller count.',
+      'The AI returned an empty question bank — please try again.', "Mind map couldn't be generated — please try again"]) {
+      assert.ok(afSrc2.includes(s), `neutralized string present: ${s.slice(0, 45)}…`);
+    }
+    // FIX-BYTE's own neutralizations survive (no regression of the previous round)
+    assert.ok(asSrc2.includes('Please try again') && !asSrc2.includes('Asli wajah'), 'FIX-BYTE §13-5 strings intact');
+  });
+
+  // ---------- PB-D2 (Item C): sanitizer regex hardening — the handoff's exact acceptance cases ----------
+  check('PB-D2', 'Item C: spaced-asterisk arithmetic (2 * 3 * 4 = 24) passes through UNCHANGED; a line-start - followed by a DIGIT is never bulleted; - item / * item still become • item (letters incl. Devanagari); bold/headings/fences behaviour unchanged; idempotency preserved', () => {
+    assert.ok(BC2, `byteContext.js import failed: ${bc2Err}`);
+    const s = BC2.sanitizeMarkdownStray;
+    // acceptance case 1: the arithmetic regression is fixed
+    assert.equal(s('2 * 3 * 4 = 24'), '2 * 3 * 4 = 24', 'spaced asterisks between digits are MATH, not italics');
+    assert.equal(s('2*3*4 = 24'), '2*3*4 = 24', 'unspaced stays safe too');
+    assert.equal(s('The answer is 3 * 4, then 5 * 6.'), 'The answer is 3 * 4, then 5 * 6.', 'letters BETWEEN two spaced-asterisk pairs still count as math');
+    // acceptance case 2: digit after a line-start marker is never bulleted
+    assert.equal(s('- 3 = 2'), '- 3 = 2', 'math continuation line untouched');
+    const steps = 'solve:\n- 5x = 10\n- 2y + 1 = 7';
+    assert.equal(s(steps), steps, 'digit-led lines stay (5x/2y start with digits)');
+    // acceptance case 3: real bullets still convert — Latin AND Devanagari letters
+    assert.equal(s('- item'), '• item', 'dash bullet still converts');
+    assert.equal(s('* item'), '• item', 'star bullet still converts');
+    assert.equal(s('  - indented item'), '• indented item', 'indented bullet still converts');
+    assert.equal(s('- पढ़ाई'), '• पढ़ाई', 'Devanagari bullet converts (language mirroring)');
+    // acceptance case 4: everything else unchanged from PB-D
+    assert.equal(s('**Bold** idea'), 'Bold idea', 'bold stripping unchanged');
+    assert.equal(s('## Heading\nbody'), 'Heading\nbody', 'heading stripping unchanged');
+    assert.equal(s('```js\nconst a = 1;\n```'), 'const a = 1;\n', 'fence stripping unchanged');
+    assert.equal(s('*important* word'), 'important word', 'letter italics still strip');
+    const math = 'Solve x^2 + 1 = 0 → x = ±i. sqrt(2) ≈ 1.414, ∫ f(x) dx, θ = π/4';
+    assert.equal(s(math), math, 'plain math text untouched');
+    // acceptance case 5: idempotency over a mixed sample
+    const mixed = '**Note**\n- alpha\n2 * 3 * 4 = 24\n- 5 = 5\n*beta*\n```x\ny\n```';
+    assert.equal(s(s(mixed)), s(mixed), 'idempotent');
+    // non-strings still pass through
+    assert.equal(s(null), null); assert.equal(s(42), 42);
+  });
+
+  const failedPB2 = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedPB2.length, 0, `FIX-BYTE2: ${failedPB2.length} check(s) failed -> ${failedPB2.map((f) => f.id).join(', ')}`);
 }
 
 console.log('ALL LOGIC TESTS PASSED ✅');

@@ -437,7 +437,7 @@ function extractJSON(text) {
       // Check if it's likely truncated (ends mid-string or mid-object)
       const lastChars = truncatedSlice.slice(-100);
       if (!lastChars.includes(closeCh) || truncatedSlice.split('{').length !== truncatedSlice.split('}').length) {
-        throw new AIUnavailableError('AI ka answer beech mein kat gaya (truncated). Dobara try karo — ab generation limit badh gaya hai!');
+        throw new AIUnavailableError("The AI's answer was cut off mid-generation (truncated). Please try again — the generation limit has been raised!");
       }
     }
   }
