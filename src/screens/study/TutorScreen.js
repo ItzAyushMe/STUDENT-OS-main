@@ -1,5 +1,8 @@
-// PROFESSOR BYTE — AI tutor chat. Explains, solves, quizzes,
-// summarizes, plans and motivates. All AI goes through aiService.
+// PROFESSOR BYTE — general-purpose AI assistant chat (FIX-BYTE). Explains,
+// solves, quizzes, summarizes, plans, motivates AND answers anything else
+// (fitness, life, social, general knowledge, writing, coding). All AI goes
+// through aiService; StudentOS context is selected per-message by the pure
+// lib byteContext.js (relevant categories only, never the whole DB).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -8,7 +11,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
-import { aiTutorReply, aiMotivate, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiTutorReply, aiMotivate, buildProfileContext, AIUnavailableError } from '../../lib/aiFeatures';
+import { resolveByteContext, sanitizeMarkdownStray } from '../../lib/byteContext';
+import { db } from '../../lib/db';
 import { MathText } from '../../components/ui/MathText';
 import { aiStatus } from '../../lib/aiService';
 import { isOnline } from '../../lib/aiService';
@@ -18,18 +23,22 @@ import { Loading } from '../../components/ui/EmptyState';
 import { LIGHT, GAMER, fonts, radius } from '../../config/theme';
 import { useHubBack } from '../../hooks/useHubBack';
 
+// FIX-BYTE P7: chips are general-purpose now — study AND everything else.
 const QUICK = [
-  { key: 'explain', label: '📖 Explain a topic', prompt: 'Explain ' },
-  { key: 'quiz', label: '🧠 Quiz me', prompt: 'Quiz me on 5 questions from my syllabus. Ask one at a time.' },
+  { key: 'explain', label: '📖 Explain', prompt: 'Explain ' },
+  { key: 'quiz', label: '🧠 Quiz me', prompt: 'Quiz me on 5 questions. Ask one at a time.' },
   { key: 'summarize', label: '📝 Summarize', prompt: 'Summarize ' },
-  { key: 'plan', label: '🗺️ Plan my week', prompt: 'Plan my study week. ' },
+  { key: 'plan', label: '🗓️ Plan my day', prompt: 'Help me plan my day. ' },
+  { key: 'write', label: '✍️ Help me write', prompt: 'Help me write ' },
   { key: 'motivate', label: '🔥 Motivate me', prompt: '__MOTIVATE__' },
 ];
 
 export function TutorScreen({ navigation, route }) {
   useTheme('light');
   const { profile } = useAuth();
-  const onBack = useHubBack(navigation, 'StudyHub');
+  // FIX-BYTE: Byte is registered in Home/Life stacks too — the entry point may
+  // pass its own hub; the classic StudyStack entry keeps 'StudyHub'.
+  const onBack = useHubBack(navigation, route?.params?.hub || 'StudyHub');
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState(null);
   const [input, setInput] = useState('');
@@ -69,15 +78,6 @@ export function TutorScreen({ navigation, route }) {
     }
   };
 
-  const context = [
-    profile?.class_level,
-    profile?.board,
-    profile?.competitive_exam !== 'None' && profile?.competitive_exam ? `preparing for ${profile.competitive_exam}` : '',
-    profile?.prep_level,
-  ]
-    .filter(Boolean)
-    .join(', ');
-
   const send = async (rawText) => {
     const text = String(rawText || input).trim();
     if (!text || busy) return;
@@ -90,16 +90,29 @@ export function TutorScreen({ navigation, route }) {
     try {
       let reply;
       if (text === '__MOTIVATE__') {
-        reply = await aiMotivate({ name: profile?.display_name || 'champ', streak: profile?.current_streak || 0, context });
+        reply = await aiMotivate({ name: profile?.display_name || 'champ', streak: profile?.current_streak || 0, context: buildProfileContext(profile || {}) });
       } else {
-        reply = await aiTutorReply({ history, message: text, context });
+        // FIX-BYTE P4: context is SELECTED per message (pure decision in
+        // byteContext.js; db.list injected). Every category is individually
+        // try/caught — a failing category is a silent skip, never a chat
+        // failure (PB11). Nothing is fetched that the message doesn't need.
+        const contextBlock = await resolveByteContext({
+          list: (table, opts) => db.list(table, opts),
+          profile: profile || {},
+          message: text,
+        });
+        reply = await aiTutorReply({ history, message: text, context: contextBlock });
       }
+      // FIX-BYTE PB-D: display-layer sanitizer before persist/render — strips
+      // stray **/bullets/fences if a model ignores the plain-text contract
+      // (idempotent; askAI already strips markdown server-side of the UI).
+      reply = sanitizeMarkdownStray(reply);
       await persist([...history, userMsg, { role: 'assistant', content: reply, ts: Date.now() }]);
     } catch (e) {
       const msg =
         e instanceof AIUnavailableError
           ? e.message
-          : 'Thodi technical gadbad. Dobara try karo — main yahin hoon! 🤖';
+          : 'Something went wrong on my side. Please try again — I am right here! 🤖';
       await persist([...history, userMsg, { role: 'assistant', content: msg, error: true, ts: Date.now() }]);
     } finally {
       setBusy(false);

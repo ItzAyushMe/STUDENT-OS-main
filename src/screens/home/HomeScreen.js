@@ -420,6 +420,23 @@ export function HomeScreen({ navigation }) {
             {name.toUpperCase()}
           </PixelText>
         </View>
+        {/* FIX-BYTE P6: Professor Byte entry in the Home header — HomeStack now
+            registers Tutor, so this is a plain in-stack push (hub = HomeMain). */}
+        <Pressable
+          onPress={() => navigation.navigate('Tutor', { hub: 'HomeMain' })}
+          hitSlop={10}
+          style={({ pressed }) => ({
+            backgroundColor: GAMER.surface,
+            borderWidth: 1,
+            borderColor: GAMER.border,
+            borderRadius: 12,
+            padding: 9,
+            marginRight: 8,
+            opacity: pressed ? 0.6 : 1,
+          })}
+        >
+          <Ionicons name="chatbubble-ellipses-outline" size={20} color={GAMER.subtext} />
+        </Pressable>
         <Pressable
           onPress={() => navigation.navigate('Settings')}
           hitSlop={10}

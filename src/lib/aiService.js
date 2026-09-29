@@ -174,7 +174,7 @@ async function geminiRequest(model, { prompt, system, json, temperature, key }) 
     return text;
   } catch (e) {
     if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
-      throw new Error('Gemini timeout — AI ne 45s se zyada time liya, dobara try karo');
+      throw new Error('Gemini timeout — the AI took longer than 45s. Please try again.');
     }
     throw e;
   } finally {
@@ -213,7 +213,7 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
     return text;
   } catch (e) {
     if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
-      throw new Error('Groq timeout — AI ne 45s se zyada time liya, dobara try karo');
+      throw new Error('Groq timeout — the AI took longer than 45s. Please try again.');
     }
     throw e;
   } finally {
@@ -249,7 +249,7 @@ export async function callProvider(models, requester, args) {
     const waits = [0, 2000, 4000];
     for (let a = 0; a < attempts; a++) {
       if (Date.now() - start > MAX_TOTAL_MS) {
-        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded, dobara try karo`);
+        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded. Please try again.`);
       }
       if (waits[a]) await sleep(waits[a]);
       try {
@@ -277,25 +277,27 @@ async function callGroq(args) {
 }
 
 // Plain-English translation of provider errors (FIX C: honest messages).
+// FIX-BYTE (§13-5, PO decision): fallback strings neutralized to English —
+// they must not force a language on the user.
 function humanizeError(provider, errMsg) {
   const m = String(errMsg || '');
   if (/timeout/i.test(m)) {
-    return `${provider} ne time liya — 45s timeout, dobara try karo`;
+    return `${provider} timed out (45s limit). Please try again.`;
   }
   if (/decommissioned|not found|does not exist|model_not_found/i.test(m)) {
-    return `${provider} ka model retire ho gaya tha — naye build me fix ho gaya hai. App refresh karke try karo.`;
+    return `${provider}'s model was retired — this build already uses the new one. Refresh the app and try again.`;
   }
   if (/503|overload|high demand|service unavailable/i.test(m)) {
-    return `${provider} servers busy hain (free tier pe common hai) — thodi der baad try karo.`;
+    return `${provider} servers are busy (common on free tiers) — please try again in a bit.`;
   }
   if (/429|rate.?limit|too many requests/i.test(m)) {
-    return `${provider} rate limit hit — ek minute ruk ke dobara try karo.`;
+    return `${provider} rate limit hit — wait about a minute, then try again.`;
   }
   if (/401|403|api[ _]?key|invalid|permission/i.test(m)) {
-    return `${provider} key accept nahi hui — key dobara check karo.`;
+    return `${provider} did not accept the API key — please check the key again.`;
   }
   if (/failed to fetch|network|offline/i.test(m)) {
-    return `${provider} tak network nahi pahunch raha — connection check karo.`;
+    return `Could not reach ${provider} — please check your internet connection.`;
   }
   return `${provider}: ${m.slice(0, 140)}`;
 }
@@ -322,7 +324,7 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
   const online = await isOnline();
   if (!online) {
     throw new AIUnavailableError(
-      "You're offline, yaar. AI needs internet — but your quests, timer and habits are still fully working! 📴"
+      "You're offline. AI needs internet — but your quests, timer and habits are still fully working! 📴"
     );
   }
 
@@ -352,7 +354,7 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
   const status = aiStatus();
   if (!status.anyConfigured) {
     throw new AIUnavailableError(
-      'AI keys missing hai. Add a Gemini or Groq API key in Settings (ya .env file) — tab Professor Byte full power mein aayenge! ⚡'
+      'No AI key found. Add a Gemini or Groq API key in Settings (or a .env file) — then Professor Byte wakes up at full power! ⚡'
     );
   }
   // Honest, human-readable reasons — no misleading "check your key"
@@ -363,7 +365,7 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
   });
   const unique = [...new Set(reasons)];
   throw new AIUnavailableError(
-    `AI thodi der ke liye busy hai. Asli wajah: ${unique.join(' | ').slice(0, 260)}\n\nAuto-retry + dusre provider pe fallback ho chuka hai. Thodi der baad dobara try karo 💪`
+    `The AI is busy right now. Real reason: ${unique.join(' | ').slice(0, 260)}\n\nAuto-retry and the fallback to another provider already ran. Please try again in a bit 💪`
   );
 }
 
@@ -440,7 +442,7 @@ function extractJSON(text) {
     }
   }
 
-  throw new AIUnavailableError('AI ka answer samajh nahi aaya. Dobara try karo!');
+  throw new AIUnavailableError("I couldn't understand the AI's answer. Please try again!");
 }
 
 export async function askAIJSON({ prompt, system = '', schemaHint = '', temperature = 0.4, noCache = false }) {
@@ -451,10 +453,12 @@ export async function askAIJSON({ prompt, system = '', schemaHint = '', temperat
   return extractJSON(text);
 }
 
-// Shared persona for all StudentOS AI features — Hinglish, warm, never condescending.
-export const AI_PERSONA = `You are Professor Byte, the friendly AI mentor inside StudentOS — a free, gamified study app for Indian students (Class 6 to college).
-Style: warm, encouraging, game-like. Light Hinglish flavor is welcome (words like "Shaabaash!", "Shuru karo", "Accha", "yaar") but keep it easy to understand — the base language is simple English.
-Never condescending, never scold. Keep answers practical and short-ish unless depth is requested.
+// Shared persona for all StudentOS AI features — FIX-BYTE: general-purpose,
+// language-mirroring (no forced Hinglish), warm, never condescending.
+export const AI_PERSONA = `You are Professor Byte, a friendly general-purpose AI assistant inside StudentOS — a free, gamified study app for Indian students (Class 6 to college).
+You answer ANY question well: studying, fitness, life, social, general knowledge, writing, coding. Never steer the user back to studying — a non-study question is a normal question, answer it directly.
+LANGUAGE (very important): reply in the SAME language the user writes in — English → English, Hindi → Hindi, Hinglish → natural Hinglish. Switch when the user switches. Never force Hindi/Hinglish into an English conversation.
+Style: warm, encouraging, game-like. Never condescending, never scold. Length follows the question — short for simple asks, detailed when depth genuinely helps. No artificial word caps.
 You believe in small daily wins, spaced repetition, revision cycles and healthy routines.
 
 FORMATTING (very important — the app renders plain text, not Markdown):

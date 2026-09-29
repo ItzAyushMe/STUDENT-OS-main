@@ -94,13 +94,20 @@ function classGuard(profileContext = '') {
 }
 
 // ---------- Professor Byte chat ----------
+// FIX-BYTE: `context` is the PRE-SELECTED StudentOS context block built by
+// src/lib/byteContext.js (relevant categories only, hard-capped — never the
+// whole DB). It is injected as an optional block ONLY when non-empty, with its
+// own "use only if relevant" header. History cap stays at the last 8 messages.
+// P1/P2 fixed: no steer-back instruction, no artificial word cap — Byte is a
+// general-purpose assistant and length follows the question.
 export async function aiTutorReply({ history = [], message, context = '' }) {
   const convo = history
     .slice(-8)
     .map((m) => `${m.role === 'user' ? 'Student' : 'Professor Byte'}: ${m.content}`)
     .join('\n');
+  const ctxBlock = String(context ?? '').trim();
   const prompt = [
-    context ? `Student context: ${esc(context)}` : '',
+    ctxBlock ? ctxBlock.slice(0, 2400) : '', // capped context block (header included), or nothing
     convo ? `Recent conversation:\n${convo}` : '',
     `Student: ${message}`,
     'Professor Byte:',
@@ -110,14 +117,14 @@ export async function aiTutorReply({ history = [], message, context = '' }) {
 
   return askAI({
     prompt,
-    system: `${AI_PERSONA}\nYou are chatting in the AI Tutor screen. You can explain concepts simply, solve problems step-by-step, quiz the student, summarize chapters, plan study strategy and motivate. Use bullet points and short paragraphs. If the student asks something unrelated to studying, gently steer back with warmth and one fun line. Max ~180 words unless solving a problem needs more.`,
+    system: `${AI_PERSONA}\nYou are chatting in the Professor Byte screen of StudentOS. Answer anything the user asks — study topics, step-by-step problem solving, quizzes, summaries, study planning, fitness, life and social questions, general knowledge, writing and coding help. Use plain sentences; bullet points and short paragraphs where they help. Length follows the question — short for simple asks, detailed when depth genuinely helps. If a StudentOS context block is included above, use it only where it is relevant to the question.`,
     temperature: 0.7,
   });
 }
 
 export async function aiMotivate({ name = 'champ', streak = 0, context = '' }) {
   return askAI({
-    prompt: `Give a 2-line motivational pep talk in Hinglish-flavored English for ${name}, who has a ${streak}-day streak. Context: ${esc(context)}. End with one concrete tiny next step.`,
+    prompt: `Give a 2-line motivational pep talk in the user's language (mirror the language they use; default to simple English) for ${name}, who has a ${streak}-day streak. Context: ${esc(context)}. End with one concrete tiny next step.`,
     system: AI_PERSONA,
     temperature: 0.9,
     noCache: true,
@@ -140,7 +147,7 @@ Student: ${esc(ctx)}.
 Today's plan: ${esc(plan)}.
 Weak areas (from quiz mistakes): ${esc(weak)}.
 Streak: ${streak} days · XP: ${xp}${habitsPending ? ` · ${habitsPending} habits pending today` : ''}.
-Rules: 1) 2-3 lines max, warm + specific, Hinglish flavor ok. 2) Reference at least one REAL item from their plan or weak areas by name. 3) End with one tiny concrete action for right now. No greetings like "Dear student".`,
+Rules: 1) 2-3 lines max, warm + specific, in the user's language (default: simple English). 2) Reference at least one REAL item from their plan or weak areas by name. 3) End with one tiny concrete action for right now. No greetings like "Dear student".`,
     system: AI_PERSONA,
     temperature: 0.8,
     noCache: true,
@@ -404,7 +411,7 @@ export async function aiWeeklyReflection({ moods = [], habitsDone = 0, habitsTot
 - Habits completed: ${habitsDone}/${habitsTotal}
 - Focus minutes: ${focusMinutes}
 - XP earned: ${xp}
-Write a kind, honest weekly reflection: 1) summary (2-3 lines, Hinglish flavor ok), 2) one win to celebrate, 3) one gentle improvement area, 4) next week ke liye ek concrete plan.
+Write a kind, honest weekly reflection in the user's language (default: simple English): 1) summary (2-3 lines), 2) one win to celebrate, 3) one gentle improvement area, 4) one concrete plan for next week.
 Return JSON: {"summary":"...","win":"...","improve":"...","plan":"..."}`,
     system: AI_PERSONA,
     schemaHint: '{"summary":"","win":"","improve":"","plan":""}',

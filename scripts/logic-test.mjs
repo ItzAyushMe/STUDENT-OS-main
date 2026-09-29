@@ -3824,6 +3824,314 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedJ.length, 0, `FIX-J: ${failedJ.length} check(s) failed -> ${failedJ.map((f) => f.id).join(', ')}`);
 }
 
+// ---------- FIX-BYTE: PROFESSOR BYTE — general assistant, selected context, language mirroring, sanitizer, global access ----------
+// Handoff acceptance PB-A…PB-E map to the checks below. PB1/PB5/PB6/PB7/PB8/PB9/PB10
+// are DEVICE/PO-RUNTIME (real model answers, isolation, mid-chat language switch,
+// visual formatting, reachability on a device, provider-key swap) — verified here
+// as SOURCE-WIRING probes where possible and labelled as such; they do NOT
+// pretend to prove live model behaviour. Pure rules are proven directly against
+// src/lib/byteContext.js (plain-Node importable).
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+
+  // imported dynamically so a missing module is a recorded failure, not a suite crash
+  // — this is also the fail-before mechanism: at b36840b byteContext.js does not exist.
+  let BC = null; let bcErr = '';
+  try { BC = await import('./../src/lib/byteContext.js'); }
+  catch (e) { bcErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+  const bcSrc = safeRead('src/lib/byteContext.js');
+  const asSrc = safeRead('src/lib/aiService.js');
+  const afSrcPB = safeRead('src/lib/aiFeatures.js');
+  const tsSrc = safeRead('src/screens/study/TutorScreen.js');
+  const rnSrc = safeRead('src/navigation/RootNavigator.js');
+  const hsSrc = safeRead('src/screens/home/HomeScreen.js');
+  const needsBC = () => assert.ok(BC, `byteContext.js import failed: ${bcErr}`);
+  const TODAY = '2026-09-29';
+
+  // ---------- PB0: the pure core exists, imports cleanly, no platform deps ----------
+  check('PB0', 'byteContext.js imports cleanly in plain Node and is pure — the ONLY import is config/constants.js (no supabase, no AsyncStorage, no react-native, no dayjs chain); caps and header are the PO-confirmed values', () => {
+    needsBC();
+    const imports = bcSrc.match(/^import .*$/gm) || [];
+    assert.ok(imports.length >= 1, 'at least one import');
+    for (const line of imports) assert.ok(line.includes("from '../config/constants.js'"), `unexpected import: ${line}`);
+    assert.equal(BC.MAX_CONTEXT_CATEGORIES, 3, 'PO-confirmed hard cap: <=3 categories per call');
+    assert.equal(BC.MAX_BLOCK_CHARS, 600, 'each block <= ~600 chars — prompts stay small, never the whole DB');
+    assert.equal(BC.CONTEXT_HEADER, 'StudentOS context (use only if relevant):', 'the injection header per handoff §4');
+    assert.ok(BC.ALL_KEYWORDS.includes('everything') && BC.ALL_KEYWORDS.includes('my progress'), 'explicit "use everything" intents exist (PB4)');
+  });
+
+  // ---------- PB-A: relevance-based category selection ----------
+  check('PB-A', 'selectCategories: general-knowledge message -> profile ONLY; "revision plan for biology exam" -> academic; "plan today\'s workout" -> fitness; "organize tomorrow" -> schedule+habits; "everything about my progress" -> broad set; the cap NEVER exceeds 3 categories on any message', () => {
+    needsBC();
+    assert.deepEqual(BC.selectCategories('How does photosynthesis work?'), ['profile'], 'general knowledge needs no StudentOS data');
+    assert.deepEqual(BC.selectCategories('What is the capital of France?'), ['profile'], 'another general question -> profile only');
+    assert.deepEqual(BC.selectCategories(''), ['profile'], 'empty message -> profile only');
+    assert.deepEqual(BC.selectCategories(null), ['profile'], 'null-safe');
+    const rev = BC.selectCategories('Make a revision plan for my biology exam');
+    assert.ok(rev.includes('academic'), 'exam/revision -> academicCtx');
+    const wo = BC.selectCategories("plan today's workout");
+    assert.ok(wo.includes('fitness'), 'workout -> fitnessCtx');
+    const org = BC.selectCategories('Help me organize tomorrow');
+    assert.ok(org.includes('schedule') && org.includes('habits'), 'organize tomorrow -> scheduleCtx(+habits) exactly as PB-A specifies');
+    const all = BC.selectCategories('Tell me everything about my progress');
+    assert.ok(all.length > 1 && all.length <= 3, 'explicit everything -> broad set, still capped');
+    assert.ok(all.includes('academic'), 'the broad set is progress-relevant (academic first by priority)');
+    assert.ok(BC.selectCategories('my gym split feels wrong').includes('fitness'), 'gym/split -> fitness');
+    assert.ok(BC.selectCategories('how do I make friends?').includes('social'), 'friends -> social');
+    assert.ok(BC.selectCategories('I lack discipline with my habits').includes('habits'), 'habit/discipline -> habits');
+    assert.ok(BC.selectCategories('aaj ka din kaise plan karun').includes('schedule'), 'Hinglish aaj/plan -> schedule (language mirroring includes selection)');
+    // the cap is absolute, even for an everything-at-once message
+    for (const m of ['exam workout habit friend schedule today everything my progress', 'gym exam plan habit friends', 'studentos all context everything about me']) {
+      assert.ok(BC.selectCategories(m).length <= 3, `cap holds for: ${m}`);
+      assert.equal(BC.selectCategories(m)[0], 'profile', 'profile always leads (identity, tiny)');
+    }
+  });
+
+  // ---------- PB-B: every resolver/formatter is total — '' on junk, never throws ----------
+  await record('PB-B', 'formatters return \'\' on empty/junk data and never throw; resolveByteContext isolates EVERY category fetch in its own try/catch — a failing category contributes nothing and Byte proceeds; every fetch is scoped to the user id (identity/privacy)', async () => {
+    needsBC();
+    for (const junk of [null, undefined, {}, 'str', 42, []]) {
+      assert.doesNotThrow(() => BC.profileCtx(junk), 'profileCtx total');
+      assert.doesNotThrow(() => BC.academicCtx(junk), 'academicCtx total');
+      assert.doesNotThrow(() => BC.scheduleCtx(junk), 'scheduleCtx total');
+      assert.doesNotThrow(() => BC.habitsCtx(junk), 'habitsCtx total');
+      assert.doesNotThrow(() => BC.fitnessCtx(junk), 'fitnessCtx total');
+      assert.doesNotThrow(() => BC.socialCtx(junk), 'socialCtx total');
+    }
+    assert.equal(BC.profileCtx(null), ''); assert.equal(BC.profileCtx({}), '');
+    assert.equal(BC.academicCtx({}), ''); assert.equal(BC.scheduleCtx({}), '');
+    assert.equal(BC.habitsCtx({}), ''); assert.equal(BC.habitsCtx({ habits: [] }), '');
+    assert.equal(BC.fitnessCtx({}), ''); assert.equal(BC.socialCtx({}), '');
+    assert.equal(BC.socialCtx({ friendCount: 0 }), '', 'zero friends -> nothing to say');
+    assert.equal(BC.countFriends(null, undefined, 'u'), 0, 'countFriends junk-safe');
+    // profile with real fields -> the 4-liner + name + streak
+    const pc = BC.profileCtx({ display_name: 'Asha', class_level: 'Class 10', board: 'CBSE', competitive_exam: 'JEE Main', exam_date: '2027-04-01', olympiad: 'None', prep_level: 'Intermediate', current_streak: 12 });
+    assert.ok(pc.includes('Asha') && pc.includes('Class 10') && pc.includes('CBSE') && pc.includes('preparing for JEE Main on 2027-04-01') && pc.includes('12-day streak'), 'profileCtx carries name/class/board/exam/streak');
+    assert.ok(!pc.includes('None'), 'unset olympiad never shows');
+    // academic: archived rows excluded (S5), counts + deadlines only
+    const ac = BC.academicCtx({
+      syllabus: [
+        { subject: 'Maths', chapter: 'Quadratic', status: 'completed', deadline: '2026-10-05' },
+        { subject: 'Maths', chapter: 'Trig', status: 'in_progress' },
+        { subject: 'OldHist', chapter: 'X', status: 'archived' },
+      ],
+      deadlines: [
+        { topic: 'Lab report', deadline_date: '2026-10-02', status: 'pending' },
+        { topic: 'Old one', deadline_date: '2026-09-01', status: 'pending' }, // past -> excluded
+        { topic: 'Done', deadline_date: '2026-10-09', status: 'completed' },   // completed -> excluded
+      ],
+      profile: {}, today: TODAY,
+    });
+    assert.ok(ac.includes('Maths 1/2 done'), 'per-subject done/total');
+    assert.ok(!ac.includes('OldHist'), 'archived syllabus rows NEVER reach Byte');
+    assert.ok(ac.includes('Lab report due 2026-10-02'), 'upcoming deadline included');
+    assert.ok(!ac.includes('Old one') && !ac.includes('Done'), 'past/completed deadlines excluded');
+    // habits: done/pending against today's logs
+    const hc = BC.habitsCtx({
+      habits: [{ id: 'h1', name: 'Read 10 pages', icon: '📚' }, { id: 'h2', name: 'Stretch', icon: '🤸' }],
+      logsToday: [{ habit_id: 'h1', completed: true }],
+    });
+    assert.ok(hc.includes('1/2 habits done today') && hc.includes('Read 10 pages — done') && hc.includes('Stretch — pending'), 'habit status lines');
+    // resolveByteContext: EVERY table fetch throws -> still answers, profile-only, no rejection
+    const throwingList = async () => { throw new Error('db down'); };
+    const out1 = await BC.resolveByteContext({ list: throwingList, profile: { id: 'u1', display_name: 'Asha', class_level: 'Class 10' }, message: 'my exam revision', today: TODAY });
+    assert.equal(typeof out1, 'string', 'never rejects');
+    assert.ok(out1.includes('Asha'), 'the profile block survives a total db failure (PB11)');
+    assert.ok(!out1.includes('db down'), 'context errors are never surfaced into the prompt');
+    // selective failure: syllabus throws, schedule works -> schedule still lands
+    const calls = [];
+    const partialList = async (table, opts) => {
+      calls.push({ table, opts });
+      if (table === 'syllabus' || table === 'deadlines') throw new Error('boom');
+      if (table === 'schedule') return [{ date: TODAY, start_time: '17:00', subject: 'Physics', topic: 'Optics', session_type: 'study', status: 'pending' }];
+      return [];
+    };
+    const out2 = await BC.resolveByteContext({ list: partialList, profile: { id: 'u1', display_name: 'Asha' }, message: 'revision plan and my schedule for today', today: TODAY });
+    assert.ok(out2.includes('Physics') && out2.includes('Optics'), 'the category that loaded is used');
+    assert.ok(!out2.includes('boom'), 'the failed category is silently skipped');
+    // identity scoping: EVERY fetch carries the user id (RLS + F5 guard upstream)
+    assert.ok(calls.length > 0, 'fetches happened');
+    for (const c of calls) {
+      const eq = (c.opts && c.opts.eq) || {};
+      assert.ok(eq.user_id === 'u1' || eq.friend_id === 'u1', `${c.table} fetch is scoped to the user id`);
+    }
+    // no uid (guest) -> profile-only, zero fetches
+    calls.length = 0;
+    const out3 = await BC.resolveByteContext({ list: partialList, profile: {}, message: 'my exam', today: TODAY });
+    assert.equal(calls.length, 0, 'a guest triggers ZERO db fetches');
+    assert.ok(!out3.includes('Academics'), 'guests get no academic block');
+    // social: COUNT only — friend names never enter the context
+    const friendsList = async (table) => {
+      if (table !== 'friends') return [];
+      return [
+        { user_id: 'u1', friend_id: 'p1', friend_name: 'Priya', status: 'accepted' },
+        { user_id: 'p2', friend_id: 'u1', friend_name: 'Raj', status: 'accepted' },
+        { user_id: 'u1', friend_id: 'p3', friend_name: 'Ghost', status: 'pending' }, // pending never counts
+      ];
+    };
+    const out4 = await BC.resolveByteContext({ list: friendsList, profile: { id: 'u1' }, message: 'about my friends', today: TODAY });
+    assert.ok(out4.includes('2 friends'), 'accepted friends counted in BOTH directions');
+    assert.ok(!out4.includes('Priya') && !out4.includes('Raj') && !out4.includes('Ghost'), 'NEVER names, never pending requests (PO-confirmed)');
+    // no list function at all -> still fine
+    const out5 = await BC.resolveByteContext({ profile: { id: 'u1', display_name: 'Asha' }, message: 'exam prep', today: TODAY });
+    assert.ok(out5.includes('Asha'), 'missing db injection degrades to profile-only, no throw');
+  });
+
+  // ---------- PB-C: persona + system strings (P1/P2/P3/P8 + §13-5 neutralization) ----------
+  check('PB-C', 'persona/system strings: NO "Max ~180 words", NO "steer back", NO forced-Hinglish mandate anywhere in the AI prompts; language-mirroring instruction present; general-purpose identity present; the plain-text + no-LaTeX formatting contracts are KEPT; AI fallback strings neutralized to English (PO §13-5)', () => {
+    needsBC();
+    // the persona (single source of truth)
+    assert.ok(asSrc.includes('general-purpose AI assistant'), 'Byte is a general-purpose assistant, not a study-only mentor');
+    assert.ok(asSrc.includes('Never steer the user back to studying'), 'P1 fixed at the persona level too');
+    assert.ok(asSrc.includes('SAME language the user writes in'), 'language-mirroring instruction present');
+    assert.ok(asSrc.includes('Never force Hindi/Hinglish into an English conversation'), 'no forced Hindi flavor');
+    assert.ok(asSrc.includes('Length follows the question'), 'P2 fixed: no artificial cap');
+    assert.ok(!asSrc.includes('Light Hinglish flavor'), 'the forced-Hinglish mandate is gone');
+    assert.ok(!asSrc.includes('short-ish'), 'the "short-ish" bias is gone');
+    assert.ok(asSrc.includes('NEVER use Markdown') && asSrc.includes('NEVER write LaTeX'), 'the plain-text + math contracts survive (PB-D depends on them)');
+    assert.ok(asSrc.includes('export function stripMarkdown'), 'the existing askAI-level strip survives');
+    // the tutor layer
+    assert.ok(!afSrcPB.includes('gently steer back'), 'P1: the steer-back instruction is gone');
+    assert.ok(!afSrcPB.includes('Max ~180 words'), 'P2: the 180-word cap is gone');
+    assert.ok(afSrcPB.includes('fitness, life and social questions, general knowledge, writing and coding'), 'the tutor system string covers general topics');
+    assert.ok(/Length follows the question — short for simple asks, detailed when depth genuinely helps/.test(afSrcPB), 'length follows the request');
+    // P8: other features no longer hardcode Hinglish
+    assert.ok(!afSrcPB.includes('Hinglish-flavored English'), 'aiMotivate mandate stripped');
+    assert.ok(!afSrcPB.includes('Hinglish flavor ok'), 'aiDailyMessage + weekly reflection mandates stripped');
+    assert.ok(!afSrcPB.includes('next week ke liye'), 'weekly reflection prompt is language-neutral');
+    assert.ok((afSrcPB.match(/in the user's language/g) || []).length >= 3, "motivate/daily/reflection now say \"in the user's language\"");
+    // §13-5 (PO decision): AI fallback strings neutralized
+    for (const s of ['dobara try karo', 'Asli wajah', 'offline, yaar', 'keys missing hai', 'samajh nahi aaya', 'ne time liya', 'accept nahi hui']) {
+      assert.ok(!asSrc.includes(s), `aiService fallback neutralized: "${s}" is gone`);
+    }
+    assert.ok(asSrc.includes('Please try again'), 'neutral English retry copy present');
+    assert.ok(!tsSrc.includes('Thodi technical gadbad'), 'TutorScreen fallback neutralized');
+    assert.ok(tsSrc.includes('Something went wrong on my side'), 'the neutral fallback is in place');
+    // provider chain untouched (MUST-NOT list): the F9-era internals survive
+    assert.ok(asSrc.includes('callProvider') && asSrc.includes('MAX_TOTAL_MS'), 'retry/timeout internals untouched');
+  });
+
+  // ---------- PB-D: the display sanitizer ----------
+  check('PB-D', 'sanitizeMarkdownStray: **bold**->bold, leading -/* bullets -> •, ``` fences and # headings stripped; math/LaTeX-ish plain text (what MathText renders) is UNTOUCHED; idempotent; non-strings pass through', () => {
+    needsBC();
+    assert.equal(BC.sanitizeMarkdownStray('**Bold** idea'), 'Bold idea', '** stripped');
+    assert.equal(BC.sanitizeMarkdownStray('- item one'), '• item one', 'dash bullet -> •');
+    assert.equal(BC.sanitizeMarkdownStray('* item two'), '• item two', 'star bullet -> •');
+    assert.equal(BC.sanitizeMarkdownStray('```js\nconst a = 1;\n```'), 'const a = 1;\n', 'code fences stripped');
+    assert.equal(BC.sanitizeMarkdownStray('## Heading\nbody'), 'Heading\nbody', 'heading markers stripped');
+    const math = 'Solve x^2 + 1 = 0 → x = ±i. sqrt(2) ≈ 1.414, ∫ f(x) dx, θ = π/4, d/dx of x^(n+1)';
+    assert.equal(BC.sanitizeMarkdownStray(math), math, 'math notation untouched — MathText keeps working');
+    const once = BC.sanitizeMarkdownStray('**a**\n- b');
+    assert.equal(BC.sanitizeMarkdownStray(once), once, 'idempotent (askAI already strips once — double application is safe)');
+    assert.equal(BC.sanitizeMarkdownStray(42), 42, 'non-string passes through');
+    assert.equal(BC.sanitizeMarkdownStray(null), null, 'null passes through');
+    assert.equal(BC.sanitizeMarkdownStray('mid-word hyphen ok\n2 - 3 = -1'), 'mid-word hyphen ok\n2 - 3 = -1', 'inline hyphens/minuses are NOT bullets');
+  });
+
+  // ---------- PB-E: prompt assembly ----------
+  check('PB-E', 'prompt assembly: the context block is injected ONLY when non-empty (with its "use only if relevant" header), capped at 2400 chars, per-category blocks clipped to 600; the history cap stays at exactly 8 messages', () => {
+    needsBC();
+    // functional: selectContext emptiness + header + clipping
+    assert.equal(BC.selectContext({ profile: '' }, 'hi'), '', 'empty blocks -> empty context (prompt carries NO context section)');
+    assert.equal(BC.selectContext({}, 'photosynthesis'), '', 'no blocks at all -> empty');
+    const withCtx = BC.selectContext({ profile: 'Asha · Class 10', academic: 'Maths 1/2 done' }, 'exam revision');
+    assert.ok(withCtx.startsWith(BC.CONTEXT_HEADER), 'the header leads the block');
+    assert.ok(withCtx.includes('Profile: Asha · Class 10'), 'category labels are human-readable');
+    assert.ok(!withCtx.includes('Habits'), 'unselected categories never ride along');
+    const long = 'x'.repeat(700);
+    const clipped = BC.selectContext({ profile: long }, 'hi');
+    assert.ok(clipped.includes('x'.repeat(600)) && !clipped.includes('x'.repeat(601)), 'each block clipped to 600 chars');
+    // wiring: aiTutorReply injects only when non-empty, with its own safety cap
+    assert.ok(/ctxBlock \? ctxBlock\.slice\(0, 2400\) : ''/.test(afSrcPB), 'context injected ONLY when non-empty, capped');
+    // scoped to aiTutorReply — 'Student context:' legitimately survives in rewriteAnswerWindows (FIX-G3, untouched)
+    const tutorFn = afSrcPB.slice(afSrcPB.indexOf('export async function aiTutorReply'), afSrcPB.indexOf('export async function aiMotivate'));
+    assert.ok(tutorFn.length > 100, 'aiTutorReply region located');
+    assert.ok(!tutorFn.includes('Student context:'), 'the old blind 400-char profile injection is gone from aiTutorReply');
+    assert.ok(tutorFn.includes('ctxBlock'), 'the selected block is what gets injected');
+    assert.ok(afSrcPB.includes('.slice(-8)'), 'history cap UNCHANGED at 8');
+    assert.ok(/system: `\$\{AI_PERSONA\}\\nYou are chatting in the Professor Byte screen/.test(afSrcPB), 'the tutor system string still composes AI_PERSONA (one source of truth)');
+    assert.ok(afSrcPB.includes('use it only where it is relevant'), 'the system string marks the context optional');
+  });
+
+  // ---------- PB-F*: wiring probes — global access, screen plumbing, storage untouched ----------
+  check('PB-F*', '[wiring probe — DEVICE tests PB1/PB6/PB7/PB8/PB9/PB10 are PO/device-side] TutorScreen fetches context per message via resolveByteContext with db.list INJECTED, sanitizes every reply before persist, chips are general-purpose, Byte is registered in Home+Life+Study stacks with a Home header icon, and the chat storage mechanism is untouched', () => {
+    needsBC();
+    // screen plumbing
+    assert.ok(tsSrc.includes("import { resolveByteContext, sanitizeMarkdownStray } from '../../lib/byteContext'"), 'the screen uses the pure lib');
+    assert.ok(tsSrc.includes('list: (table, opts) => db.list(table, opts)'), 'db.list is INJECTED — byteContext stays pure');
+    assert.ok(tsSrc.includes('resolveByteContext({'), 'context is resolved per message');
+    const iResolve = tsSrc.indexOf('resolveByteContext({');
+    const iReply = tsSrc.indexOf('aiTutorReply({ history');
+    const iSan = tsSrc.indexOf('reply = sanitizeMarkdownStray(reply)');
+    const iPersist = tsSrc.indexOf("{ role: 'assistant', content: reply");
+    assert.ok(iResolve >= 0 && iReply > iResolve, 'context is resolved BEFORE the AI call');
+    assert.ok(iSan > iReply && iPersist > iSan, 'every reply is sanitized BEFORE persist/render');
+    assert.ok(tsSrc.includes('buildProfileContext(profile || {})'), 'the motivate path keeps the tiny profile line');
+    // chips generalized (P7)
+    assert.ok(!tsSrc.includes('from my syllabus'), 'the study-locked quiz chip is gone');
+    assert.ok(tsSrc.includes('Plan my day') && tsSrc.includes('Help me write'), 'general-purpose chips exist');
+    assert.ok(tsSrc.includes('__MOTIVATE__'), 'the motivate chip still works');
+    // global access (P6): 3 registrations, Home header icon, hub param
+    const tutorRegs = (rnSrc.match(/name="Tutor" component=\{TutorScreen\}/g) || []).length;
+    assert.equal(tutorRegs, 3, 'Tutor registered in Study + Home + Life stacks');
+    assert.ok(rnSrc.includes('<LifeStack.Screen name="Settings" component={SettingsScreen} />'), 'LifeStack carries Settings (Byte\'s AI-key banner navigates there)');
+    assert.ok(hsSrc.includes("navigation.navigate('Tutor', { hub: 'HomeMain' })"), 'Home header icon entry (in-stack push)');
+    assert.ok(hsSrc.includes('chatbubble-ellipses-outline'), 'the icon itself');
+    assert.ok(hsSrc.includes("screen: 'Tutor'"), 'the existing Home Byte card is untouched');
+    assert.ok(tsSrc.includes("route?.params?.hub || 'StudyHub'"), 'back fallback is per-entry (StudyHub for the classic entry)');
+    // MUST-NOTs: chat storage + provider reuse untouched
+    assert.ok(tsSrc.includes('sos.chat.') && tsSrc.includes('.slice(-60)'), 'chat storage mechanism unchanged (device-local, cap 60)');
+    assert.ok(tsSrc.includes('MathText'), 'replies still render through MathText');
+    assert.ok(afSrcPB.includes('return askAI({') && afSrcPB.includes('temperature: 0.7'), 'aiTutorReply still reuses askAI as-is (provider swappable)');
+    // §13-1 (PO decision): NO markdown renderer dependency was added
+    const pkg = JSON.parse(safeRead('package.json'));
+    assert.ok(!pkg.dependencies['react-native-markdown-display'], 'plain-text sanitize path chosen — no markdown renderer dependency');
+    const mdDeps = Object.keys(pkg.dependencies).filter((d) => /markdown/i.test(d));
+    assert.equal(mdDeps.length, 0, 'zero markdown dependencies');
+  });
+
+  // ---------- PB-G: regression guards around the Byte round ----------
+  check('PB-G', 'regression: the provider chain/retry/timeout internals, the other AI features\' logic, db/schema/XP/gym/scheduler/battle code are untouched; F9 model documentation survives; the only package.json footprint is the pre-existing FIX-J picker', () => {
+    needsBC();
+    // F9-era aiService documentation + model lists (committed probes depend on these)
+    assert.ok(asSrc.includes('FIX-F9') && asSrc.includes('qwen/qwen3.6-27b') && asSrc.includes('REMOVED'), 'F9 removal comment intact');
+    assert.ok(asSrc.includes('openai/gpt-oss-120b') && asSrc.includes('openai/gpt-oss-20b'), 'Groq models intact');
+    assert.ok(asSrc.includes('gemini-flash-latest'), 'Gemini models intact');
+    assert.ok(asSrc.includes('looksLikeMissingModel') && asSrc.includes('isRetryable'), 'fallback-chain helpers intact');
+    // other AI features untouched: quiz/test/mindmap/battle AI keep their logic
+    assert.ok(afSrcPB.includes('normalizeMindMapResponse'), 'mind map normalizer intact');
+    assert.ok(afSrcPB.includes('export function buildProfileContext'), 'buildProfileContext still exported (daily message + others use it)');
+    assert.ok(afSrcPB.includes('school exam days are light revision only'), 'FIX-D4 aiReschedule prompt intact');
+    assert.ok(afSrcPB.includes('rewriteAnswerWindows'), 'FIX-G3 rewrite pass intact');
+    // no db/schema/XP changes this round
+    const schemaSrcPB = safeRead('supabase/schema.sql');
+    assert.ok(!/byte|context/i.test(schemaSrcPB.slice(schemaSrcPB.indexOf('FIX-J: CONTENT STORAGE'), schemaSrcPB.indexOf('Done! 🎉'))), 'the storage block is unchanged (no FIX-BYTE schema text at all)');
+    assert.ok(!schemaSrcPB.includes('FIX-BYTE'), 'FIX-BYTE touches NO schema');
+    // package.json: picker from FIX-J remains; nothing new this round
+    const pkg = JSON.parse(safeRead('package.json'));
+    assert.ok(pkg.dependencies['expo-document-picker'], 'FIX-J dependency untouched');
+    // nav: 5 tabs unchanged
+    assert.equal((rnSrc.match(/name: '\w+Tab'/g) || []).length, 5, 'the 5-tab structure is unchanged (no nav redesign)');
+  });
+
+  const failedPB = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedPB.length, 0, `FIX-BYTE: ${failedPB.length} check(s) failed -> ${failedPB.map((f) => f.id).join(', ')}`);
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 

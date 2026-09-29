@@ -55,6 +55,9 @@ function HomeStackNav() {
     <HomeStack.Navigator screenOptions={noHeader}>
       <HomeStack.Screen name="HomeMain" component={HomeScreen} />
       <HomeStack.Screen name="Settings" component={SettingsScreen} />
+      {/* FIX-BYTE P6: Professor Byte is global — same screen component, registered
+          per stack (React Navigation requirement). Entry: Home header icon. */}
+      <HomeStack.Screen name="Tutor" component={TutorScreen} />
     </HomeStack.Navigator>
   );
 }
@@ -95,6 +98,11 @@ function LifeStackNav() {
       <LifeStack.Screen name="Habits" component={HabitsScreen} />
       <LifeStack.Screen name="Gym" component={GymScreen} />
       <LifeStack.Screen name="Wisdom" component={WisdomScreen} />
+      {/* FIX-BYTE P6: Byte reachable from the Life stack too. Settings is
+          registered alongside because Byte's "AI not connected" banner
+          navigates to Settings (same reason StudyStack carries it). */}
+      <LifeStack.Screen name="Tutor" component={TutorScreen} />
+      <LifeStack.Screen name="Settings" component={SettingsScreen} />
     </LifeStack.Navigator>
   );
 }
