@@ -73,6 +73,8 @@ function StudyStackNav() {
       <StudyStack.Screen name="Quiz" component={QuizScreen} />
       <StudyStack.Screen name="Content" component={ContentScreen} />
       <StudyStack.Screen name="TestBuilder" component={TestBuilderScreen} />
+      {/* v1.0.6 recovery G: Settings reachable from StudyTab (TutorScreen navigates to Settings) */}
+      <StudyStack.Screen name="Settings" component={SettingsScreen} />
     </StudyStack.Navigator>
   );
 }

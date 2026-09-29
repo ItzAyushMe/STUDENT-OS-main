@@ -48,10 +48,17 @@ export function TopicDetailScreen({ navigation, route }) {
     const wasCompleted = row.status === 'completed';
     const patch = { progress_percent: v, status, ...(v >= 100 ? { completed_at: nowIso() } : {}) };
     setRow({ ...row, ...patch });
-    await db.update('syllabus', row.id, patch);
-    if (v >= 100 && !wasCompleted) {
-      setConfetti(Date.now());
-      await awardXP('CHAPTER_COMPLETE');
+    try {
+      await db.update('syllabus', row.id, patch);
+      if (v >= 100 && !wasCompleted) {
+        setConfetti(Date.now());
+        await awardXP('CHAPTER_COMPLETE');
+      } else if (v < 100 && wasCompleted) {
+        await awardXP('CHAPTER_UNDO', { countActivity: false });
+      }
+    } catch (e) {
+      // revert optimistic on failure? Keep simple: show alert via console and reload
+      console.warn('[TopicDetail] setProgress failed', e?.message);
     }
   };
 

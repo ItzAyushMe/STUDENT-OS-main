@@ -2,7 +2,7 @@
 // 7-day view, per-habit streaks, streak freeze power-up and
 // custom habit creation. Light mode.
 import { memo, useCallback, useMemo, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
@@ -18,7 +18,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { aiSuggestHabits, AIUnavailableError } from '../../lib/aiFeatures';
-import { confirmAlert } from '../../lib/alert';
+import { confirmAlert, infoAlert } from '../../lib/alert';
 import { HABIT_CATEGORIES } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, groupBy } from '../../lib/utils';
@@ -39,7 +39,7 @@ export function HabitsScreen({ navigation }) {
   const [logs, setLogs] = useState([]);
   const [confetti, setConfetti] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
   const [editHabit, setEditHabit] = useState(null); // habit being edited (null = add mode)
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSuggests, setAiSuggests] = useState([]);
@@ -103,58 +103,78 @@ export function HabitsScreen({ navigation }) {
   );
 
   const toggleToday = async (habit) => {
+    const isBad = (habit.kind || 'good') === 'bad';
     const existing = logMap[`${habit.id}::${today}`];
     if (existing && existing.completed) {
-      // undo
-      await db.remove('habit_logs', existing.id);
-      setLogs((prev) => prev.filter((l) => l.id !== existing.id));
+      try {
+        await db.remove('habit_logs', existing.id);
+        setLogs((prev) => prev.filter((l) => l.id !== existing.id));
+        if (isBad) {
+          await awardXP('HABIT_BAD_UNDO', { countActivity: false });
+        } else {
+          await awardXP('HABIT_UNDO', { countActivity: false });
+        }
+      } catch (e) {
+        infoAlert('Habit save fail hua', e?.message || 'Habit untick nahi ho paya — dobara try karo');
+      }
       return;
     }
-    const streak = streakFor(habit.id).streak;
-    const row = await db.insert('habit_logs', {
-      habit_id: habit.id,
-      user_id: profile.id,
-      date: today,
-      completed: true,
-      completed_at: nowIso(),
-      streak_count: streak + 1,
-      frozen: false,
-    });
-    setLogs((prev) => [...prev, row]);
-    setConfetti(Date.now());
-    await awardXP('HABIT');
+    try {
+      const streak = streakFor(habit.id).streak;
+      const row = await db.insert('habit_logs', {
+        habit_id: habit.id,
+        user_id: profile.id,
+        date: today,
+        completed: true,
+        completed_at: nowIso(),
+        streak_count: streak + 1,
+        frozen: false,
+      });
+      setLogs((prev) => [...prev, row]);
+      if (isBad) {
+        await awardXP('HABIT_BAD', { countActivity: false });
+      } else {
+        const xpRes = await awardXP('HABIT');
+        if (xpRes) setConfetti(Date.now());
+      }
+    } catch (e) {
+      infoAlert('Habit save fail hua', e?.message || 'Habit tick nahi ho paya — dobara try karo');
+    }
   };
 
   const useFreeze = async (habit) => {
     if (freezes <= 0) return;
-    const yesterday = dateStr(dayjs(today).subtract(1, 'day'));
-    const row = await db.insert('habit_logs', {
-      habit_id: habit.id,
-      user_id: profile.id,
-      date: yesterday,
-      completed: false,
-      completed_at: nowIso(),
-      streak_count: streakFor(habit.id).streak,
-      frozen: true,
-    });
-    setLogs((prev) => [...prev, row]);
-    // consume a global freeze from the profile and refresh state
-    await db.update('users', profile.id, { streak_freezes: Math.max(0, (profile.streak_freezes || 0) - 1) });
-    await reloadProfile();
-    await load();
+    try {
+      const yesterday = dateStr(dayjs(today).subtract(1, 'day'));
+      const row = await db.insert('habit_logs', {
+        habit_id: habit.id,
+        user_id: profile.id,
+        date: yesterday,
+        completed: false,
+        completed_at: nowIso(),
+        streak_count: streakFor(habit.id).streak,
+        frozen: true,
+      });
+      setLogs((prev) => [...prev, row]);
+      await db.update('users', profile.id, { streak_freezes: Math.max(0, (profile.streak_freezes || 0) - 1) });
+      await reloadProfile();
+      await load();
+    } catch (e) {
+      infoAlert('Freeze fail hua', e?.message || 'Freeze save nahi ho paya — dobara try karo');
+    }
   };
 
   const addHabit = async () => {
     if (!form.name.trim()) return;
     const targetTime = /^\d{1,2}:\d{2}$/.test((form.target_time || '').trim()) ? form.target_time.trim() : null;
     if (editHabit) {
-      // EDIT: keep history/logs untouched — only the habit definition changes
       await db.update('habits', editHabit.id, {
         name: form.name.trim(),
         category: form.category,
         icon: form.icon,
         part: form.part,
         target_time: targetTime,
+        kind: form.kind || 'good',
       });
       setEditHabit(null);
     } else {
@@ -165,11 +185,12 @@ export function HabitsScreen({ navigation }) {
         icon: form.icon,
         target_time: targetTime,
         part: form.part,
+        kind: form.kind || 'good',
         is_active: true,
         created_at: nowIso(),
       });
     }
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
     setAddOpen(false);
     await load();
   };
@@ -200,6 +221,7 @@ export function HabitsScreen({ navigation }) {
       icon: habit.icon || '🎯',
       part: habit.part || 'morning',
       target_time: habit.target_time || '',
+      kind: habit.kind || 'good',
     });
     setAddOpen(true);
   };
@@ -208,7 +230,7 @@ export function HabitsScreen({ navigation }) {
     setEditHabit(null);
     setAiSuggests([]);
     setAiMsg('');
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
     setAddOpen(true);
   };
 
@@ -294,7 +316,7 @@ export function HabitsScreen({ navigation }) {
                   key={h.id}
                   habit={h}
                   week={week}
-                frozenYesterday={Boolean(logMap[`${habit.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`]?.frozen)}
+                frozenYesterday={Boolean(logMap[`${h.id}::${dateStr(dayjs(today).subtract(1, 'day'))}`]?.frozen)}
                   today={today}
                   logMap={logMap}
                   streak={streak}
@@ -325,6 +347,18 @@ export function HabitsScreen({ navigation }) {
 
       {/* Add/Edit habit modal */}
       <ModalSheet visible={addOpen} onClose={() => { setAddOpen(false); setEditHabit(null); }} title={editHabit ? 'Edit Habit' : 'New Habit'} mode="light">
+        {/* FIX-G5: the sheet body (AI suggestions + type/category/day/icon
+            pickers) is taller than the sheet, so Save used to fall below the
+            fold and the keyboard covered the name field. Body now SCROLLS
+            (flexShrink so it only shrinks when the content is too tall) inside
+            a KeyboardAvoidingView, and Save stays PINNED outside the scroll. */}
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView
+          style={{ flexGrow: 0, flexShrink: 1 }}
+          contentContainerStyle={{ paddingBottom: 4 }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         {/* AI habit suggestions (add mode only) */}
         {!editHabit ? (
           <Card mode="light" onPress={aiBusy ? undefined : suggestHabits} style={{ marginBottom: 12, backgroundColor: '#ECFEFF', borderColor: '#A5F3FC' }}>
@@ -358,6 +392,11 @@ export function HabitsScreen({ navigation }) {
           keyboardType="numeric"
           style={{ marginTop: 4 }}
         />
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Type</Text>
+        <View style={{ flexDirection: 'row', marginBottom: 10 }}>
+          <Chip label="✅ Good habit" small selected={(form.kind||'good')==='good'} onPress={() => setForm({ ...form, kind: 'good' })} mode="light" />
+          <Chip label="🚫 Bad habit (avoid)" small selected={form.kind==='bad'} onPress={() => setForm({ ...form, kind: 'bad' })} mode="light" />
+        </View>
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Category</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
           {Object.entries(HABIT_CATEGORIES).map(([key, c]) => (
@@ -391,7 +430,9 @@ export function HabitsScreen({ navigation }) {
             </Pressable>
           ))}
         </View>
-        <View style={{ flexDirection: 'row', marginTop: 6 }}>
+        </ScrollView>
+        {/* Save is PINNED here — outside the ScrollView, always visible */}
+        <View style={{ flexDirection: 'row', marginTop: 10 }}>
           <Button
             title={editHabit ? 'Save Changes' : 'Add Habit (+10 XP per day)'}
             mode="light"
@@ -403,6 +444,7 @@ export function HabitsScreen({ navigation }) {
             <Button title="Remove" variant="secondary" mode="light" onPress={() => removeHabit(editHabit)} style={{ flex: 0.6 }} />
           ) : null}
         </View>
+        </KeyboardAvoidingView>
       </ModalSheet>
     </Screen>
   );
@@ -410,15 +452,16 @@ export function HabitsScreen({ navigation }) {
 
 const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, frozenYesterday, onToggle, onFreeze, onEdit, onDelete }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
+  const isBad = (habit.kind || 'good') === 'bad';
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
-  const canFreeze = atRisk && streak >= 2 && freezes > 0 && !doneToday;
+  const canFreeze = !isBad && atRisk && streak >= 2 && freezes > 0 && !doneToday;
 
   return (
     <View
       style={{
-        backgroundColor: '#FFFFFF',
+        backgroundColor: isBad ? (doneToday ? '#FEF2F2' : '#FFFBEB') : '#FFFFFF',
         borderWidth: 1,
-        borderColor: '#E2E8F0',
+        borderColor: isBad ? (doneToday ? '#FECACA' : '#FDE68A') : '#E2E8F0',
         borderRadius: radius.md,
         padding: 11,
         marginBottom: 8,
@@ -434,8 +477,8 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
           height: 36,
           borderRadius: 10,
           borderWidth: 2,
-          borderColor: doneToday ? cat.color : '#CBD5E1',
-          backgroundColor: doneToday ? cat.color : 'transparent',
+          borderColor: doneToday ? (isBad ? '#DC2626' : cat.color) : '#CBD5E1',
+          backgroundColor: doneToday ? (isBad ? '#DC2626' : cat.color) : 'transparent',
           alignItems: 'center',
           justifyContent: 'center',
           marginRight: 10,
@@ -445,13 +488,13 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
       </Pressable>
 
       <View style={{ flex: 1.6 }}>
-        <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
+        <Text numberOfLines={2} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
           {habit.name}
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
           <Text style={{ fontSize: 10, marginRight: 4 }}>{cat.icon}</Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8' }}>
-            {streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet'}
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: isBad ? '#DC2626' : (streak > 0 ? (atRisk ? '#DC2626' : '#D97706') : '#94A3B8') }}>
+            {isBad ? (doneToday ? '⚠️ Avoided? No — you did it today (-5 XP)' : '🚫 Avoid this — tap if you slipped') : (streak > 0 ? (atRisk ? `🔥 ${streak}d streak — at risk!` : `🔥 ${streak}d streak`) : 'No streak yet')}
           </Text>
           {/* L-6 (audit): on Mondays the frozen Sunday cell isn't in this
               week's grid — show the freeze on the row instead. */}

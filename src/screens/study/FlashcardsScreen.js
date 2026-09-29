@@ -76,12 +76,18 @@ export function FlashcardsScreen({ navigation, route }) {
         count: Math.max(4, Math.min(15, Number(aiForm.count) || 8)),
         profileContext: [profile?.class_level, profile?.board].filter(Boolean).join(', '),
       });
-      const rows = cards.map((c) => ({
+      // NEW X R6: filter out cards missing real front/back text (length ≥1 after trim)
+      const valid = cards.filter(c => c?.front_text && c?.back_text && String(c.front_text).trim().length >=1 && String(c.back_text).trim().length >=1);
+      if (!valid.length) {
+        setAiMsg('AI ne khaali cards bheje — valid front/back text nahi tha. Dobara try karo.');
+        return;
+      }
+      const rows = valid.map((c) => ({
         user_id: profile.id,
         subject,
         topic,
-        front_text: c.front_text,
-        back_text: c.back_text,
+        front_text: String(c.front_text).trim(),
+        back_text: String(c.back_text).trim(),
         card_type: c.card_type,
         mastery_level: 0,
         next_review: nowIso(),

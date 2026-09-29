@@ -30,12 +30,14 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CACHE_TTL = 30 * 60 * 1000;
 const RUNTIME_KEY = 'sos.ai.runtime';
 
-// Fallback chains — the first entry is the default model.
-// llama-3.3-70b-specdec was DECOMMISSIONED by Groq and is removed.
-// L-10 (audit): gemini-1.5-flash is retired — pruned. Prefer the
-// -latest alias first so future model swaps need no code change.
-const GEMINI_MODELS = ['gemini-flash-latest', AI_MODELS.gemini, 'gemini-2.5-flash'];
-const GROQ_MODELS = [AI_MODELS.groq, 'llama-3.1-8b-instant', 'openai/gpt-oss-20b'];
+// FIX-F9 + R4: Fallback chains verified
+// 2026-09-20: Gemini lead gemini-flash-latest -> 3.5-flash -> 3.1-flash-lite GA (docs.cloud.google.com model-versions, 2026-09-18)
+// 2026-09-21: Groq verified via https://console.groq.com/docs/models — Production: openai/gpt-oss-120b (500 tps), openai/gpt-oss-20b (1000 tps) — both verified active today
+//             Preview: qwen/qwen3.8-27b (450 tps) present, but qwen/qwen3.6-27b ABSENT (404 observed in PO logs, not listed in current docs) — REMOVED per FIX-F9
+//             llama-3.3-70b-versatile and llama-3.1-8b-instant are Enterprise only (contact sales) per same page, removed earlier in R4
+//             Chain now only verified production models to avoid 404s
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+const GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']; // FIX-F9: qwen/qwen3.6-27b removed (404), verified 2026-09-21 via console.groq.com/docs/models
 
 // ---------- runtime config (Settings screen overrides env) ----------
 let runtime = {
@@ -144,26 +146,40 @@ async function geminiRequest(model, { prompt, system, json, temperature, key }) 
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: temperature ?? 0.7,
-      maxOutputTokens: 4096,
+      // v1.0.6 recovery: increase to 8192 to prevent truncation of large question banks/tests
+      maxOutputTokens: 8192,
       ...(json ? { responseMimeType: 'application/json' } : {}),
     },
   };
   if (system) {
     body.systemInstruction = { parts: [{ text: system }] };
   }
-  const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+  // v1.0.6 Y Round1: AI timeout — 45s per request
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+    }
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+    if (!text) throw new Error('Gemini returned an empty response.');
+    return text;
+  } catch (e) {
+    if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
+      throw new Error('Gemini timeout — AI ne 45s se zyada time liya, dobara try karo');
+    }
+    throw e;
+  } finally {
+    clearTimeout(to);
   }
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-  if (!text) throw new Error('Gemini returned an empty response.');
-  return text;
 }
 
 async function groqRequest(model, { prompt, system, json, temperature, key }) {
@@ -174,26 +190,39 @@ async function groqRequest(model, { prompt, system, json, temperature, key }) {
     model,
     messages,
     temperature: temperature ?? 0.7,
-    max_tokens: 4096,
+    // v1.0.6 recovery: increase to 8192 to prevent truncation of large question banks/tests
+    max_tokens: 8192,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
   };
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Groq ${res.status}: ${detail.slice(0, 160)}`);
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Groq ${res.status}: ${detail.slice(0, 160)}`);
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content || '';
+    if (!text) throw new Error('Groq returned an empty response.');
+    return text;
+  } catch (e) {
+    if (e?.name === 'AbortError' || String(e?.message || '').toLowerCase().includes('aborted')) {
+      throw new Error('Groq timeout — AI ne 45s se zyada time liya, dobara try karo');
+    }
+    throw e;
+  } finally {
+    clearTimeout(to);
   }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content || '';
-  if (!text) throw new Error('Groq returned an empty response.');
-  return text;
 }
 
-function looksLikeMissingModel(errMsg) {
-  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model|model_not_found/i.test(String(errMsg));
+export function looksLikeMissingModel(errMsg) {
+  return /404|not found|NOT_FOUND|does not exist|decommissioned|unsupported model|model_not_found|no longer available|not available to new users|shut down/i.test(String(errMsg));
 }
 
 // Transient failures worth retrying: overload (503), rate limit (429),
@@ -210,20 +239,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //  - primary model gets 3 attempts (2s → 4s backoff) on transient errors
 //  - transient/missing-model errors then advance to the next model
 //  - auth errors fail fast (retrying won't help)
-async function callProvider(models, requester, args) {
+//  - v1.0.6 Y Round1: cap total time across retries to 90s so spinner never hangs forever
+export async function callProvider(models, requester, args) {
   let lastErr;
+  const start = Date.now();
+  const MAX_TOTAL_MS = 90000;
   for (let mi = 0; mi < models.length; mi++) {
     const attempts = mi === 0 ? 3 : 1; // backoff retries only on the primary model
     const waits = [0, 2000, 4000];
     for (let a = 0; a < attempts; a++) {
+      if (Date.now() - start > MAX_TOTAL_MS) {
+        throw new Error(`AI timeout — total time ${MAX_TOTAL_MS / 1000}s exceeded, dobara try karo`);
+      }
       if (waits[a]) await sleep(waits[a]);
       try {
         return await requester(models[mi], args);
       } catch (e) {
         lastErr = e;
         const msg = String(e?.message || '');
-        if (isRetryable(msg) && a < attempts - 1) continue; // wait + retry same model
-        if (isRetryable(msg) || looksLikeMissingModel(msg)) break; // next model
+        // timeout is retryable to next model/provider, but respect total cap
+        const timeoutLike = /timeout/i.test(msg);
+        if ((isRetryable(msg) || timeoutLike) && a < attempts - 1) continue; // wait + retry same model
+        if (isRetryable(msg) || looksLikeMissingModel(msg) || timeoutLike) break; // next model
         throw e; // hard error (bad key, bad request…) — no point continuing
       }
     }
@@ -242,6 +279,9 @@ async function callGroq(args) {
 // Plain-English translation of provider errors (FIX C: honest messages).
 function humanizeError(provider, errMsg) {
   const m = String(errMsg || '');
+  if (/timeout/i.test(m)) {
+    return `${provider} ne time liya — 45s timeout, dobara try karo`;
+  }
   if (/decommissioned|not found|does not exist|model_not_found/i.test(m)) {
     return `${provider} ka model retire ho gaya tha — naye build me fix ho gaya hai. App refresh karke try karo.`;
   }
@@ -327,34 +367,79 @@ export async function askAI({ prompt, system = '', json = false, temperature, no
   );
 }
 
-// Robust JSON extraction (LLMs love wrapping JSON in prose/fences)
+// Robust JSON extraction (LLMs love wrapping JSON in prose/fences) — v1.0.6 recovery: handles truncation, multiple fences, and recovers partial JSON
 function extractJSON(text) {
   if (typeof text !== 'string') return text;
   let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) t = fence[1].trim();
+
+  // Try multiple fence patterns
+  const fencePatterns = [
+    /```(?:json)?\s*([\s\S]*?)```/g,
+    /```\s*([\s\S]*?)```/g,
+  ];
+  for (const pat of fencePatterns) {
+    let m;
+    while ((m = pat.exec(t)) !== null) {
+      const candidate = m[1].trim();
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // try to extract JSON inside fence
+        const inner = candidate.slice(candidate.indexOf('{') >= 0 ? candidate.indexOf('{') : 0, candidate.lastIndexOf('}') + 1 || undefined);
+        try {
+          if (inner) return JSON.parse(inner);
+        } catch {}
+      }
+    }
+  }
+
+  // Direct parse
   try {
     return JSON.parse(t);
   } catch {
     /* keep digging */
   }
+
+  // Find first { or [ and try to parse progressively smaller slices to handle truncation
   const firstObj = t.indexOf('{');
   const firstArr = t.indexOf('[');
   let start = -1;
-  if (firstObj >= 0 && (firstArr < 0 || firstObj < firstArr)) start = firstObj;
-  else if (firstArr >= 0) start = firstArr;
+  let openCh = '{';
+  if (firstObj >= 0 && (firstArr < 0 || firstObj < firstArr)) {
+    start = firstObj;
+    openCh = '{';
+  } else if (firstArr >= 0) {
+    start = firstArr;
+    openCh = '[';
+  }
+
   if (start >= 0) {
-    const openCh = t[start];
     const closeCh = openCh === '{' ? '}' : ']';
-    const end = t.lastIndexOf(closeCh);
-    if (end > start) {
+    // Try last occurrence of closeCh
+    let end = t.lastIndexOf(closeCh);
+    while (end > start) {
+      const slice = t.slice(start, end + 1);
       try {
-        return JSON.parse(t.slice(start, end + 1));
+        return JSON.parse(slice);
       } catch {
-        /* ignore */
+        // try previous closeCh occurrence (handles extra trailing prose)
+        end = t.lastIndexOf(closeCh, end - 1);
+      }
+    }
+
+    // If still failing, it might be truncated — try to detect truncation and attempt repair for common cases
+    // For truncated arrays/objects, we can try to close open brackets
+    const truncatedSlice = t.slice(start);
+    // If it ends abruptly without closing, throw specific truncation error
+    if (truncatedSlice.length > 50 && !truncatedSlice.trim().endsWith(closeCh)) {
+      // Check if it's likely truncated (ends mid-string or mid-object)
+      const lastChars = truncatedSlice.slice(-100);
+      if (!lastChars.includes(closeCh) || truncatedSlice.split('{').length !== truncatedSlice.split('}').length) {
+        throw new AIUnavailableError('AI ka answer beech mein kat gaya (truncated). Dobara try karo — ab generation limit badh gaya hai!');
       }
     }
   }
+
   throw new AIUnavailableError('AI ka answer samajh nahi aaya. Dobara try karo!');
 }
 

@@ -18,10 +18,11 @@ import { ModalSheet } from '../../components/ui/ModalSheet';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
-import { seedSyllabusTrack } from '../../lib/starterData';
+import { infoAlert } from '../../lib/alert';
+import { seedSyllabusTrack, importPresetRows } from '../../lib/starterData';
 import { aiGenerateSyllabus, AIUnavailableError } from '../../lib/aiFeatures';
 import { TRACKS, pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI } from '../../data/syllabusData';
-import { SUBJECT_COLORS } from '../../config/constants';
+import { SUBJECT_COLORS, isArchivedRow, activeSyllabusRows } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { pct, subjectColor, nowIso } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
@@ -40,6 +41,9 @@ export function SyllabusScreen({ navigation }) {
   const [openSubject, setOpenSubject] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
+  // FIX-S S5 (PO decision 3): archived Class 10 history lives in its own
+  // COLLAPSIBLE section — never mixed into the active map, its counts or trophies
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiMsg, setAiMsg] = useState('');
   const [newSubject, setNewSubject] = useState('');
@@ -74,7 +78,22 @@ export function SyllabusScreen({ navigation }) {
   const onBack = useHubBack(navigation, 'StudyHub');
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const trackRows = useMemo(() => rows.filter((r) => rowTrack(r) === activeTrack), [rows, activeTrack]);
+  // FIX-S S5: ARCHIVED rows are history. They are filtered out of everything that
+  // drives progress, trophies, subject cards and the planner — only the archived
+  // section below shows them.
+  const trackRows = useMemo(
+    () => activeSyllabusRows(rows).filter((r) => rowTrack(r) === activeTrack),
+    [rows, activeTrack]
+  );
+  const archivedTrackRows = useMemo(
+    () => rows.filter((r) => isArchivedRow(r) && rowTrack(r) === activeTrack),
+    [rows, activeTrack]
+  );
+  const archivedBySubject = useMemo(() => {
+    const map = {};
+    for (const r of archivedTrackRows) (map[r.subject] = map[r.subject] || []).push(r);
+    return map;
+  }, [archivedTrackRows]);
 
   const bySubject = useMemo(() => {
     const map = {};
@@ -97,54 +116,56 @@ export function SyllabusScreen({ navigation }) {
     const subject = (newSubject || '').trim();
     const chapter = (newChapter || '').trim();
     if (!subject || !chapter) return;
-    await db.insert('syllabus', {
-      user_id: profile.id,
-      subject,
-      chapter,
-      topic: null,
-      subtopic: null,
-      track: activeTrack,
-      weightage: Math.max(1, Math.min(5, Number(newWeight) || 3)),
-      estimated_hours: Math.max(0.5, Number(newHours) || 4),
-      status: 'locked',
-      progress_percent: 0,
-      deadline: null,
-      completed_at: null,
-      created_at: nowIso(),
-    });
-    setNewChapter('');
-    setAddOpen(false);
-    await load();
+    try {
+      await db.insert('syllabus', {
+        user_id: profile.id,
+        subject,
+        chapter,
+        topic: null,
+        subtopic: null,
+        track: activeTrack,
+        weightage: Math.max(1, Math.min(5, Number(newWeight) || 3)),
+        estimated_hours: Math.max(0.5, Number(newHours) || 4),
+        status: 'locked',
+        progress_percent: 0,
+        deadline: null,
+        completed_at: null,
+        created_at: nowIso(),
+      });
+      setNewChapter('');
+      setAddOpen(false);
+      await load();
+    } catch (e) {
+      infoAlert('Syllabus save fail hua', e?.message || 'Chapter add nahi ho paya — dobara try karo');
+    }
   };
 
+  // FIX-S S5 (NEW Y note): the preset import is no longer screen-local. It lives in
+  // lib/starterData.importPresetRows so the promotion accept path and this screen
+  // dedupe IDENTICALLY — and so an ARCHIVED Class 10 row can never swallow a fresh
+  // Class 11 chapter that happens to share its subject::chapter name.
   const importPreset = async (preset, track) => {
-    const rowsToInsert = preset.rows.map((r) => ({
-      user_id: profile.id,
-      subject: r.subject,
-      chapter: r.chapter,
-      topic: null,
-      subtopic: null,
-      track,
-      weightage: r.weightage || 3,
-      estimated_hours: r.estimated_hours || 4,
-      status: 'locked',
-      progress_percent: 0,
-      deadline: null,
-      completed_at: null,
-      created_at: nowIso(),
-    }));
-    // avoid duplicate chapters for the same subject+track
-    const existing = new Set(rows.filter((r) => rowTrack(r) === track).map((r) => `${r.subject}::${r.chapter}`));
-    const fresh = rowsToInsert.filter((r) => !existing.has(`${r.subject}::${r.chapter}`));
-    if (fresh.length) await db.insertMany('syllabus', fresh);
-    setPresetOpen(false);
-    await load();
+    try {
+      const res = await importPresetRows(profile.id, preset, track, { existing: rows });
+      setPresetOpen(false);
+      await load();
+      setAiMsg(
+        res.inserted
+          ? `✅ ${res.inserted} chapter import hue — ${preset?.label || track}${res.skipped ? ` · ${res.skipped} duplicate skip` : ''}`
+          : `Sab ${res.skipped} chapter pehle se imported hain (archived rows duplicate nahi maane jaate).`
+      );
+    } catch (e) {
+      infoAlert('Syllabus import fail hua', e?.message || 'Preset import nahi ho paya — dobara try karo');
+    }
   };
 
-  // one-tap import of the student's OWN track (class-first!)
   const importMyTrack = async () => {
-    await seedSyllabusTrack(profile.id, profile || {}, activeTrack);
-    await load();
+    try {
+      await seedSyllabusTrack(profile.id, profile || {}, activeTrack);
+      await load();
+    } catch (e) {
+      infoAlert('Syllabus import fail hua', e?.message || 'My track import nahi ho paya');
+    }
   };
 
   const generateWithAI = async () => {
@@ -157,7 +178,10 @@ export function SyllabusScreen({ navigation }) {
         exam: activeTrack === 'exam' ? profile?.competitive_exam || '' : '',
         subjects: '',
       });
-      const existing = new Set(rows.map((r) => `${r.subject}::${r.chapter}`));
+      // FIX-S S5: archived rows never count as duplicates
+      const existing = new Set(
+        rows.filter((r) => rowTrack(r) === activeTrack && !isArchivedRow(r)).map((r) => `${r.subject}::${r.chapter}`)
+      );
       const fresh = gen
         .filter((r) => !existing.has(`${r.subject}::${r.chapter}`))
         .map((r) => ({
@@ -180,7 +204,9 @@ export function SyllabusScreen({ navigation }) {
       setPresetOpen(false);
       await load();
     } catch (e) {
-      setAiMsg(e instanceof AIUnavailableError ? e.message : 'AI syllabus nahi bana — presets try karo!');
+      const msg = e instanceof AIUnavailableError ? e.message : e?.message || 'AI syllabus nahi bana — presets try karo!';
+      setAiMsg(msg);
+      infoAlert('AI syllabus fail hua', msg);
     } finally {
       setAiBusy(false);
     }
@@ -191,7 +217,7 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
-  const trackMeta = TRACKS[activeTrack];
+  const trackMeta = TRACKS[activeTrack] || TRACKS.class;
   const trackDone = trackRows.filter((r) => r.status === 'completed').length;
 
   return (
@@ -211,9 +237,9 @@ export function SyllabusScreen({ navigation }) {
       {/* Track switcher — CLASS is the default map */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 10 }}>
         {availableTracks.map((t) => {
-          const meta = TRACKS[t];
+          const meta = TRACKS[t] || TRACKS.class;
           const active = activeTrack === t;
-          const count = rows.filter((r) => rowTrack(r) === t).length;
+          const count = rows.filter((r) => rowTrack(r) === t && !isArchivedRow(r)).length; // FIX-S S5
           return (
             <Pressable
               key={t}
@@ -252,6 +278,11 @@ export function SyllabusScreen({ navigation }) {
       </ScrollView>
 
       <View style={{ paddingHorizontal: 16 }}>
+        {aiMsg ? (
+          <Pressable onPress={() => setAiMsg('')} style={{ marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', lineHeight: 16 }}>{aiMsg}</Text>
+          </Pressable>
+        ) : null}
         <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginBottom: 10 }}>
           {activeTrack === 'class'
             ? 'Your class syllabus — the #1 priority. School ke exams isi se aayenge. 🏫'
@@ -268,10 +299,10 @@ export function SyllabusScreen({ navigation }) {
             title={`${trackMeta.label} khali hai`}
             subtitle={
               set[activeTrack]
-                ? `${set[activeTrack].label} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
+                ? `${(set[activeTrack].label || trackMeta.label)} import karo — one tap, ${set[activeTrack].rows.length} chapters.`
                 : 'Apna khud ka chapter add karo, ya AI se generate karao.'
             }
-            actionLabel={set[activeTrack] ? `Import ${set[activeTrack].label.split('·')[0].trim()}` : 'Add chapter'}
+            actionLabel={set[activeTrack] ? `Import ${(set[activeTrack].label || trackMeta.label).split('·')[0].trim()}` : 'Add chapter'}
             onAction={() => (set[activeTrack] ? importMyTrack() : setAddOpen(true))}
           />
         </Card>
@@ -330,6 +361,76 @@ export function SyllabusScreen({ navigation }) {
         })
       )}
 
+      {/* FIX-S S5 (PO decision 3): collapsible "Class 10 · Archived" — read-only
+          history. It is deliberately NOT part of trackRows, so progress bars,
+          trophy counts, deadlines and the planner all ignore it. */}
+      {archivedTrackRows.length ? (
+        <View style={{ marginBottom: 14 }}>
+          <Pressable
+            onPress={() => setArchivedOpen((o) => !o)}
+            style={({ pressed }) => ({
+              backgroundColor: '#F8FAFC',
+              borderWidth: 1,
+              borderColor: '#E2E8F0',
+              borderRadius: radius.lg,
+              padding: 14,
+              opacity: pressed ? 0.75 : 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+            })}
+          >
+            <Text style={{ fontSize: 18, marginRight: 10 }}>🗄️</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#64748B' }}>
+                Class 10 · Archived — {archivedTrackRows.length} chapters
+              </Text>
+              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', marginTop: 2, lineHeight: 16 }}>
+                Purana class map, history ki tarah safe. Progress, trophy, deadlines aur schedule par zero asar.
+              </Text>
+            </View>
+            <Ionicons name={archivedOpen ? 'chevron-up' : 'chevron-down'} size={20} color="#94A3B8" />
+          </Pressable>
+
+          {archivedOpen ? (
+            <View
+              style={{
+                marginTop: 8,
+                backgroundColor: '#FFFFFF',
+                borderWidth: 1,
+                borderColor: '#E2E8F0',
+                borderRadius: radius.lg,
+                padding: 12,
+              }}
+            >
+              {Object.entries(archivedBySubject).map(([subject, list]) => {
+                const done = list.filter((r) => r.status === 'completed').length;
+                return (
+                  <View key={subject} style={{ marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                      <View style={{ width: 4, height: 14, borderRadius: 2, backgroundColor: subjectColor(subject), marginRight: 8 }} />
+                      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#475569', flex: 1 }}>{subject}</Text>
+                      <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#94A3B8' }}>{done}/{list.length} conquered</Text>
+                    </View>
+                    {list.map((r) => (
+                      <View key={r.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, paddingLeft: 12 }}>
+                        <Text style={{ fontSize: 11, marginRight: 6 }}>{STATUS_ICON[r.status] || '🗄️'}</Text>
+                        <Text style={{ flex: 1, fontFamily: fonts.body, fontSize: 12, color: '#94A3B8' }}>{r.chapter}</Text>
+                        {r.progress_percent ? (
+                          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#CBD5E1' }}>{r.progress_percent}%</Text>
+                        ) : null}
+                      </View>
+                    ))}
+                  </View>
+                );
+              })}
+              <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#CBD5E1', marginTop: 4, lineHeight: 15 }}>
+                Archived rows delete nahi hote — ye tumhara record hai. Naya plan sirf active chapters se banta hai.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
       {/* Add chapter modal */}
       <ModalSheet visible={addOpen} onClose={() => setAddOpen(false)} title={`Add Chapter → ${trackMeta.label}`} mode="light">
         <Input label="Subject" value={newSubject} onChangeText={setNewSubject} placeholder="e.g. Physics" />
@@ -371,7 +472,7 @@ export function SyllabusScreen({ navigation }) {
           <Card mode="light" onPress={() => importPreset(set.class, 'class')} style={{ marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14.5, color: '#1E293B' }}>{set.class.label}</Text>
             <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginTop: 3 }}>
-              {set.class.rows.length} chapters · {rows.filter((r) => rowTrack(r) === 'class').length ? 'already imported — duplicates skipped' : 'one tap'}
+              {set.class.rows.length} chapters · {rows.filter((r) => rowTrack(r) === 'class' && !isArchivedRow(r)).length ? 'already imported — duplicates skipped' : 'one tap'}
             </Text>
           </Card>
         ) : null}
@@ -473,7 +574,7 @@ function ChapterRow({ row, onOpen, onDelete }) {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text
-            numberOfLines={1}
+            numberOfLines={2}
             style={{
               fontFamily: fonts.bodyMedium,
               fontSize: 14,

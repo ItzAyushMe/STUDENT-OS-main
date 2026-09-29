@@ -91,6 +91,7 @@ export function streakOnActivity(profile, today = todayStr()) {
 // getProfile() (optional) returns the freshest profile — used by GameContext
 // to avoid the stale-closure race where two rapid awards both computed from
 // the same pre-award total_xp (audit HIGH-1).
+// NEW X R3: countActivity false for reversals, floor at 0, allow negatives
 export async function awardXPToProfile(deps, code, opts = {}) {
   const { profile: maybeStale, updateProfile, insert, getProfile } = deps;
   const profile = (typeof getProfile === 'function' ? getProfile() : null) || maybeStale;
@@ -101,7 +102,9 @@ export async function awardXPToProfile(deps, code, opts = {}) {
   if (!gained && rule.perMinute && opts.minutes) {
     gained = Math.round(rule.perMinute * opts.minutes);
   }
-  if (!gained) return null;
+  // R3: allow 0? No — but allow negative (negatives are truthy, !-10 === false)
+  // So we check gained === 0 explicitly, not !gained
+  if (gained === 0) return null;
 
   await insert({
     user_id: profile.id,
@@ -113,32 +116,53 @@ export async function awardXPToProfile(deps, code, opts = {}) {
     created_at: nowIsoStr(),
   });
 
-  const total = (profile.total_xp || 0) + gained;
+  // R3: floor at 0
+  const total = Math.max(0, (profile.total_xp || 0) + gained);
   const level = levelForXp(total);
   const tier = tierForXp(total).name;
-  const streak = streakOnActivity(profile);
 
-  await updateProfile({
-    total_xp: total,
-    level,
-    tier,
-    current_streak: streak.current,
-    longest_streak: streak.longest,
-    streak_freezes: streak.freezes,
-    last_active_date: todayStr(),
-  });
-
-  return {
-    code,
-    gained,
-    total,
-    level,
-    tier,
-    leveledUp: level > (profile.level || 1),
-    streak,
-    freezeUsed: streak.freezeUsed,
-    freezeEarned: streak.freezeEarned,
-  };
+  // R3: countActivity false for reversals — skip streak update
+  const countActivity = opts.countActivity !== false;
+  if (countActivity) {
+    const streak = streakOnActivity(profile);
+    await updateProfile({
+      total_xp: total,
+      level,
+      tier,
+      current_streak: streak.current,
+      longest_streak: streak.longest,
+      streak_freezes: streak.freezes,
+      last_active_date: todayStr(),
+    });
+    return {
+      code,
+      gained,
+      total,
+      level,
+      tier,
+      leveledUp: level > (profile.level || 1),
+      streak,
+      freezeUsed: streak.freezeUsed,
+      freezeEarned: streak.freezeEarned,
+    };
+  } else {
+    await updateProfile({
+      total_xp: total,
+      level,
+      tier,
+    });
+    return {
+      code,
+      gained,
+      total,
+      level,
+      tier,
+      leveledUp: level > (profile.level || 1),
+      streak: null,
+      freezeUsed: false,
+      freezeEarned: false,
+    };
+  }
 }
 
 function nowIsoStr() {

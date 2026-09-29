@@ -17,10 +17,13 @@ import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import { Input } from '../../components/ui/Input';
 import { Loading } from '../../components/ui/EmptyState';
 import { MathText } from '../../components/ui/MathText';
+// FIX-G: stem resolution + bullet/bold answer rendering (pure, unit-tested)
+import { stemOf, toBullets, parseBoldSegments } from '../../lib/testGenKit';
 import { db } from '../../lib/db';
 import { useHubBack } from '../../hooks/useHubBack';
 import { aiGenerateTest, aiGenerateQuestionBank, aiGenerateMindMap, AIUnavailableError } from '../../lib/aiFeatures';
 import { fonts, radius } from '../../config/theme';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const MODES = [
   { key: 'test', label: '📝 Test (2 sets)' },
@@ -31,6 +34,43 @@ const MODES = [
 // ---------- printable HTML export (web) ----------
 function escapeHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function getAnswerDisplay(q) {
+  if (q?.answer_text) return q.answer_text;
+  if (Array.isArray(q?.options) && typeof q?.answer === 'number' && q.options[q.answer]) return q.options[q.answer];
+  return q?.answer ?? '—';
+}
+
+// FIX-G3: model answers now arrive as bullet points with **bold** keywords.
+// Printed/shared exports must show PLAIN text (no literal asterisks).
+function plainAnswerText(q) {
+  const bullets = toBullets(String(getAnswerDisplay(q) ?? '—'));
+  return bullets.map((b) => String(b).replace(/\*\*/g, '').trim()).filter(Boolean).join(' • ') || '—';
+}
+
+// FIX-G3: on-screen answer = real bullets + real bold segments.
+function AnswerText({ q, why, showWhy = true }) {
+  const bullets = toBullets(String(getAnswerDisplay(q) ?? '—'));
+  return (
+    <View style={{ marginTop: 3 }}>
+      {bullets.map((line, i) => (
+        <Text key={i} style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', lineHeight: 16 }}>
+          {bullets.length > 1 ? '• ' : ''}
+          {parseBoldSegments(line).map((seg, si) => (
+            <Text key={si} style={seg.bold ? { fontFamily: fonts.bodySemiBold, fontWeight: '700' } : undefined}>
+              {seg.text}
+            </Text>
+          ))}
+        </Text>
+      ))}
+      {showWhy && why ? (
+        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+          Why: {String(why)}
+        </Text>
+      ) : null}
+    </View>
+  );
 }
 
 function printHtml(title, bodyHtml) {
@@ -92,12 +132,30 @@ export function TestBuilderScreen({ navigation }) {
   const [result, setResult] = useState(null); // { kind, data }
   const [setTab, setSetTab] = useState('A');
   const [showAnswers, setShowAnswers] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [stage, setStage] = useState('');
 
+  // FIX-F6: silent failure audit — load with visible error
   const load = useCallback(async () => {
     if (!profile?.id) return;
-    const data = await db.list('syllabus', { eq: { user_id: profile.id } });
-    setRows(data.filter((r) => r.status !== 'completed'));
+    try {
+      const data = await db.list('syllabus', { eq: { user_id: profile.id } });
+      // FIX-S S5: a test paper is built from the ACTIVE map — archived chapters out
+      setRows(activeSyllabusRows(data).filter((r) => r.status !== 'completed'));
+    } catch (e) {
+      console.warn('[F6] TestBuilder load failed', e?.message);
+      setError(e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Syllabus load nahi ho paya — dobara try karo');
+    }
   }, [profile?.id]);
+
+  // NEW X R5: honest progress — elapsed seconds + stage
+  useEffect(() => {
+    if (!busy) { setElapsed(0); setStage(''); return; }
+    setElapsed(0);
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start)/1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const subjects = useMemo(
@@ -125,8 +183,10 @@ export function TestBuilderScreen({ navigation }) {
     setError('');
     setResult(null);
     setBusy(true);
+    setStage(mode === 'test' ? 'Paper bana raha hai…' : mode === 'bank' ? 'Question bank bana raha hai…' : 'Mind map bana raha hai…');
     try {
       if (mode === 'test') {
+        setStage('Professor Byte soch raha hai… Set A/B bana raha hai');
         const data = await aiGenerateTest({
           profile,
           chapters: pickedChapters,
@@ -140,6 +200,7 @@ export function TestBuilderScreen({ navigation }) {
         setResult({ kind: 'test', data });
         setSetTab('A');
       } else if (mode === 'bank') {
+        setStage(`Professor Byte soch raha hai… batch 1/${Math.ceil(num(count,20)/20)}`);
         const data = await aiGenerateQuestionBank({
           profile,
           chapters: pickedChapters,
@@ -150,7 +211,8 @@ export function TestBuilderScreen({ navigation }) {
         if (!data?.questions?.length) throw new Error('AI ne khaali bank bheja — dobara try karo.');
         setResult({ kind: 'bank', data });
       } else {
-        const data = await aiGenerateMindMap({ profile, chapters: pickedChapters });
+        setStage('Professor Byte soch raha hai… mind map branches bana raha hai');
+        const data = await aiGenerateMindMap({ profile, chapters: pickedChapters, difficultyPct: difficulty });
         if (!data?.chapters?.length) throw new Error('Mind map nahi bana — dobara try karo.');
         setResult({ kind: 'map', data });
       }
@@ -158,12 +220,13 @@ export function TestBuilderScreen({ navigation }) {
       setError(e instanceof AIUnavailableError ? e.message : e?.message || 'Generate nahi ho paya. Dobara try karo.');
     } finally {
       setBusy(false);
+      setStage('');
     }
   };
 
   // ---------- exports ----------
   const qHtml = (q, i) => `
-    <div class="q"><b>Q${i}.</b> ${escapeHtml(q.q)}
+    <div class="q"><b>Q${i}.</b> ${escapeHtml(stemOf(q))}
       ${q.options?.length ? `<div class="opts">${q.options.map((o, j) => `<div>(${String.fromCharCode(97 + j)}) ${escapeHtml(o)}</div>`).join('')}</div>` : ''}
     </div>`;
 
@@ -174,10 +237,10 @@ export function TestBuilderScreen({ navigation }) {
         <h1>StudentOS — ${escapeHtml(profile?.class_level || '')} Test · Set ${escapeHtml(s.set)}</h1>
         <div class="meta">Time: ${escapeHtml(timeMinutes || '—')} min · Max marks: ${escapeHtml(totalMarks || '—')} · Difficulty: ${difficulty}%</div>
         ${(s.sections || []).map((sec) => `
-          <h3>${escapeHtml(sec.label || sec.type)}</h3>
+          <h3>${escapeHtml((sec.label && String(sec.label).trim()) ? sec.label : (sec.type || 'Section'))}</h3>
           ${(sec.questions || []).map((q, i) => qHtml(q, i + 1)).join('')}`).join('')}
         <div class="ans"><b>Answer Key — Set ${escapeHtml(s.set)}</b>
-          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(q.answer ?? '—')}</div>`).join('')}
+          ${(s.sections || []).flatMap((sec) => sec.questions || []).map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(plainAnswerText(q))}</div>`).join('')}
         </div>
       </div>`).join('');
     printHtml('StudentOS Test', body);
@@ -191,7 +254,7 @@ export function TestBuilderScreen({ navigation }) {
       <h2>Questions</h2>
       ${r.questions.map((q, i) => qHtml(q, i + 1)).join('')}
       <div class="ans"><b>Answers</b>
-        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(q.answer ?? '—')}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
+        ${r.questions.map((q, i) => `<div><b>A${i + 1}.</b> ${escapeHtml(plainAnswerText(q))}${q.why ? ` — ${escapeHtml(q.why)}` : ''}</div>`).join('')}
       </div>`;
     printHtml('StudentOS Question Bank', body);
   };
@@ -225,11 +288,11 @@ export function TestBuilderScreen({ navigation }) {
         lines.push(`--- SET ${s.set} ---`);
         (s.sections || []).forEach((sec) => {
           lines.push(sec.label || sec.type);
-          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}${q.answer != null ? `\n   Ans: ${q.answer}` : ''}`));
+          (sec.questions || []).forEach((q, i) => lines.push(`Q${i + 1}. ${stemOf(q)}${q.answer != null ? `\n   Ans: ${plainAnswerText(q)}` : ''}`));
         });
       });
     } else if (result.kind === 'bank') {
-      result.data.questions.forEach((q, i) => lines.push(`Q${i + 1}. ${q.q}\n   Ans: ${q.answer}`));
+      result.data.questions.forEach((q, i) => lines.push(`Q${i + 1}. ${stemOf(q)}\n   Ans: ${plainAnswerText(q)}`));
     } else {
       const walk = (n, d) => { lines.push(`${'  '.repeat(d)}• ${n.label}`); (n.children || []).forEach((c) => walk(c, d + 1)); };
       result.data.chapters.forEach((c) => { lines.push(`\n== ${c.chapter} ==`); walk(c.root, 0); });
@@ -323,7 +386,7 @@ export function TestBuilderScreen({ navigation }) {
           {shownRows.map((r) => (
             <Chip
               key={r.id}
-              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}`.slice(0, 42)}
+              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}`}
               mode="light"
               selected={picked.includes(r.id)}
               onPress={() => toggleChapter(r.id)}
@@ -335,6 +398,14 @@ export function TestBuilderScreen({ navigation }) {
             </Text>
           ) : null}
         </View>
+        {picked.length ? (
+          <View style={{ backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', borderRadius: 10, padding: 10, marginTop: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#5B21B6', marginBottom: 4 }}>Selected chapters (full names):</Text>
+            {pickedChapters.map((c) => (
+              <Text key={c.id} style={{ fontFamily: fonts.body, fontSize: 12, color: '#334155', lineHeight: 17, marginBottom: 2 }} selectable>• {c.subject} — {c.chapter}</Text>
+            ))}
+          </View>
+        ) : null}
       </Card>
 
       <Button
@@ -347,7 +418,14 @@ export function TestBuilderScreen({ navigation }) {
         style={{ marginBottom: 12 }}
       />
 
-      {busy ? <Loading mode="light" text="Professor Byte paper bana rahe hain…" /> : null}
+      {busy ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#6D28D9', textAlign: 'center' }}>
+            Professor Byte soch raha hai… {elapsed}s{stage ? ` · ${stage}` : ''}{mode==='bank' ? ` · batch` : ''}
+          </Text>
+          <Loading mode="light" text="" />
+        </Card>
+      ) : null}
 
       {error ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
@@ -374,15 +452,20 @@ export function TestBuilderScreen({ navigation }) {
               <Chip key={s} label={`Set ${s}`} mode="light" selected={setTab === s} onPress={() => setSetTab(s)} />
             ))}
           </View>
+          {result.data._skipped > 0 ? (
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#B45309', marginBottom: 8 }}>
+              ⚠️ {result.data._skipped} malformed questions skipped (empty stem) — dobara generate karo.
+            </Text>
+          ) : null}
           {(result.data.sets.find((s) => s.set === setTab)?.sections || []).map((sec, si) => (
             <View key={si} style={{ marginBottom: 12 }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#6D28D9', marginBottom: 6 }}>
-                {sec.label || sec.type}
+                {(sec.label && String(sec.label).trim()) ? sec.label : (sec.type ? String(sec.type).toUpperCase() : 'Section')}
               </Text>
               {(sec.questions || []).map((q, qi) => (
                 <View key={qi} style={{ marginBottom: 8 }}>
                   <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', lineHeight: 18 }}>
-                    Q{qi + 1}. <MathText value={q.q} />
+                    Q{qi + 1}. <MathText>{stemOf(q)}</MathText>
                   </Text>
                   {q.options?.length ? (
                     <View style={{ marginLeft: 14, marginTop: 3 }}>
@@ -393,11 +476,7 @@ export function TestBuilderScreen({ navigation }) {
                       ))}
                     </View>
                   ) : null}
-                  {showAnswers ? (
-                    <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 3 }}>
-                      Ans: {String(q.answer ?? '—')}
-                    </Text>
-                  ) : null}
+                  {showAnswers ? <AnswerText q={q} /> : null}
                 </View>
               ))}
             </View>
@@ -416,13 +495,23 @@ export function TestBuilderScreen({ navigation }) {
 
       {result?.kind === 'bank' ? (
         <Card mode="light" style={{ marginBottom: 14 }}>
+          {result.data._banner ? (
+            <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
+            </View>
+          ) : null}
+          {result.data._skipped > 0 ? (
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11.5, color: '#B45309', marginBottom: 8 }}>
+              ⚠️ {result.data._skipped} malformed questions skipped (empty stem) — dobara generate karo.
+            </Text>
+          ) : null}
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginBottom: 10 }}>
-            Question Bank — {result.data.questions.length} questions
+            Question Bank — {result.data.questions.length} questions{result.data._partial ? ' (partial)' : ''}
           </Text>
           {result.data.questions.map((q, qi) => (
             <View key={qi} style={{ marginBottom: 9 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', lineHeight: 18 }}>
-                Q{qi + 1} [{String(q.type || 'q').toUpperCase()}]. <MathText value={q.q} />
+                Q{qi + 1} [{String(q.type || 'q').toUpperCase()}]. <MathText>{stemOf(q)}</MathText>
               </Text>
               {q.options?.length ? (
                 <View style={{ marginLeft: 14, marginTop: 2 }}>
@@ -433,9 +522,7 @@ export function TestBuilderScreen({ navigation }) {
                   ))}
                 </View>
               ) : null}
-              <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#0891B2', marginTop: 2 }}>
-                Ans: {String(q.answer ?? '—')}{q.why ? ` — ${q.why}` : ''}
-              </Text>
+              <AnswerText q={q} why={q.why} />
             </View>
           ))}
           {result.data.weakSpots ? (
@@ -455,6 +542,11 @@ export function TestBuilderScreen({ navigation }) {
           <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', marginBottom: 10 }}>
             Mind Maps — {result.data.chapters.length} chapter{result.data.chapters.length > 1 ? 's' : ''}
           </Text>
+          {result.data._banner ? (
+            <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+              <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
+            </View>
+          ) : null}
           {result.data.chapters.map((c, ci) => (
             <View key={ci} style={{ marginBottom: 14 }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#6D28D9', marginBottom: 6 }}>
@@ -474,12 +566,15 @@ export function TestBuilderScreen({ navigation }) {
 }
 
 function MapNode({ node, depth }) {
+  if (!node) return null;
+  const label = node.label || node.name || node.text || '';
+  if (!label) return null;
   const palette = ['#7C3AED', '#0891B2', '#F59E0B', '#10B981', '#EF4444', '#6366F1'];
   const color = palette[depth % palette.length];
   return (
     <View style={{ marginLeft: depth ? 14 : 0, borderLeftWidth: depth ? 1.5 : 0, borderLeftColor: '#E2E8F0', paddingLeft: depth ? 10 : 0, marginTop: 4 }}>
       <Text style={{ fontFamily: fonts.bodyMedium, fontSize: depth === 0 ? 13 : 12, color: depth === 0 ? color : '#334155' }}>
-        {depth === 0 ? '⭐ ' : '• '}{node.label}
+        {depth === 0 ? '⭐ ' : '• '}{label}
       </Text>
       {(node.children || []).map((c, i) => (
         <MapNode key={i} node={c} depth={depth + 1} />

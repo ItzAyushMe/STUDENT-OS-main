@@ -23,6 +23,7 @@ import { aiStatus, isOnline } from '../../lib/aiService';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, fmtClock, nowIso, seededShuffle } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
+import { activeSyllabusRows } from '../../config/constants'; // FIX-S S5
 
 const MODES = {
   quick: { label: 'Quick Quiz', count: 5, icon: '⚡', hint: '5 questions, warm-up' },
@@ -38,6 +39,27 @@ export function QuizScreen({ navigation, route }) {
   const [mode, setMode] = useState(route?.params?.mode || 'quick');
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState(route?.params?.subject || 'Mixed');
+
+// v1.0.6 K + Y audit: sync route.params safely without resetting active quiz or results
+  // A: new quiz with different subject/mode → apply when in setup
+  // B: active quiz or results → must NOT reset
+  // C: intentional config change → setup (only from setup)
+  useEffect(() => {
+    // Only sync when configuring a new quiz (setup phase). Never touch playing or results.
+    if (phase !== 'setup') return;
+    const newMode = route?.params?.mode;
+    const newSubject = route?.params?.subject;
+    const hasNew = newMode || newSubject || route?.params?.topic;
+    if (!hasNew) return;
+    if (newMode && newMode !== mode) {
+      setMode(newMode);
+    }
+    if (newSubject && newSubject !== subject) {
+      setSubject(newSubject);
+    }
+    // Already in setup, so no setPhase needed
+  }, [route?.params?.mode, route?.params?.subject, route?.params?.topic, phase]);
+
   const [questions, setQuestions] = useState([]);
   const [qIndex, setQIndex] = useState(0);
   const [selected, setSelected] = useState(null);
@@ -54,7 +76,8 @@ export function QuizScreen({ navigation, route }) {
     useCallback(() => {
       if (!profile?.id) return;
       db.list('syllabus', { eq: { user_id: profile.id } }).then((rows) => {
-        setSubjects([...new Set(rows.map((r) => r.subject))]);
+        // FIX-S S5: quizzes are built from the ACTIVE map only
+        setSubjects([...new Set(activeSyllabusRows(rows).map((r) => r.subject))]);
       });
     }, [profile?.id])
   );
@@ -67,14 +90,14 @@ export function QuizScreen({ navigation, route }) {
 
   // ---------- question generation (AI first, offline fallback) ----------
   const buildQuestions = async () => {
-    const cfg = MODES[mode];
+    const cfg = MODES[mode] || MODES.quick;
     let qs = [];
     if (mode === 'daily') {
       // AI first (class-aware), static arena bank as offline fallback
       const status = aiStatus();
       if (status.anyConfigured && (await isOnline())) {
         try {
-          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const syllabusRows = activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })); // FIX-S S5
           const chapters = syllabusRows.slice(0, 60).map((r) => r.chapter);
           const aiQs = await aiGenerateQuiz({
             subject: '',
@@ -96,7 +119,7 @@ export function QuizScreen({ navigation, route }) {
       if (status.anyConfigured && (await isOnline())) {
         try {
           // pull the student's OWN syllabus chapters for this subject
-          const syllabusRows = await db.list('syllabus', { eq: { user_id: profile.id } });
+          const syllabusRows = activeSyllabusRows(await db.list('syllabus', { eq: { user_id: profile.id } })); // FIX-S S5
           const trackRows = syllabusRows.filter(
             (r) => !r.track || r.track === 'class' || r.track === 'olympiad' || r.track === 'exam'
           );
@@ -210,7 +233,8 @@ export function QuizScreen({ navigation, route }) {
     } else {
       const base = mode === 'boss' ? 40 : 20;
       xp = base;
-      await awardXP('QUIZ_COMPLETE', { amount: base, label: MODES[mode].label });
+      const modeMeta = MODES[mode] || MODES.quick;
+      await awardXP('QUIZ_COMPLETE', { amount: base, label: modeMeta.label });
       if (accuracy >= 90) {
         xp += 50;
         await awardXP('QUIZ_EXCELLENT');
@@ -271,7 +295,7 @@ export function QuizScreen({ navigation, route }) {
         </Card>
 
         <Button
-          title={`Start ${MODES[mode].label} 🚀`}
+          title={`Start ${(MODES[mode] || MODES.quick).label} 🚀`}
           mode="light"
           size="lg"
           loading={loading}
@@ -285,9 +309,10 @@ export function QuizScreen({ navigation, route }) {
   // ---------------- PLAYING ----------------
   if (phase === 'playing') {
     const q = questions[qIndex];
+    const modeLabel = (MODES[mode] || MODES.quick).label;
     return (
       <Screen mode="light">
-        <ScreenHeader title={`${MODES[mode].label}`} subtitle={`Q${qIndex + 1} of ${questions.length} · ${fmtClock(elapsed)}`} onBack={() => setPhase('setup')} />
+        <ScreenHeader title={`${modeLabel}`} subtitle={`Q${qIndex + 1} of ${questions.length} · ${fmtClock(elapsed)}`} onBack={() => setPhase('setup')} />
         <ProgressBar progress={(qIndex + (selected != null ? 1 : 0)) / questions.length} mode="light" color="#6D28D9" style={{ marginBottom: 18 }} />
         <Card mode="light" style={{ marginBottom: 18, padding: 18 }}>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#6D28D9', letterSpacing: 1, marginBottom: 10 }}>
@@ -368,7 +393,7 @@ export function QuizScreen({ navigation, route }) {
   return (
     <Screen mode="light">
       <Confetti trigger={confetti} origin={{ x: '50%', y: '22%' }} />
-      <ScreenHeader title="Quiz Results" subtitle={MODES[mode].label} onBack={onBack} />
+      <ScreenHeader title="Quiz Results" subtitle={(MODES[mode] || MODES.quick).label} onBack={onBack} />
       <Card mode="light" style={{ alignItems: 'center', marginBottom: 14 }}>
         <Text style={{ fontSize: 44 }}>{r.accuracy >= 90 ? '🏆' : r.accuracy >= 70 ? '🔥' : r.accuracy >= 50 ? '🙂' : '🌱'}</Text>
         <Text style={{ fontFamily: fonts.bodyBold, fontSize: 40, color: r.accuracy >= 70 ? '#059669' : '#D97706', marginTop: 8 }}>
