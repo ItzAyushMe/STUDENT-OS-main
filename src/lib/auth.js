@@ -8,6 +8,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as WebBrowser from 'expo-web-browser';
 import { supabase, isSupabaseConfigured, SUPABASE_URL } from './supabase';
 import { uuid } from './utils';
+// FIX-AUTH (RC2): the native OAuth redirect delivers tokens in the URL
+// FRAGMENT (#access_token=…) — this parser reads ?query AND #fragment.
+import { parseOAuthParams } from './oauthParams';
 
 const SESSION_KEY = 'sos.session';
 const LOCAL_USERS_KEY = 'sos.local.users';
@@ -24,6 +27,9 @@ const readJson = async (key) => {
 };
 const writeJson = async (key, val) => AsyncStorage.setItem(key, JSON.stringify(val));
 
+// FIX-AUTH: superseded by parseOAuthParams (below in ./oauthParams) for the
+// OAuth redirect — this query-only parser drops #fragment params. Kept, not
+// deleted, per the round's remove-nothing rule.
 function parseQueryParams(url) {
   const out = {};
   try {
@@ -152,7 +158,7 @@ export const authService = {
     if (result.type !== 'success' || !result.url) {
       throw new Error('Google sign-in cancel ho gaya.');
     }
-    const params = parseQueryParams(result.url);
+    const params = parseOAuthParams(result.url); // FIX-AUTH (RC2): reads ?query AND #fragment
     if (params.access_token && params.refresh_token) {
       const { error } = await supabase.auth.setSession({
         access_token: params.access_token,
@@ -166,7 +172,9 @@ export const authService = {
       await writeJson(SESSION_KEY, session);
       return session;
     }
-    throw new Error('Google sign-in failed. Check the redirect URLs in your Supabase config.');
+    // FIX-AUTH: honest-error improvement — surface GoTrue's error_description
+    // when the redirect carried one (e.g. an unallowlisted redirect_to).
+    throw new Error(`Google sign-in failed. Check the redirect URLs in your Supabase config.${params.error_description ? ` (${params.error_description})` : ''}`);
   },
 
   // ---- guest / instant play (local mode) ----

@@ -4222,6 +4222,139 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedPB2.length, 0, `FIX-BYTE2: ${failedPB2.length} check(s) failed -> ${failedPB2.map((f) => f.id).join(', ')}`);
 }
 
+// ---------- FIX-AUTH: Google sign-in on Android + standalone (no-Metro) APK ----------
+// Audit RC2 (token parser cannot read #fragment) is proven fixed here; RC1 is a
+// PO-executed Supabase dashboard config gate and RC3 is the PO-executed EAS
+// build — both are DEVICE/PO-RUNTIME and asserted here only as config-file
+// probes (OA3). Red-before: at the pre-commit tip oauthParams.js does not
+// exist, auth.js still calls parseQueryParams, and app.json/eas.json lack the
+// EAS config.
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+  // recursive walk of src/ collecting .js sources (for the no-localhost probe)
+  const walkJs = (dir) => {
+    const out = [];
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) out.push(...walkJs(p));
+      else if (ent.isFile() && ent.name.endsWith('.js')) out.push(p);
+    }
+    return out;
+  };
+
+  // imported dynamically so a missing module is a recorded failure, not a suite crash
+  let OA = null; let oaErr = '';
+  try { OA = await import('./../src/lib/oauthParams.js'); }
+  catch (e) { oaErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const needsOA = () => assert.ok(OA, `oauthParams.js import failed: ${oaErr}`);
+
+  // ---------- OA1: parseOAuthParams behaviour (RC2) ----------
+  check('OA1', 'parseOAuthParams: fragment-only implicit response yields access_token/refresh_token/expires_in; ?code= query yields code; mixed query+fragment parses BOTH (fragment wins duplicates); values percent-decoded (+ = space); null/junk/empty/"not a url" -> {} and NEVER throws', () => {
+    needsOA();
+    const p = OA.parseOAuthParams;
+    // the exact implicit-flow shape GoTrue returns without PKCE (audit RC2)
+    const frag = p('studentos://auth-callback#access_token=abc123&refresh_token=def456&expires_in=3600&token_type=bearer');
+    assert.equal(frag.access_token, 'abc123', 'access_token read from the FRAGMENT (the bug this round fixes)');
+    assert.equal(frag.refresh_token, 'def456');
+    assert.equal(frag.expires_in, '3600');
+    assert.equal(frag.token_type, 'bearer');
+    // query-shaped responses still work
+    assert.equal(p('studentos://auth-callback?code=xyz').code, 'xyz', '?code= query parsed (future PKCE path needs no parser change)');
+    // mixed: both sides land in one object; the fragment wins duplicate keys
+    const mixed = p('https://ref.supabase.co/auth/v1/callback?code=abc#access_token=tok&refresh_token=r');
+    assert.equal(mixed.code, 'abc'); assert.equal(mixed.access_token, 'tok'); assert.equal(mixed.refresh_token, 'r');
+    const dup = p('s://cb?a=1#access_token=FRAG&a=2');
+    assert.equal(dup.a, '2', 'fragment values win (that is where implicit tokens live)');
+    assert.equal(dup.access_token, 'FRAG');
+    // error responses are captured for the honest-error message
+    const err = p('studentos://auth-callback#error=server_error&error_description=bad%20thing+here');
+    assert.equal(err.error, 'server_error');
+    assert.equal(err.error_description, 'bad thing here', 'percent-decoding AND + -> space');
+    // totality: junk never throws, always an object
+    for (const junk of [null, undefined, '', 'not a url', 42, {}, [], 'studentos://auth-callback', '#&&&=', '?', '##', '%E0%A4%A']) {
+      const r = p(junk);
+      assert.ok(r && typeof r === 'object' && !Array.isArray(r), `parseOAuthParams(${JSON.stringify(junk)}) -> object`);
+    }
+    assert.deepEqual(p(null), {}); assert.deepEqual(p('not a url'), {}); assert.deepEqual(p('studentos://auth-callback'), {}, 'a callback with no params -> {}');
+    // malformed percent escapes degrade to raw values instead of throwing
+    assert.equal(p('#a=%E0%A4%A').a, '%E0%A4%A', 'undecodable escape kept raw, no throw');
+  });
+
+  // ---------- OA2: auth.js wiring probe (native branch only; web branch untouched) ----------
+  check('OA2', '[wiring probe — DEVICE QA items 1-9 are PO-side on the built APK] auth.js native branch now parses via parseOAuthParams(result.url) and keeps the audited flow shape: studentos://auth-callback, openAuthSessionAsync(authUrl, redirectTo), setSession->getSession->persist chain, cancel path, web branch on window.location.origin; the superseded parser is kept (remove-nothing); NO localhost literal anywhere in src/', () => {
+    needsOA();
+    const authSrc = safeRead('src/lib/auth.js');
+    assert.ok(authSrc.length > 1000, 'auth.js was read');
+    // the RC2 fix
+    assert.ok(authSrc.includes("import { parseOAuthParams } from './oauthParams'"), 'the pure parser is imported');
+    assert.ok(authSrc.includes('const params = parseOAuthParams(result.url);'), 'the native branch parses through parseOAuthParams');
+    assert.ok(!authSrc.includes('parseQueryParams(result.url)'), 'the query-only parser is no longer called on the redirect');
+    assert.ok(authSrc.includes('function parseQueryParams'), 'the superseded parser is KEPT, not deleted (remove-nothing rule)');
+    // the audited flow shape survives
+    assert.ok(authSrc.includes("const redirectTo = 'studentos://auth-callback'"), 'the custom-scheme redirect is unchanged');
+    assert.ok(authSrc.includes('WebBrowser.openAuthSessionAsync(authUrl, redirectTo)'), 'openAuthSessionAsync call unchanged');
+    assert.ok(authSrc.includes('/auth/v1/authorize?provider=google&redirect_to='), 'the GoTrue authorize URL is unchanged');
+    const iSet = authSrc.indexOf('supabase.auth.setSession({');
+    const iGet = authSrc.indexOf('supabase.auth.getSession()', iSet);
+    const iWrite = authSrc.indexOf('writeJson(SESSION_KEY, session)', iSet);
+    assert.ok(iSet >= 0 && iGet > iSet && iWrite > iGet, 'setSession -> getSession -> persist chain intact, in order');
+    assert.ok(authSrc.includes("result.type !== 'success'"), 'the cancel path survives');
+    assert.ok(authSrc.includes('Google sign-in cancel ho gaya.'), 'cancel message untouched (native-branch-only round; copy sweeps are separate PO decisions)');
+    // honest-error improvement (optional per handoff, implemented)
+    assert.ok(/params\.error_description \? ` \(\$\{params\.error_description\}\)` : ''/.test(authSrc), 'GoTrue error_description is surfaced in the final failure message');
+    // web branch untouched
+    assert.ok(authSrc.includes('redirectTo: window.location.origin'), 'the web Google flow still uses the page origin (detectSessionInUrl pickup)');
+    assert.ok(authSrc.includes("Platform.OS === 'web'"), 'the web/native split is unchanged');
+    // RC1 evidence: localhost can ONLY come from the Supabase dashboard — never from code
+    const srcFiles = walkJs(path.join(__dirname, '..', 'src'));
+    assert.ok(srcFiles.length > 30, `src/ walked (${srcFiles.length} files)`);
+    for (const f of srcFiles) {
+      const body = fs.readFileSync(f, 'utf8');
+      assert.ok(!body.includes('localhost'), `${path.relative(path.join(__dirname, '..'), f)} contains a localhost literal`);
+    }
+  });
+
+  // ---------- OA3: EAS config probes (RC3 — the build itself is PO-executed) ----------
+  check('OA3', '[config-file probe — eas env:create + eas build are PO-EXECUTED, never by NEW X] app.json carries the EXISTING EAS projectId (no re-init) and keeps scheme studentos; eas.json preview profile = internal distribution + android buildType apk with NO developmentClient anywhere and NO development profile; ZERO dependency changes (no expo-dev-client / expo-auth-session / google-signin; expo-web-browser + expo-linking already present)', () => {
+    needsOA();
+    const app = JSON.parse(safeRead('app.json'));
+    assert.equal(app.expo.extra.eas.projectId, 'c3d81764-bd95-4478-adbc-7a8be8f22e3a', 'the SAME project id registered at recovery 0d1d072 — never eas init a new one');
+    assert.equal(app.expo.scheme, 'studentos', 'the deep-link scheme that registers the studentos:// intent is untouched');
+    assert.equal(app.expo.android.package, 'com.studentos.app', 'android package untouched');
+    const easRaw = safeRead('eas.json');
+    assert.ok(easRaw.length > 20, 'eas.json exists on arena');
+    const eas = JSON.parse(easRaw);
+    assert.equal(eas.cli.appVersionSource, 'remote');
+    assert.equal(eas.build.preview.distribution, 'internal', 'preview = sideloadable internal distribution');
+    assert.equal(eas.build.preview.android.buildType, 'apk', 'preview builds an APK (the launch artifact)');
+    assert.ok(!easRaw.includes('developmentClient'), 'NO developmentClient flag anywhere — the preview APK embeds its JS bundle (no Metro, RC3)');
+    assert.equal(eas.build.development, undefined, 'no development profile on arena (expo-dev-client is recovery-only, deliberate)');
+    assert.ok(eas.build.production && eas.build.production.autoIncrement === true, 'production profile per the handoff');
+    // ZERO dependency changes — the architecture needs no new packages
+    const pkg = JSON.parse(safeRead('package.json'));
+    for (const banned of ['expo-dev-client', 'expo-auth-session', '@react-native-google-signin/google-signin']) {
+      assert.equal(pkg.dependencies[banned], undefined, `${banned} must NOT be added`);
+    }
+    assert.ok(pkg.dependencies['expo-web-browser'] && pkg.dependencies['expo-linking'], 'the reused packages are the pre-existing ones');
+    // .env hygiene unchanged
+    const gitignore = safeRead('.gitignore');
+    assert.ok(gitignore.includes('.env'), '.env stays gitignored (secrets never committed; PO bakes EXPO_PUBLIC_* via eas env:create)');
+  });
+
+  const failedOA = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedOA.length, 0, `FIX-AUTH: ${failedOA.length} check(s) failed -> ${failedOA.map((f) => f.id).join(', ')}`);
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 
