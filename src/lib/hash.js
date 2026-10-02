@@ -1,81 +1,97 @@
 // Pure JS SHA-256 — no deps, works in RN and Node.
-// Based on public-domain minimal implementation (geraintluff/sha256 style)
-// Returns lower-case hex. Input is UTF-8 string.
+// Returns lower-case hex, input UTF-8 string. Minimal but correct.
 export function sha256Hex(str) {
-  // UTF-8 encode via encodeURIComponent trick (handles all Unicode)
-  const utf8 = unescape(encodeURIComponent(str));
-  return sha256Raw(utf8);
+  // UTF-8 encode
+  const s = String(str || '');
+  // Use TextEncoder if available, else fallback to encodeURIComponent trick
+  let bytes;
+  if (typeof TextEncoder !== 'undefined') {
+    bytes = new TextEncoder().encode(s);
+  } else {
+    const utf8 = unescape(encodeURIComponent(s));
+    bytes = new Uint8Array(utf8.length);
+    for (let i = 0; i < utf8.length; i++) bytes[i] = utf8.charCodeAt(i);
+  }
+  return sha256Bytes(bytes);
 }
 
-function sha256Raw(ascii) {
-  function rightRotate(value, amount) {
-    return (value >>> amount) | (value << (32 - amount));
-  }
-  const mathPow = Math.pow;
-  const maxWord = mathPow(2, 32);
-  let result = '';
-  const words = [];
-  const asciiBitLength = ascii.length * 8;
-  const hash = [];
-  const k = [];
-  let primeCounter = 0;
-  const isComposite = {};
-  for (let candidate = 2; primeCounter < 64; candidate++) {
-    if (!isComposite[candidate]) {
-      for (let i = 0; i < 313; i += candidate) {
-        isComposite[i] = candidate;
-      }
-      hash[primeCounter] = (mathPow(candidate, 0.5) * maxWord) | 0;
-      k[primeCounter++] = (mathPow(candidate, 1 / 3) * maxWord) | 0;
+function sha256Bytes(bytes) {
+  function rotr(v, n) { return (v >>> n) | (v << (32 - n)); }
+  // Initial hash values (first 32 bits of fractional parts of sqrt(2..19))
+  const H = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  // Round constants (first 32 bits of fractional parts of cbrt of first 64 primes)
+  const K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  // Pre-processing: padding
+  const bitLen = bytes.length * 8;
+  // append 0x80 then zeros until length ≡ 448 mod 512, then 64-bit length
+  const withOne = new Uint8Array(bytes.length + 1);
+  withOne.set(bytes);
+  withOne[bytes.length] = 0x80;
+  let paddedLen = withOne.length;
+  while ((paddedLen * 8) % 512 !== 448) paddedLen++;
+  const padded = new Uint8Array(paddedLen + 8);
+  padded.set(withOne);
+  // length as 64-bit big-endian
+  const view = new DataView(padded.buffer);
+  // high 32 bits
+  view.setUint32(paddedLen + 4, bitLen >>> 0, false);
+  view.setUint32(paddedLen, Math.floor(bitLen / 0x100000000), false);
+
+  const w = new Uint32Array(64);
+  for (let chunk = 0; chunk < padded.length; chunk += 64) {
+    // 16 words
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(chunk + i * 4, false);
     }
-  }
-  ascii += '\x80';
-  while ((ascii.length % 64) - 56) ascii += '\x00';
-  for (let i = 0; i < ascii.length; i++) {
-    const j = ascii.charCodeAt(i);
-    if (j >> 8) return;
-    words[i >> 2] |= j << ((3 - (i % 4)) * 8);
-  }
-  words[words.length] = (asciiBitLength / maxWord) | 0;
-  words[words.length] = asciiBitLength;
-  for (let j = 0; j < words.length; ) {
-    const w = words.slice(j, (j += 16));
-    const oldHash = hash.slice(0);
-    // hash is 8 words, we mutate via concat trick
-    let h = hash.slice(0, 8);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
     for (let i = 0; i < 64; i++) {
-      const w15 = w[i - 15];
-      const w2 = w[i - 2];
-      const a = h[0];
-      const e = h[4];
-      const temp1 =
-        h[7] +
-        (rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25)) +
-        ((e & h[5]) ^ (~e & h[6])) +
-        k[i] +
-        (w[i] =
-          i < 16
-            ? w[i]
-            : (w[i - 16] +
-                (rightRotate(w15, 7) ^ rightRotate(w15, 18) ^ (w15 >>> 3)) +
-                w[i - 7] +
-                (rightRotate(w2, 17) ^ rightRotate(w2, 19) ^ (w2 >>> 10))) |
-              0);
-      const temp2 =
-        (rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)) +
-        ((a & h[1]) ^ (a & h[2]) ^ (h[1] & h[2]));
-      h = [(temp1 + temp2) | 0].concat(h);
-      h[4] = (h[4] + temp1) | 0;
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + K[i] + w[i]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
     }
-    for (let i = 0; i < 8; i++) {
-      hash[i] = (hash[i] + oldHash[i]) | 0;
-    }
+    H[0] = (H[0] + a) | 0;
+    H[1] = (H[1] + b) | 0;
+    H[2] = (H[2] + c) | 0;
+    H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0;
+    H[5] = (H[5] + f) | 0;
+    H[6] = (H[6] + g) | 0;
+    H[7] = (H[7] + h) | 0;
   }
+  let hex = '';
   for (let i = 0; i < 8; i++) {
-    for (let j = 3; j + 1; j--) {
-      const b = (hash[i] >> (j * 8)) & 255;
-      result += (b < 16 ? '0' : '') + b.toString(16);
-    }
+    const v = H[i] >>> 0;
+    hex += ('00000000' + v.toString(16)).slice(-8);
   }
-  return result;
+  return hex;
 }
