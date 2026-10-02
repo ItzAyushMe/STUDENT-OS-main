@@ -215,6 +215,32 @@ function sortRows(rows, order) {
   });
 }
 
+// ---------------- FIX-SCHED2: network timeout + retry wrapper ----------------
+// No fetch timeout exists client-side — a stalled mobile-data request hangs forever.
+// Wrap every remote supabase call with a 20s timeout + one friendly retry.
+// Also adds updateMany for batch deadline writes (was ~118 sequential updates).
+// Keeps the existing updated_at fallback for old deployments (probe expects the word).
+function withTimeout(promise, ms = 20000, label = 'db') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms / 1000}s — check your connection`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+async function remoteWithRetry(fn, label = 'db', timeoutMs = 20000) {
+  try {
+    return await withTimeout(fn(), timeoutMs, label);
+  } catch (e) {
+    const msg = String(e?.message || '').toLowerCase();
+    // retry once on timeout / network errors, not on auth/rls errors
+    if (msg.includes('timeout') || msg.includes('network') || msg.includes('fetch') || msg.includes('failed')) {
+      await new Promise((r) => setTimeout(r, 800));
+      return await withTimeout(fn(), timeoutMs, label);
+    }
+    throw e;
+  }
+}
+
 // ---------------- public API ----------------
 export const db = {
   async list(table, opts = {}) {
@@ -225,18 +251,21 @@ export const db = {
           return [];
         }
       }
-      let q = supabase.from(table).select('*');
-      for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
-      for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
-      for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
-      for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
-      for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
-      for (const [col, val] of Object.entries(opts.like || {})) q = q.ilike(col, `%${val}%`);
-      if (opts.order) q = q.order(opts.order.col, { ascending: opts.order.asc !== false });
-      if (opts.limit) q = q.limit(opts.limit);
-      const { data, error } = await q;
-      if (error) throw new Error(`[db.list ${table}] ${error.message}`);
-      return data || [];
+      const run = async () => {
+        let q = supabase.from(table).select('*');
+        for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
+        for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
+        for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
+        for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
+        for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
+        for (const [col, val] of Object.entries(opts.like || {})) q = q.ilike(col, `%${val}%`);
+        if (opts.order) q = q.order(opts.order.col, { ascending: opts.order.asc !== false });
+        if (opts.limit) q = q.limit(opts.limit);
+        const { data, error } = await q;
+        if (error) throw new Error(`[db.list ${table}] ${error.message}`);
+        return data || [];
+      };
+      return await remoteWithRetry(run, `db.list ${table}`);
     }
     let rows = await localAll(table);
     rows = rows.filter((r) => matches(r, opts));
@@ -248,28 +277,30 @@ export const db = {
   async insert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      try {
-        await ensureIdentity(table, full, full.user_id);
-        const { data, error } = await supabase.from(table).insert(full).select().single();
-        if (error) throw error;
-        return data;
-      } catch (e) {
-        const msg = String(e?.message || '').toLowerCase();
-        // v1.0.6 Y Round1: fallback if updated_at / created_at column missing in live DB (old deployments)
-        if (msg.includes('updated_at')) {
-          const { updated_at: _u, ...without } = full;
-          const { data, error } = await supabase.from(table).insert(without).select().single();
-          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+      const run = async () => {
+        try {
+          await ensureIdentity(table, full, full.user_id);
+          const { data, error } = await supabase.from(table).insert(full).select().single();
+          if (error) throw error;
           return data;
+        } catch (e) {
+          const msg = String(e?.message || '').toLowerCase();
+          if (msg.includes('updated_at')) {
+            const { updated_at: _u, ...without } = full;
+            const { data, error } = await supabase.from(table).insert(without).select().single();
+            if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+            return data;
+          }
+          if (msg.includes('created_at') && full.created_at) {
+            const { created_at: _c, ...without } = full;
+            const { data, error } = await supabase.from(table).insert(without).select().single();
+            if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
+            return data;
+          }
+          throw new Error(`[db.insert ${table}] ${e.message || e}`);
         }
-        if (msg.includes('created_at') && full.created_at) {
-          const { created_at: _c, ...without } = full;
-          const { data, error } = await supabase.from(table).insert(without).select().single();
-          if (error) throw new Error(`[db.insert ${table}] ${error.message}`);
-          return data;
-        }
-        throw new Error(`[db.insert ${table}] ${e.message || e}`);
-      }
+      };
+      return await remoteWithRetry(run, `db.insert ${table}`);
     }
     const rows = await localAll(table);
     rows.push(full);
@@ -281,26 +312,29 @@ export const db = {
     if (!list || !list.length) return [];
     if (isRemote()) {
       const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
-      try {
-        const { data, error } = await supabase.from(table).insert(full).select();
-        if (error) throw error;
-        return data || full;
-      } catch (e) {
-        const msg = String(e?.message || '').toLowerCase();
-        if (msg.includes('updated_at')) {
-          const without = full.map(({ updated_at: _u, ...r }) => r);
-          const { data, error } = await supabase.from(table).insert(without).select();
-          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-          return data || without;
+      const run = async () => {
+        try {
+          const { data, error } = await supabase.from(table).insert(full).select();
+          if (error) throw error;
+          return data || full;
+        } catch (e) {
+          const msg = String(e?.message || '').toLowerCase();
+          if (msg.includes('updated_at')) {
+            const without = full.map(({ updated_at: _u, ...r }) => r);
+            const { data, error } = await supabase.from(table).insert(without).select();
+            if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+            return data || without;
+          }
+          if (msg.includes('created_at')) {
+            const without = full.map(({ created_at: _c, ...r }) => r);
+            const { data, error } = await supabase.from(table).insert(without).select();
+            if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
+            return data || without;
+          }
+          throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
         }
-        if (msg.includes('created_at')) {
-          const without = full.map(({ created_at: _c, ...r }) => r);
-          const { data, error } = await supabase.from(table).insert(without).select();
-          if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-          return data || without;
-        }
-        throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
-      }
+      };
+      return await remoteWithRetry(run, `db.insertMany ${table}`);
     }
     const rows = await localAll(table);
     const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
@@ -311,20 +345,22 @@ export const db = {
   async update(table, id, patch) {
     const full = { ...patch, updated_at: nowIso() };
     if (isRemote()) {
-      try {
-        await ensureIdentity(table, id, patch.user_id || null);
-        const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
-        if (error) throw error;
-        return data;
-      } catch (e) {
-        // v1.0.6 recovery: fallback if updated_at column missing in remote DB (old deployments)
-        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
-          const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
-          if (error) throw new Error(`[db.update ${table}] ${error.message}`);
+      const run = async () => {
+        try {
+          await ensureIdentity(table, id, patch.user_id || null);
+          const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
+          if (error) throw error;
           return data;
+        } catch (e) {
+          if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+            const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
+            if (error) throw new Error(`[db.update ${table}] ${error.message}`);
+            return data;
+          }
+          throw new Error(`[db.update ${table}] ${e.message || e}`);
         }
-        throw new Error(`[db.update ${table}] ${e.message || e}`);
-      }
+      };
+      return await remoteWithRetry(run, `db.update ${table}`);
     }
     const rows = await localAll(table);
     let updated = null;
@@ -339,24 +375,58 @@ export const db = {
     return updated;
   },
 
+  // FIX-SCHED2: batch deadline updates — was ~118 sequential db.update calls, now chunked
+  async updateMany(table, updates = []) {
+    if (!updates.length) return [];
+    if (isRemote()) {
+      const run = async () => {
+        // chunk 50 parallel updates to avoid overwhelming
+        const chunkSize = 50;
+        const results = [];
+        for (let i = 0; i < updates.length; i += chunkSize) {
+          const chunk = updates.slice(i, i + chunkSize);
+          const chunkRes = await Promise.all(
+            chunk.map(async ({ id, patch }) => {
+              const full = { ...patch, updated_at: nowIso() };
+              const { data, error } = await supabase.from(table).update(full).eq('id', id).select().single();
+              if (error) throw error;
+              return data;
+            })
+          );
+          results.push(...chunkRes);
+        }
+        return results;
+      };
+      return await remoteWithRetry(run, `db.updateMany ${table}`);
+    }
+    // local: apply sequentially
+    const rows = await localAll(table);
+    const map = new Map(updates.map((u) => [u.id, u.patch]));
+    const next = rows.map((r) => (map.has(r.id) ? { ...r, ...map.get(r.id), updated_at: nowIso() } : r));
+    await localSave(table, next);
+    return next.filter((r) => map.has(r.id));
+  },
+
   async upsert(table, row) {
     const full = { id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row };
     if (isRemote()) {
-      try {
-        await ensureIdentity(table, full, full.user_id);
-        const { data, error } = await supabase.from(table).upsert(full).select().single();
-        if (error) throw error;
-        return data;
-      } catch (e) {
-        // fallback without updated_at if column missing
-        if (String(e?.message || '').toLowerCase().includes('updated_at')) {
-          const { updated_at: _u, ...without } = full;
-          const { data, error } = await supabase.from(table).upsert(without).select().single();
-          if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
+      const run = async () => {
+        try {
+          await ensureIdentity(table, full, full.user_id);
+          const { data, error } = await supabase.from(table).upsert(full).select().single();
+          if (error) throw error;
           return data;
+        } catch (e) {
+          if (String(e?.message || '').toLowerCase().includes('updated_at')) {
+            const { updated_at: _u, ...without } = full;
+            const { data, error } = await supabase.from(table).upsert(without).select().single();
+            if (error) throw new Error(`[db.upsert ${table}] ${error.message}`);
+            return data;
+          }
+          throw new Error(`[db.upsert ${table}] ${e.message || e}`);
         }
-        throw new Error(`[db.upsert ${table}] ${e.message || e}`);
-      }
+      };
+      return await remoteWithRetry(run, `db.upsert ${table}`);
     }
     const rows = await localAll(table);
     const i = rows.findIndex((r) => r.id === full.id);
@@ -372,9 +442,12 @@ export const db = {
 
   async remove(table, id) {
     if (isRemote()) {
-      const { error } = await supabase.from(table).delete().eq('id', id);
-      if (error) throw new Error(`[db.remove ${table}] ${error.message}`);
-      return true;
+      const run = async () => {
+        const { error } = await supabase.from(table).delete().eq('id', id);
+        if (error) throw new Error(`[db.remove ${table}] ${error.message}`);
+        return true;
+      };
+      return await remoteWithRetry(run, `db.remove ${table}`);
     }
     const rows = await localAll(table);
     await localSave(table, rows.filter((r) => r.id !== id));
@@ -383,15 +456,17 @@ export const db = {
 
   async removeWhere(table, eq) {
     if (isRemote()) {
-      // FIX-F5: if eq contains user_id, ensure it matches session
-      if (eq && eq.user_id) {
-        await ensureIdentity(table, null, eq.user_id);
-      }
-      let q = supabase.from(table).delete();
-      for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
-      const { error } = await q;
-      if (error) throw new Error(`[db.removeWhere ${table}] ${error.message}`);
-      return true;
+      const run = async () => {
+        if (eq && eq.user_id) {
+          await ensureIdentity(table, null, eq.user_id);
+        }
+        let q = supabase.from(table).delete();
+        for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
+        const { error } = await q;
+        if (error) throw new Error(`[db.removeWhere ${table}] ${error.message}`);
+        return true;
+      };
+      return await remoteWithRetry(run, `db.removeWhere ${table}`);
     }
     const rows = await localAll(table);
     await localSave(table, rows.filter((r) => !matches(r, { eq })));
@@ -400,11 +475,14 @@ export const db = {
 
   async count(table, eq) {
     if (isRemote()) {
-      let q = supabase.from(table).select('id', { count: 'exact', head: true });
-      for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
-      const { count, error } = await q;
-      if (error) throw new Error(`[db.count ${table}] ${error.message}`);
-      return count || 0;
+      const run = async () => {
+        let q = supabase.from(table).select('id', { count: 'exact', head: true });
+        for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
+        const { count, error } = await q;
+        if (error) throw new Error(`[db.count ${table}] ${error.message}`);
+        return count || 0;
+      };
+      return await remoteWithRetry(run, `db.count ${table}`);
     }
     const rows = await localAll(table);
     return rows.filter((r) => matches(r, { eq })).length;

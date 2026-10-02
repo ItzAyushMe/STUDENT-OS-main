@@ -435,6 +435,7 @@ export function classSessionCutoff(today) {
 export function buildWorkItems(input) {
   const {
     syllabus = [], existing = [], deadlines = null, prio, factor = 1,
+    hoursMultiplier = 2,
     today, examDate = null, olympiadDate = null, schoolExams = [], allocatable = [],
     classPaused = null,
   } = input || {};
@@ -507,7 +508,12 @@ export function buildWorkItems(input) {
       excludedItems.push({ id: row.id, chapter, reason: 'track-not-planned', track });
       continue;
     }
-    const baseMin = Math.max(0, Math.round(num(row.estimated_hours, 4) * 60 * num(factor, 1) * (1 - progress / 100)));
+    // FIX-SCHED1: chapter workload multiplier — default 2.0×, class-track only, revision outside
+    const rawHours = num(row.estimated_hours, 4);
+    const isClassTrack = track === 'class';
+    const mult = isClassTrack ? num(hoursMultiplier, 2) : 1;
+    const effectiveHours = rawHours * mult;
+    const baseMin = Math.max(0, Math.round(effectiveHours * 60 * num(factor, 1) * (1 - progress / 100)));
     const key = `${String(row.subject || '').toLowerCase()}|${chapter.toLowerCase()}`;
     const credited = Math.min(baseMin, num(credit.get(key), 0));
     const remaining = baseMin - credited;
@@ -537,6 +543,10 @@ export function buildWorkItems(input) {
       deadline,
       overdue: !!(deadline && deadline < today),
       creditedMinutes: credited,
+      // FIX-SCHED1: show effective hours in UI — base ~4h → planned ~8h
+      baseHours: rawHours,
+      effectiveHours,
+      hoursMultiplier: mult,
       // one-shot events: prepping for an olympiad/main exam ON or AFTER its date
       // is an impossible allocation, so such work stops at the date and is reported
       hardStop:
@@ -588,7 +598,8 @@ export function planSchedule(input) {
   const exams = allSchoolExams(opts.schoolExams);
 
   // horizon: the rolling window, EXTENDED to cover a distant main exam,
-  // olympiad date or the furthest school exam (v1.0.6 recovery rule), capped at 365d.
+  // olympiad date, furthest school exam, AND class session cutoff (Feb 25 per PO 2026-10-02),
+  // capped at 365d. FIX-SCHED1: whole chain must plan to classSessionCutoff, never 42-day remnant.
   const examLimit = examDate ? dayjs(examDate) : null;
   const olympiadLimit = olympiadDate ? dayjs(olympiadDate) : null;
   let horizon = dayjs(today).add(Math.max(1, num(opts.weeks, 6)) * 7, 'day');
@@ -598,6 +609,12 @@ export function planSchedule(input) {
     const furthestSchool = dayjs(exams[exams.length - 1].end || exams[exams.length - 1].start);
     if (furthestSchool.isAfter(horizon)) horizon = furthestSchool;
   }
+  // FIX-SCHED1: class track must schedule till 25 Feb (session cutoff), not 1-2 months
+  try {
+    const cutoffStr = classSessionCutoff(today);
+    const cutoffDay = dayjs(cutoffStr);
+    if (cutoffDay.isValid() && cutoffDay.isAfter(horizon)) horizon = cutoffDay;
+  } catch {}
   const maxHorizon = dayjs(today).add(HORIZON_CAP_DAYS, 'day');
   if (horizon.isAfter(maxHorizon)) horizon = maxHorizon;
   const totalDays = clampNum(horizon.diff(dayjs(today), 'day'), 1, HORIZON_CAP_DAYS);
@@ -624,8 +641,10 @@ export function planSchedule(input) {
   // archived Class 10 map can never plan a class session for the new session.
   const archivedIn = Array.isArray(syllabus) ? syllabus.filter((r) => r && isArchivedRow(r)).length : 0;
 
+  const hoursMultiplier = opts.hoursMultiplier != null ? num(opts.hoursMultiplier, 2) : 2;
   const built = buildWorkItems({
     syllabus, existing: existingRows, deadlines: opts.deadlines || null, prio, factor,
+    hoursMultiplier,
     today, examDate, olympiadDate, schoolExams: exams, allocatable, classPaused,
   });
   const items = built.items;

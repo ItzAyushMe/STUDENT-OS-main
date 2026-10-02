@@ -26,6 +26,7 @@ import { SUBJECT_COLORS, isArchivedRow, activeSyllabusRows } from '../../config/
 import { fonts, radius } from '../../config/theme';
 import { pct, subjectColor, nowIso } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
+import { useSettings } from '../../context/SettingsContext';
 
 const STATUS_ICON = { completed: '✅', in_progress: '🔄', locked: '🔒' };
 
@@ -35,6 +36,7 @@ const rowTrack = (r) => (r.track === 'olympiad' || r.track === 'exam' ? r.track 
 export function SyllabusScreen({ navigation }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
+  const settings = useSettings();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeTrack, setActiveTrack] = useState('class');
@@ -555,6 +557,16 @@ function HeaderBtn({ icon, onPress }) {
 function ChapterRow({ row, onOpen, onDelete }) {
   const icon = STATUS_ICON[row.status] || '🔒';
   const high = (row.weightage || 0) >= 5;
+  // FIX-SCHED1: show effective hours — Base ~4h → Effective ~8h
+  let settings;
+  try { settings = useSettings(); } catch { settings = { hoursMultiplier: 2.0 }; }
+  const mult = settings?.hoursMultiplier ?? 2.0;
+  const base = Number(row.estimated_hours) || 4;
+  const track = row.track || 'class';
+  const effective = track === 'class' ? base * mult : base;
+  const hoursLine = track === 'class'
+    ? `Base ~${base}h → Effective planned: ~${effective.toFixed(1)}h (${mult}×)${row.deadline ? ` · due ${row.deadline}` : ''}`
+    : `${base} hrs${row.deadline ? ` · due ${row.deadline}` : ''}`;
   return (
     <Pressable
       onPress={onOpen}
@@ -595,7 +607,7 @@ function ChapterRow({ row, onOpen, onDelete }) {
             </>
           ) : (
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#64748B' }}>
-              {row.estimated_hours || 4} hrs{row.deadline ? ` · due ${row.deadline}` : ''}
+              {hoursLine}
             </Text>
           )}
         </View>

@@ -169,14 +169,19 @@ if (lastClassDate) {
 }
 
 // tight capacity: the split actually constrains who gets time (FIX B)
+// FIX-SCHED1: horizon now extends to classSessionCutoff (Feb 25). For this tight-capacity
+// probe we pin today to 2027-01-14 so cutoff is exactly 42 days away (2027-02-25),
+// so weeks:6 stays 42 days and class track gets full window. hoursMultiplier:1 isolates priority.
 const planTight = generateSchedule({
   syllabus: multiTrackSyllabus, examDate: null, dailyHours: 1, preferredTime: 'Morning',
   daysOff: [], prepLevel: 'Intermediate', weeks: 6, userId: 'u2',
+  today: '2027-01-14',
+  hoursMultiplier: 1,
 });
 const tightMin = (t) => planTight.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
 assert.ok(tightMin('class') > tightMin('exam') && tightMin('class') > tightMin('olympiad'), `tight capacity honours 60/30/10 split (class ${tightMin('class')} vs exam ${tightMin('exam')} vs olympiad ${tightMin('olympiad')} min)`);
 
-// custom priority: olympiad first with a big split (FIX B)
+// custom priority: olympiad first with a big split (FIX B) — same pinning
 const plan2 = generateSchedule({
   syllabus: multiTrackSyllabus,
   examDate: null,
@@ -186,13 +191,15 @@ const plan2 = generateSchedule({
   prepLevel: 'Intermediate',
   weeks: 6,
   userId: 'u2',
+  today: '2027-01-14',
+  hoursMultiplier: 1,
   priorities: { order: ['olympiad', 'class', 'exam'], enabled: { class: true, exam: true, olympiad: true }, timeSplit: { olympiad: 70, class: 20, exam: 10 } },
 });
 const studyMin2 = (t) => plan2.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
 assert.ok(studyMin2('olympiad') > studyMin2('class'), `olympiad-first priorities give olympiad more time (${studyMin2('olympiad')} vs ${studyMin2('class')} min)`);
 assert.ok(plan2.coverage.priorityOrder[0] === 'olympiad', 'coverage reports custom order');
 
-// disabled track never appears (FIX B)
+// disabled track never appears (FIX B) — pin today to keep horizon 28 days, class full window
 const plan3 = generateSchedule({
   syllabus: multiTrackSyllabus,
   examDate: null,
@@ -202,6 +209,8 @@ const plan3 = generateSchedule({
   prepLevel: 'Intermediate',
   weeks: 4,
   userId: 'u2',
+  today: '2027-01-28',
+  hoursMultiplier: 1,
   priorities: { order: ['class', 'exam', 'olympiad'], enabled: { class: true, exam: false, olympiad: false }, timeSplit: { class: 100, exam: 0, olympiad: 0 } },
 });
 assert.ok(!plan3.some(r => r.track === 'exam'), 'disabled exam track never scheduled');
@@ -1706,6 +1715,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
       ],
       dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 4,
       userId: 'u-h7', today: H_TODAY, createdAt: H_CREATED,
+      hoursMultiplier: 1,
     });
     assert.ok(!p.some((r) => r.topic === 'Done Chapter'), 'a completed chapter is never scheduled again');
     const half = sumMin(p, (r) => r.topic === 'Half Chapter' && r.session_type === 'study');
@@ -1724,6 +1734,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
       }],
       dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
       userId: 'u-h7', today: H_TODAY, createdAt: H_CREATED,
+      hoursMultiplier: 1,
     });
     assert.ok(
       !pCredit.some((r) => r.topic === 'Fresh Chapter' && r.session_type === 'study'),

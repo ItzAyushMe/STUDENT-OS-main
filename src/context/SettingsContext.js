@@ -17,6 +17,7 @@ const DEFAULTS = {
   soundEffects: true,
   ambientVolume: 0.6,
   dailyReminder: null, // 'HH:MM' or null
+  hoursMultiplier: 2.0, // FIX-SCHED1: chapter workload multiplier default 2.0× (PO 2026-10-02)
 };
 
 const SettingsCtx = createContext(null);

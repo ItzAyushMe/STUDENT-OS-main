@@ -557,6 +557,23 @@ export function SettingsScreen({ navigation }) {
           </View>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
         </View>
+        {/* FIX-SCHED1: chapter workload multiplier selector — default 2.0×, persisted in Settings */}
+        <View style={{ marginBottom: 4 }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Chapter workload (effective hours)</Text>
+          <SegmentedControl
+            mode="light"
+            options={[
+              { key: '1', label: '1.0×' },
+              { key: '1.5', label: '1.5×' },
+              { key: '2', label: '2.0×' },
+            ]}
+            value={String(settings.hoursMultiplier ?? 2)}
+            onChange={(k) => settings.update({ hoursMultiplier: Number(k) })}
+          />
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
+            Base estimate: e.g. 4h per chapter → Effective planned: ~{(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (multiplier {settings.hoursMultiplier ?? 2}×, class-track only, revision separate)
+          </Text>
+        </View>
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}

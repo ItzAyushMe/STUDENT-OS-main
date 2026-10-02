@@ -7,6 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
+import { useSettings } from '../../context/SettingsContext';
 import { Screen } from '../../components/ui/Screen';
 import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Card } from '../../components/ui/Card';
@@ -18,7 +19,7 @@ import { Input } from '../../components/ui/Input';
 import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
-import { generateSchedule, autoRescheduleMissed, autoSetDeadlines } from '../../lib/scheduleGenerator';
+import { generateSchedule, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
@@ -30,6 +31,7 @@ import { useHubBack } from '../../hooks/useHubBack';
 export function ScheduleScreen({ navigation, route }) {
   const { profile } = useAuth();
   const { awardXP } = useGame();
+  const settings = useSettings();
   // FIX-S S5: Class 10 -> Class 11 promotion. One controller for the whole app;
   // this screen is where the sheet opens on load (PO decision 4).
   const promo = usePromotion();
@@ -44,6 +46,7 @@ export function ScheduleScreen({ navigation, route }) {
   const [addOpen, setAddOpen] = useState(false);
   const [confetti, setConfetti] = useState(0);
   const [genBusy, setGenBusy] = useState(false);
+  const [genProgress, setGenProgress] = useState('');
   const [coverage, setCoverage] = useState(null);
   const [aiPlanMsg, setAiPlanMsg] = useState('');
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
@@ -199,14 +202,25 @@ export function ScheduleScreen({ navigation, route }) {
 
   // FIX D: regeneration always ASKS first — never silently appends on
   // top of old data. Two modes: fresh start, or keep-completed history.
+  // FIX-SCHED2: reliability — timeouts, batch writes, progress, 60s watchdog.
+  // FIX-SCHED1: horizon till 25 Feb (classSessionCutoff) + hoursMultiplier 2.0× default.
   const generate = async (mode = 'keep-completed') => {
     setGenBusy(true);
     setGenError('');
+    setGenProgress('Loading your data…');
+    let watchdog = null;
+    const clearWatchdog = () => { if (watchdog) { clearTimeout(watchdog); watchdog = null; } };
     try {
+      // 60s watchdog — never-again-spinner guarantee
+      watchdog = setTimeout(() => {
+        setGenError('Generate 60s se zyada le raha hai — network slow ya data bada hai. Dobara try karo.');
+        setGenBusy(false);
+        setGenProgress('');
+      }, 60000);
+
+      setGenProgress('Loading syllabus…');
       const syllabus = await db.list('syllabus', { eq: { user_id: profile.id } });
-      // FIX-H: what already exists is an INPUT to the planner, not an afterthought.
-      // Kept entries are never re-created, and their minutes count toward each day,
-      // so re-running generate cannot pile duplicate blocks on the same slots.
+      setGenProgress('Loading existing schedule…');
       const planToday = todayStr();
       const allExisting = await db.list('schedule', {
         eq: { user_id: profile.id },
@@ -216,21 +230,15 @@ export function ScheduleScreen({ navigation, route }) {
         limit: 1000,
       });
       if (mode === 'fresh') {
-        // wipe ALL schedule entries (fresh start). Syllabus progress
-        // (completed topics/deadlines) is untouched — only slots rebuild.
+        setGenProgress('Clearing old schedule…');
         await db.removeWhere('schedule', { user_id: profile.id });
       } else {
-        // keep completed/skipped history; replace only pending entries
+        setGenProgress('Clearing pending slots…');
         await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
       }
       const kept = mode === 'fresh' ? [] : allExisting.filter((r) => r.status !== 'pending');
 
-      // FIX-H: deadlines are computed BEFORE planning. They used to be written
-      // after generateSchedule(), so the plan that was just created never knew
-      // about them and urgency ordering was impossible.
-      // FIX-S S5 (PO decision 5): school exams saved for the FINISHED Class 10 year
-      // stay on the profile but stop driving planning after promotion. Olympiad and
-      // competitive dates are untouched. A declined promotion pauses the class track.
+      setGenProgress('Computing deadlines…');
       const planSchoolExams = promo.schoolExamsForPlanning();
       const computedDeadlines = syllabus.length
         ? autoSetDeadlines(syllabus, profile.exam_date, profile.daily_study_hours, planSchoolExams)
@@ -239,25 +247,22 @@ export function ScheduleScreen({ navigation, route }) {
         !r.deadline && computedDeadlines[r.id] ? { ...r, deadline: computedDeadlines[r.id] } : r
       );
 
+      setGenProgress('Planning till 25 Feb…');
       const rows = generateSchedule({
         syllabus: plannedSyllabus,
         deadlines: computedDeadlines,
         existing: kept,
-        today: planToday, // one date system — honours the FIX-F dev-date offset
+        today: planToday,
         examDate: profile.exam_date,
         olympiadDate: profile.olympiad_date || null,
         schoolExams: planSchoolExams,
-        // FIX-S S5 [S5c]: promotion declined -> zero class sessions (new content,
-        // chapter tests, spaced revisions); olympiad/competitive keep running
         classPaused: promo.paused,
         priorities: profile.priorities || null,
-        // STUDY ARC active? -> boosted daily hours (v1.0.2)
         dailyHours: effectiveDailyHours(profile),
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
-        // v1.0.6 recovery: dynamic weeks to cover exam horizon up to 365 days
-        // Previously hardcoded 6 weeks (42 days) stopped early for 249-day exams
+        hoursMultiplier: settings.hoursMultiplier ?? 2.0,
         weeks: (() => {
           const today = dayjs();
           const exam = profile.exam_date ? dayjs(profile.exam_date) : null;
@@ -274,32 +279,57 @@ export function ScheduleScreen({ navigation, route }) {
               }
             }
           }
+          // FIX-SCHED1: horizon must reach classSessionCutoff (Feb 25), not 42 days
+          try {
+            const cutoffStr = classSessionCutoff(todayStr());
+            const cutoffDay = dayjs(cutoffStr);
+            if (cutoffDay.isValid() && cutoffDay.isAfter(maxDate)) maxDate = cutoffDay;
+          } catch {}
           const diffDays = Math.max(42, maxDate.diff(today, 'day'));
           const weeksNeeded = Math.ceil(diffDays / 7);
-          return Math.min(52, Math.max(6, weeksNeeded)); // cap 52 weeks = 365 days
+          return Math.min(52, Math.max(6, weeksNeeded));
         })(),
         userId: profile.id,
       });
       setCoverage(rows.coverage || null);
-      // v1.0.6 Y Round2: chunk insert — 383 sessions for 248-day exam would fail wholesale in one batch
       if (rows.length) {
+        const totalChunks = Math.ceil(rows.length / 100);
         for (let i = 0; i < rows.length; i += 100) {
+          const chunkIdx = Math.floor(i / 100) + 1;
+          setGenProgress(`Saving schedule (${chunkIdx}/${totalChunks})…`);
           await db.insertMany('schedule', rows.slice(i, i + 100));
         }
       }
-      if (syllabus.length) {
-        // same deadlines the planner used — computed once, above, not twice
-        for (const [id, deadline] of Object.entries(computedDeadlines)) {
-          await db.update('syllabus', id, { deadline });
+      if (syllabus.length && Object.keys(computedDeadlines).length) {
+        setGenProgress('Saving deadlines…');
+        const deadlineUpdates = Object.entries(computedDeadlines).map(([id, deadline]) => ({
+          id,
+          patch: { deadline },
+        }));
+        // FIX-SCHED2: batch deadline writes — was ~118 sequential, now chunked updateMany
+        if (typeof db.updateMany === 'function') {
+          await db.updateMany('syllabus', deadlineUpdates);
+        } else {
+          // fallback chunked parallel
+          const chunkSize = 20;
+          for (let i = 0; i < deadlineUpdates.length; i += chunkSize) {
+            const chunk = deadlineUpdates.slice(i, i + chunkSize);
+            await Promise.all(chunk.map(({ id, patch }) => db.update('syllabus', id, patch)));
+          }
         }
       }
+      setGenProgress('Reloading…');
       await load();
       setGenOpen(false);
       setRegenChoiceOpen(false);
+      clearWatchdog();
     } catch (e) {
+      clearWatchdog();
       setGenError(e?.message || 'Schedule generate nahi ho paya. Dobara try karo.');
     } finally {
+      clearWatchdog();
       setGenBusy(false);
+      setGenProgress('');
     }
   };
 
@@ -377,17 +407,16 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
+      {/* FIX-A5: compact S5 banner — was full card, now one-line chip → opens PromotionSheet */}
       {promo.state === 'prompt' && !promoOpen ? (
-        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#5B21B6', lineHeight: 18 }}>
-            🎓 Naya session shuru — {promo.toClass} mein move karna hai?
+        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', borderRadius: 20, paddingVertical: 6, paddingHorizontal: 12, marginBottom: 12 }}>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#5B21B6', flex: 1 }} numberOfLines={1}>
+            🎓 Naya session — {promo.toClass}?
           </Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
-            Sheet band kar di? Koi baat nahi — yahan se kholo. Kal phir yaad dila denge.
-          </Text>
-          <View style={{ height: 8 }} />
-          <Button title="Decide karo" size="sm" mode="light" onPress={() => setPromoOpen(true)} />
-        </Card>
+          <Pressable onPress={() => setPromoOpen(true)} style={{ backgroundColor: '#6D28D9', borderRadius: 14, paddingVertical: 4, paddingHorizontal: 10, marginLeft: 8 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#FFFFFF' }}>Decide</Text>
+          </Pressable>
+        </View>
       ) : null}
 
       {promo.msg ? (
@@ -482,7 +511,7 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
-      {/* Priority coverage banner — class first, olympiad second, exam last + v1.0.6 honest warning */}
+      {/* Priority coverage banner — class first, olympiad second, exam last + honest warning + Feb-25 horizon */}
       {coverage ? (
         <>
           <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
@@ -494,11 +523,11 @@ export function ScheduleScreen({ navigation, route }) {
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
               {coverage.classDoneBy && coverage.nextSchoolExam
                 ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label || coverage.nextSchoolExam.start || 'School Exam'}" (${coverage.nextSchoolExam.start || ''}) 📅`
-                : 'Class syllabus first, then olympiad, then exam track — priority order locked in ⚡'}
+                : `Plan horizon: till ${classSessionCutoff(coverage.today || todayStr())} (Feb 25 session end) — class first, olympiad second, exam last ⚡`}
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
-                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Workload {settings.hoursMultiplier ?? 2}× (Base→Effective shown in syllabus)
               </Text>
             ) : null}
           </Card>
@@ -506,6 +535,10 @@ export function ScheduleScreen({ navigation, route }) {
             <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
                 {coverage.coverageWarning}
+              </Text>
+              {/* FIX-SCHED3: honest shortfall — how to fix link */}
+              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
+                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload {settings.hoursMultiplier ?? 2}× → 1.0×/1.5×. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr())}, never fabricates impossible hours.
               </Text>
               {/* FIX-H: when the workload genuinely does not fit, name what was left out */}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
@@ -571,13 +604,14 @@ export function ScheduleScreen({ navigation, route }) {
         />
       ) : null}
 
-      {/* Generate modal */}
+      {/* Generate modal — FIX-SCHED1/2: shows effective hours + progress */}
       <ModalSheet visible={genOpen} onClose={() => setGenOpen(false)} title="Generate Smart Schedule" mode="light">
         <Text style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#475569', lineHeight: 20, marginBottom: 14 }}>
-          Ye engine tumhare syllabus ke weightage + estimated hours + available time se ek day-by-day plan banayegi —
-          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath.
+          Ye engine tumhare syllabus ke weightage + estimated hours × workload multiplier + available time se ek day-by-day plan banayegi —
+          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr())} (Feb 25).
         </Text>
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
+        <InfoRow label="Chapter workload" value={`${settings.hoursMultiplier ?? 2}× — e.g. Base 4h → Effective ~${(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (class only, revision separate)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
         <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week` : 'None'} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
@@ -593,8 +627,18 @@ export function ScheduleScreen({ navigation, route }) {
           }
         />
         <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#5B21B6', marginTop: 10, marginBottom: 4, lineHeight: 17 }}>
-          Priority: {prioritySummary()}. Revision waves + mocks + timed practice included.
+          Priority: {prioritySummary()}. Revision waves + mocks + timed practice included. Shortfall honestly reported, never fabricated.
         </Text>
+        {genBusy && genProgress ? (
+          <View style={{ backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#166534' }}>{genProgress}</Text>
+          </View>
+        ) : null}
+        {genError ? (
+          <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#B91C1C' }}>{genError}</Text>
+          </View>
+        ) : null}
         <Button
           title="Generate My Plan ⚡"
           mode="light"
