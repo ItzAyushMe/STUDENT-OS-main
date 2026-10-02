@@ -1,5 +1,11 @@
 // Bottom-sheet style modal wrapper.
-import { Modal, Pressable, Text, View } from 'react-native';
+// FIX-UI1: the sheet body is a ScrollView inside a KeyboardAvoidingView — before
+// this, {children} rendered raw inside a maxHeight:'85%' sheet, so anything below
+// the fold (gym wizard Next, habit Save, locker Save) was UNREACHABLE on a phone
+// and the keyboard hid modal inputs. Every sheet now scrolls and stays tappable
+// (keyboardShouldPersistTaps="handled"); Android relies on the manifest
+// softwareKeyboardLayoutMode:"resize" (FIX-UI2), iOS on behavior:'padding'.
+import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePalette } from '../../context/ThemeContext';
@@ -54,7 +60,25 @@ export function ModalSheet({ visible, onClose, title, mode = 'light', children, 
               <Ionicons name="close" size={24} color={theme.subtext} />
             </Pressable>
           </View>
-          {children}
+          {/* FIX-UI1: scrollable, keyboard-safe body. flexShrink lets the sheet
+              cap at maxHeight and scroll instead of clipping; "handled" keeps
+              buttons (Save/Next) tappable while the keyboard is open. The sheet
+              container above already pads insets.bottom + 18, so the content
+              container adds a flat 24 breathing room (handoff's 24 + insets
+              intent, without doubling the inset). */}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={{ flexShrink: 1 }}
+          >
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              style={{ flexShrink: 1 }}
+              contentContainerStyle={{ paddingBottom: 24 }}
+            >
+              {children}
+            </ScrollView>
+          </KeyboardAvoidingView>
         </Pressable>
       </Pressable>
     </Modal>

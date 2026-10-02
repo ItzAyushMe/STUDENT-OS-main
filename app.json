@@ -14,6 +14,7 @@
     },
     "android": {
       "package": "com.studentos.app",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#0D1117",
         "foregroundImage": "./assets/android-icon-foreground.png",
