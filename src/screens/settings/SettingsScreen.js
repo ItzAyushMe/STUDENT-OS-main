@@ -28,7 +28,7 @@ import { sha256Hex } from '../../lib/hash';
 // FIX-DEV: access-code mechanism — plaintext never in source, only SHA-256 hash embedded.
 // PO keeps code private, sends ONLY 64-hex hash to X. This is an access/obscurity gate, NOT cryptographic security.
 // Placeholder 64 zeros = panel stays hidden until PO provides real hash (per user request).
-const DEV_PANEL_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+const DEV_PANEL_HASH = '52fa2086b2d0eb3556c179a20363edbed13c86ef97ff9e8d4b1d28ded81bee31';
 import * as Notifications from 'expo-notifications';
 import { useHubBack } from '../../hooks/useHubBack';
 import { maskDateInput, isValidDateStr } from '../../lib/dateMask';
