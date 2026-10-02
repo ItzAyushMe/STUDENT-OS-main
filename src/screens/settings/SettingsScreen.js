@@ -23,6 +23,12 @@ import { APP_NAME, APP_TAGLINE, APP_VERSION, activeSyllabusRows } from '../../co
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setDevDateOffset, getDevDateOffset, loadDevDateOffset, todayStr } from '../../lib/utils';
 import { clearXpOnceCache } from '../../lib/xpOnce';
+import { sha256Hex } from '../../lib/hash';
+
+// FIX-DEV: access-code mechanism — plaintext never in source, only SHA-256 hash embedded.
+// PO keeps code private, sends ONLY 64-hex hash to X. This is an access/obscurity gate, NOT cryptographic security.
+// Placeholder 64 zeros = panel stays hidden until PO provides real hash (per user request).
+const DEV_PANEL_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 import * as Notifications from 'expo-notifications';
 import { useHubBack } from '../../hooks/useHubBack';
 
@@ -71,6 +77,12 @@ export function SettingsScreen({ navigation }) {
   const [deleting, setDeleting] = useState(false);
   const [devOffset, setDevOffset] = useState(0); // FIX-F4 dev date override
   const [devBanner, setDevBanner] = useState('');
+  // FIX-DEV: hidden dev panel — AsyncStorage sos.dev.unlocked, 7× long-press version row → code → SHA-256 vs hash
+  const [devUnlocked, setDevUnlocked] = useState(false);
+  const [versionPressCount, setVersionPressCount] = useState(0);
+  const [devCodeModal, setDevCodeModal] = useState(false);
+  const [devCodeInput, setDevCodeInput] = useState('');
+  const [devCodeError, setDevCodeError] = useState('');
 
   useEffect(() => {
     try {
@@ -79,12 +91,16 @@ export function SettingsScreen({ navigation }) {
     } catch {
       /* ignore */
     }
-    // FIX-F4: load dev date offset
+    // FIX-F4: load dev date offset + FIX-DEV: load unlock flag
     (async () => {
       try {
         const off = await loadDevDateOffset();
         setDevOffset(off);
         if (off !== 0) setDevBanner(`DEV: date ${off>0?'+':''}${off} days (todayStr=${todayStr()})`);
+      } catch {}
+      try {
+        const unlocked = await AsyncStorage.getItem('sos.dev.unlocked');
+        if (unlocked === '1') setDevUnlocked(true);
       } catch {}
     })();
   }, []);
@@ -769,10 +785,10 @@ export function SettingsScreen({ navigation }) {
         ) : null}
       </Card>
 
-      {/* FIX-F4: Developer date override — dev only, -30..+30 days, AsyncStorage sos.dev.dateOffsetDays */}
-      {(typeof __DEV__ !== 'undefined' && __DEV__) || true ? (
+      {/* FIX-DEV: Developer panel hidden by default, 7× long-press version row → code → SHA-256 vs hash */}
+      {devUnlocked ? (
         <>
-          <SectionTitle mode="light">🛠️ Developer — Date Override (FIX-F4)</SectionTitle>
+          <SectionTitle mode="light">🛠️ Developer — Date Override (FIX-F4, hidden)</SectionTitle>
           <Card mode="light" style={{ marginBottom: 16, backgroundColor: devOffset!==0 ? '#FFFBEB' : '#F8FAFC', borderColor: devOffset!==0 ? '#FDE68A' : '#E2E8F0' }}>
             {devOffset!==0 ? (
               <View style={{ backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 8, padding: 8, marginBottom: 10 }}>
@@ -780,9 +796,9 @@ export function SettingsScreen({ navigation }) {
               </View>
             ) : null}
             <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', marginBottom: 10, lineHeight: 17 }}>
-              Offset -30…+30 days, stored in AsyncStorage sos.dev.dateOffsetDays. todayStr() applies it, so scheduler/xpOnce/Arena/gym rotation all shift together. 0 = exact pass-through.
+              Offset -30…+30 days, stored in AsyncStorage sos.dev.dateOffsetDays. todayStr() applies it, so scheduler/xpOnce/Arena/gym rotation all shift together. 0 = exact pass-through. Access via version row 7× long-press → code.
             </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
               <Pressable onPress={async () => {
                 const next = Math.max(-30, devOffset-1);
                 setDevOffset(next);
@@ -806,9 +822,14 @@ export function SettingsScreen({ navigation }) {
                 clearXpOnceCache();
                 try { await AsyncStorage.removeItem('sos.dev.dateOffsetDays'); } catch {}
                 setDevBanner('');
-              }} style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, marginLeft: 12 }}><Text style={{ fontSize: 12, color: '#B91C1C', fontFamily: fonts.bodyMedium }}>Reset 0</Text></Pressable>
+              }} style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, marginLeft: 8 }}><Text style={{ fontSize: 12, color: '#B91C1C', fontFamily: fonts.bodyMedium }}>Reset 0</Text></Pressable>
+              <Pressable onPress={async () => {
+                try { await AsyncStorage.removeItem('sos.dev.unlocked'); } catch {}
+                setDevUnlocked(false);
+                setVersionPressCount(0);
+              }} style={{ backgroundColor: '#F3F4F6', borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, marginLeft: 8 }}><Text style={{ fontSize: 12, color: '#374151', fontFamily: fonts.bodyMedium }}>Hide panel</Text></Pressable>
             </View>
-            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B' }}>Current todayStr(): {todayStr()} · offset {devOffset} · banner {devBanner || 'none'}</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B' }}>Current todayStr(): {todayStr()} · offset {devOffset} · banner {devBanner || 'none'} · unlocked via hash gate (obscurity, not security)</Text>
           </Card>
         </>
       ) : null}
@@ -877,14 +898,64 @@ export function SettingsScreen({ navigation }) {
         </Text>
       </Card>
 
-      <Card mode="light" style={{ marginBottom: 20, backgroundColor: '#F8FAFC' }}>
-        <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', textAlign: 'center' }}>
-          {APP_NAME} v{APP_VERSION}
-        </Text>
-        <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 5, lineHeight: 17 }}>
-          {APP_TAGLINE}{'\n'}Free for fellow students — made with ❤️ and chai.
-        </Text>
-      </Card>
+      <Pressable
+        onLongPress={() => {
+          const next = versionPressCount + 1;
+          setVersionPressCount(next);
+          if (next >= 7) {
+            setVersionPressCount(0);
+            if (!devUnlocked) {
+              setDevCodeInput('');
+              setDevCodeError('');
+              setDevCodeModal(true);
+            }
+          }
+        }}
+        delayLongPress={250}
+        style={{ marginBottom: 20 }}
+      >
+        <Card mode="light" style={{ marginBottom: 0, backgroundColor: '#F8FAFC' }}>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 14, color: '#1E293B', textAlign: 'center' }}>
+            {APP_NAME} v{APP_VERSION}
+          </Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 5, lineHeight: 17 }}>
+            {APP_TAGLINE}{'
+'}Free for fellow students — made with ❤️ and chai.
+          </Text>
+          {versionPressCount>0 && versionPressCount<7 && !devUnlocked ? (
+            <Text style={{ fontFamily: fonts.body, fontSize: 10, color: '#94A3B8', textAlign: 'center', marginTop: 6 }}>{versionPressCount}/7</Text>
+          ) : null}
+        </Card>
+      </Pressable>
+
+      {/* FIX-DEV: hidden code prompt — SHA-256 compare, generic error, no plaintext */}
+      <ModalSheet visible={devCodeModal} onClose={() => { setDevCodeModal(false); setDevCodeError(''); setDevCodeInput(''); }} title="Developer Access" subtitle="Enter access code (hidden feature)">
+        <Input label="Access code" value={devCodeInput} onChangeText={(t) => { setDevCodeInput(t); if (devCodeError) setDevCodeError(''); }} placeholder="••••••••" secureTextEntry autoCapitalize="none" />
+        {devCodeError ? <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#DC2626', marginTop: 8 }}>{devCodeError}</Text> : null}
+        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 10, lineHeight: 15 }}>Code is kept private by PO. Only SHA-256 hash is embedded. This is an obscurity gate, not cryptographic security. Wrong code shows generic error and never reveals expected value.</Text>
+        <View style={{ flexDirection: 'row', marginTop: 16, gap: 10 }}>
+          <View style={{ flex: 1 }}><Button title="Cancel" variant="ghost" onPress={() => { setDevCodeModal(false); setDevCodeError(''); setDevCodeInput(''); }} /></View>
+          <View style={{ flex: 1 }}><Button title="Unlock" onPress={async () => {
+            const raw = String(devCodeInput || '').trim();
+            if (!raw) { setDevCodeError('Enter code'); return; }
+            try {
+              const h = await sha256Hex(raw);
+              if (h.toLowerCase() === DEV_PANEL_HASH.toLowerCase()) {
+                try { await AsyncStorage.setItem('sos.dev.unlocked', '1'); } catch {}
+                setDevUnlocked(true);
+                setDevCodeModal(false);
+                setDevCodeInput('');
+                setDevCodeError('');
+                setVersionPressCount(0);
+              } else {
+                setDevCodeError('Invalid code. Try again.');
+              }
+            } catch {
+              setDevCodeError('Invalid code. Try again.');
+            }
+          }} /></View>
+        </View>
+      </ModalSheet>
     </Screen>
   );
 }
