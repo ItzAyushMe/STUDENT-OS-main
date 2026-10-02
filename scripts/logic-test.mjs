@@ -3501,9 +3501,14 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   });
 
   // ---------- J1*: DEVICE upload flow — verified as source-wiring probes ----------
+  // FIX-CONTENT (PO 2026-10-02): old FormData {uri} with empty name rejected on Android
+  // (Unsupported FormDataPart). New native path = fetch(uri).blob() first, fallback
+  // expo-file-system base64 → Uint8Array. Probe updated to accept new shape.
   check('J1*', '[wiring probe — DEVICE/PO-RUNTIME: a real upload + the 403 isolation test happen on a device after the PO runs the DDL] the screen validates BEFORE any network call, uploads {uid}/{uuid}.{ext} with upsert:false into the private bucket, opens files via short-lived signed URLs only, and never touches getPublicUrl/createBucket/service_role', () => {
     needsCL();
-    assert.ok(csSrcJ.includes("import { getDocumentAsync } from 'expo-document-picker'"), 'the ONLY new dependency is expo-document-picker');
+    // deps: original picker + approved file-system/print/sharing (PO 2026-10-02)
+    assert.ok(csSrcJ.includes("import { getDocumentAsync } from 'expo-document-picker'"), 'picker still present');
+    assert.ok(csSrcJ.includes('expo-file-system') || csSrcJ.includes('FileSystem'), 'FIX-CONTENT: expo-file-system used for native file read (approved dep)');
     const pick = sliceFn(csSrcJ, 'const pickFile = async (kind)', 'const uploadBody');
     const iLoc = pick.indexOf('LOCAL_UPLOAD_MESSAGE'); const iPick = pick.indexOf('getDocumentAsync(');
     assert.ok(iLoc >= 0 && iPick >= 0 && iLoc < iPick, 'local mode gets the honest cloud-only message BEFORE the picker opens');
@@ -3517,9 +3522,18 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(save.includes('upsert: false') && save.includes('contentType: v.contentType'), 'upload is create-only with the right content type');
     assert.ok(save.includes(`from(CONTENT_BUCKET)`), 'uploads target the `content` bucket constant');
     assert.ok(save.includes('fileRowFrom('), 'the inserted row is built by the pure lib');
-    // native + web body shapes
-    assert.ok(csSrcJ.includes("fd.append('', {"), 'native body = FormData with the RN {uri,name,type} file part under the EMPTY field name — exactly the shape storage-js itself builds for Blobs (verified in the installed client source)');
-    assert.ok(csSrcJ.includes('cacheControl'), 'the multipart body carries cacheControl like storage-js does');
+    // native body shape — FIX-CONTENT new path
+    assert.ok(!csSrcJ.includes("fd.append('', {"), 'old broken FormData empty-name path removed (FIX-CONTENT)');
+    assert.ok(
+      (csSrcJ.includes('fetch(p.uri)') && csSrcJ.includes('blob()')) ||
+      csSrcJ.includes('readAsStringAsync') ||
+      csSrcJ.includes('FileSystem') ||
+      csSrcJ.includes('base64') ||
+      csSrcJ.includes('Uint8Array'),
+      'native body = blob or file-system base64 → Uint8Array (FIX-CONTENT approved)'
+    );
+    // web branch kept byte-identical
+    assert.ok(csSrcJ.includes('if (p.file) return p.file'), 'web branch still returns p.file directly');
     // opening files: signed URLs ONLY
     assert.ok(csSrcJ.includes('createSignedUrl(item.url, SIGNED_URL_TTL_SECONDS)'), 'opens via a short-lived signed URL');
     assert.ok(!csSrcJ.includes('getPublicUrl'), 'NEVER a public URL (the bucket is private)');

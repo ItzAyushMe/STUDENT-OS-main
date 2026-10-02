@@ -216,13 +216,11 @@ export function ContentScreen({ navigation }) {
 
   // Bytes for supabase storage, per platform:
   //   web    -> the picker's real File object (storage-js Blob path builds the multipart body)
-  //   native -> FormData whose file part is the RN {uri} descriptor — the NATIVE
-  //             networking layer reads the picked file itself (RequestBodyUtil on
-  //             Android / RCTNetworking on iOS), and storage-js passes FormData
-  //             straight through (verified in the installed client's source).
-  // storage-js docs suggest base64->ArrayBuffer for RN; that route needs
-  // expo-file-system, which this round's single-dependency budget does not allow
-  // (declared in the FIX-J report; device test is PO-side either way).
+  //   native -> FIX-CONTENT: old FormData {uri} with empty name rejected on Android
+  //             (Unsupported FormDataPart implementation, screenshot 3). New path:
+  //             try fetch(uri).blob() first (new RN supports file:// fetch), fallback
+  //             to expo-file-system base64 → Uint8Array → storage upload. Web branch
+  //             kept byte-identical per handoff.
   const uploadBody = async (p) => {
     if (Platform.OS === 'web') {
       if (p.file) return p.file;
@@ -230,10 +228,65 @@ export function ContentScreen({ navigation }) {
       if (!r.ok) throw new Error('picked file read fail (web)');
       return r.blob();
     }
-    const fd = new FormData();
-    fd.append('cacheControl', '3600');
-    fd.append('', { uri: p.uri, name: p.name || 'file', type: p.mimeType || 'application/octet-stream' });
-    return fd;
+    // FIX-CONTENT: native path — blob first, then file-system
+    try {
+      const res = await fetch(p.uri);
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob && typeof blob.size === 'number' && blob.size > 0) return blob;
+      }
+    } catch {}
+    // Fallback: expo-file-system Base64 → Uint8Array
+    try {
+      const FS = await import('expo-file-system');
+      // SDK 57 has both legacy readAsStringAsync and new File API
+      let b64 = null;
+      if (FS.readAsStringAsync) {
+        const enc = (FS.EncodingType && FS.EncodingType.Base64) || 'base64';
+        b64 = await FS.readAsStringAsync(p.uri, { encoding: enc });
+      } else if (FS.File) {
+        const file = new FS.File(p.uri);
+        if (typeof file.base64 === 'function') b64 = await file.base64();
+        else if (typeof file.bytes === 'function') {
+          const u8 = await file.bytes();
+          return u8;
+        }
+      } else if (FS.default && FS.default.readAsStringAsync) {
+        const enc = (FS.default.EncodingType && FS.default.EncodingType.Base64) || 'base64';
+        b64 = await FS.default.readAsStringAsync(p.uri, { encoding: enc });
+      }
+      if (!b64) throw new Error('FileSystem returned empty base64');
+      // base64 → Uint8Array (atob available in RN 0.73+; fallback manual)
+      let bytes;
+      if (typeof atob === 'function') {
+        const bin = atob(b64);
+        bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      } else {
+        // manual base64 decode (no atob)
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        let str = b64.replace(/[^A-Za-z0-9+/=]/g, '');
+        const len = str.length;
+        const buffer = [];
+        let i = 0;
+        while (i < len) {
+          const enc1 = chars.indexOf(str.charAt(i++));
+          const enc2 = chars.indexOf(str.charAt(i++));
+          const enc3 = chars.indexOf(str.charAt(i++));
+          const enc4 = chars.indexOf(str.charAt(i++));
+          const chr1 = (enc1 << 2) | (enc2 >> 4);
+          const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+          const chr3 = ((enc3 & 3) << 6) | enc4;
+          buffer.push(chr1);
+          if (enc3 !== 64) buffer.push(chr2);
+          if (enc4 !== 64) buffer.push(chr3);
+        }
+        bytes = new Uint8Array(buffer);
+      }
+      return bytes;
+    } catch (e) {
+      throw new Error(`File read fail (native): ${e?.message || e}`);
+    }
   };
 
   const saveFile = async () => {

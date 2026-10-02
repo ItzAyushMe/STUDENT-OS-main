@@ -73,14 +73,11 @@ function AnswerText({ q, why, showWhy = true }) {
   );
 }
 
-function printHtml(title, bodyHtml) {
-  if (Platform.OS === 'web') {
-    const w = window.open('', '_blank');
-    if (!w) {
-      window.alert('Pop-up blocked — pop-ups allow karo, phir Print/Save as PDF kar paoge.');
-      return;
-    }
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+// FIX-EXPORT: web = window.print, native = expo-print → PDF file → Sharing.shareAsync
+// Before, native branch was Share.share({message: text}) — text only, no PDF on Android.
+// Now: printToFileAsync({html}) → shareAsync pdf. Deps expo-print + expo-sharing approved PO 2026-10-02.
+function buildPrintHtml(title, bodyHtml) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
       <style>
         body { font-family: Georgia, 'Times New Roman', serif; max-width: 760px; margin: 28px auto; color: #111; line-height: 1.5; }
         h1 { font-size: 21px; text-align: center; margin-bottom: 2px; }
@@ -98,8 +95,42 @@ function printHtml(title, bodyHtml) {
       </style></head><body>${bodyHtml}
       <p class="noprint" style="text-align:center;color:#777;margin-top:24px">Use your browser's Print → Save as PDF.</p>
       <script>window.onload = () => setTimeout(() => window.print(), 250)</script>
-      </body></html>`);
+      </body></html>`;
+}
+
+async function printHtml(title, bodyHtml) {
+  const html = buildPrintHtml(title, bodyHtml);
+  if (Platform.OS === 'web') {
+    const w = window.open('', '_blank');
+    if (!w) {
+      window.alert('Pop-up blocked — pop-ups allow karo, phir Print/Save as PDF kar paoge.');
+      return;
+    }
+    w.document.write(html);
     w.document.close();
+    return;
+  }
+  // native: PDF via expo-print + expo-sharing
+  try {
+    const Print = await import('expo-print');
+    const Sharing = await import('expo-sharing');
+    const printFn = Print.printToFileAsync || Print.default?.printToFileAsync;
+    const shareFn = Sharing.shareAsync || Sharing.default?.shareAsync;
+    const isAvailFn = Sharing.isAvailableAsync || Sharing.default?.isAvailableAsync;
+    if (!printFn || !shareFn) throw new Error('Print/Sharing module missing');
+    const { uri } = await printFn({ html });
+    if (isAvailFn) {
+      const avail = await isAvailFn();
+      if (avail === false) throw new Error('Sharing not available on this device');
+    }
+    await shareFn(uri, { mimeType: 'application/pdf', UTI: 'com.adobe.pdf' });
+  } catch (e) {
+    console.warn('[EXPORT] PDF fail', e?.message);
+    // fallback: still try text share? No — surface error via alert if possible
+    try {
+      const { Alert } = require('react-native');
+      Alert.alert('PDF export fail', e?.message || 'PDF generate nahi ho paya — dobara try karo');
+    } catch {}
   }
 }
 
