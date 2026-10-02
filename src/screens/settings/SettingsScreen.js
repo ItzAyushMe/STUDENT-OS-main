@@ -31,17 +31,7 @@ import { sha256Hex } from '../../lib/hash';
 const DEV_PANEL_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 import * as Notifications from 'expo-notifications';
 import { useHubBack } from '../../hooks/useHubBack';
-
-// FIX-EXAM: same masked date helper as onboarding — numeric keyboard can't type '-'
-function maskDateInput(v) {
-  const digits = String(v || '').replace(/\D/g, '').slice(0, 8);
-  if (digits.length <= 4) return digits;
-  if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
-  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
-}
-function isValidDateStr(s) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
-}
+import { maskDateInput, isValidDateStr } from '../../lib/dateMask';
 
 export function SettingsScreen({ navigation }) {
   const { profile, signOut, cloudMode, updateProfile } = useAuth();

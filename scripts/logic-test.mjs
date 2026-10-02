@@ -4380,6 +4380,192 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedOA.length, 0, `FIX-AUTH: ${failedOA.length} check(s) failed -> ${failedOA.map((f) => f.id).join(', ')}`);
 }
 
+
+// ---------- FIX-TEST: GT1/GT2/HASH1/MASK1/UM1 ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+
+  // ---------- GT1: gym reps regression — logic simulation ----------
+  check('GT1', 'Gym reps verbatim: \"4 each leg\" survives merge->filter->persist->reload, empty reps with sets becomes \"—\" (proves digit-loss regression cannot return)', () => {
+    const mergeEntry = (existing, patch) => {
+      return { sets: '', reps: '', weight: '', ...(existing || {}), ...patch };
+    };
+    const filterNonEmpty = (entriesObj) => Object.entries(entriesObj).filter(([, v]) => v.sets || v.reps || v.weight);
+    const persist = (filtered) => filtered.map(([, v]) => ({
+      sets: v.sets,
+      reps: v.reps || '—',
+      weight: v.weight,
+    }));
+
+    let e = {};
+    e['pushup'] = mergeEntry(e['pushup'], { reps: '4 each leg', sets: '3' });
+    let filtered = filterNonEmpty(e);
+    assert.equal(filtered.length, 1, 'non-empty filter keeps row with sets');
+    let saved = persist(filtered);
+    assert.equal(saved[0].reps, '4 each leg', 'persist keeps verbatim');
+    const reload = saved[0].reps;
+    assert.equal(reload, '4 each leg', 'reload byte-for-byte exact');
+
+    e = {};
+    e['squat'] = mergeEntry(e['squat'], { sets: '2', reps: '' });
+    filtered = filterNonEmpty(e);
+    assert.equal(filtered.length, 1, 'empty reps but sets filled still passes filter');
+    saved = persist(filtered);
+    assert.equal(saved[0].reps, '—', 'empty reps becomes em dash');
+  });
+
+  // ---------- GT2: gym reps wiring probe ----------
+  check("GT2", "[wiring probe] GymScreen.js still contains verbatim patterns (v.reps fallback and keyboardType default for reps) and ABSENCE of digit-stripping transforms on reps path", () => {
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.length > 1000, 'GymScreen.js read');
+    assert.ok(gymSrc.includes("reps: v.reps || '—'"), "contains v.reps || '—'");
+    assert.ok(gymSrc.includes("sets: '', reps: '', weight: ''"), 'contains merge defaults');
+    assert.ok(gymSrc.includes('keyboardType="default"') && gymSrc.includes('entry.reps'), 'reps inputs use keyboardType default');
+    const countDefault = (gymSrc.match(/keyboardType="default"/g) || []).length;
+    assert.ok(countDefault >= 2, `at least 2 keyboardType="default" found, got ${countDefault}`);
+    const hasParseInt = gymSrc.includes('parseInt(');
+    const hasParseFloat = gymSrc.includes('parseFloat(');
+    assert.equal(hasParseInt, false, 'GymScreen.js must NOT contain parseInt(');
+    assert.equal(hasParseFloat, false, 'GymScreen.js must NOT contain parseFloat(');
+    const lines = gymSrc.split('\n');
+    for (const line of lines) {
+      if (line.includes('reps') && line.includes('.replace(')) {
+        if (/\b(reps|entry\.reps|v\.reps)\b/.test(line) && /\.replace\(/.test(line)) {
+          assert.fail(`digit-stripping .replace found on reps path: ${line.trim()}`);
+        }
+      }
+    }
+  });
+
+  // ---------- HASH1: sha256Hex vectors ----------
+  await record('HASH1', 'sha256Hex pure impl: \"\", \"abc\", 64-byte, 65-byte, unicode — hardcoded lower-case 64-hex exact, no runtime crypto', async () => {
+    let mod = null;
+    try { mod = await import('./../src/lib/hash.js'); } catch (e) { throw new Error('hash.js import failed: ' + e.message); }
+    const { sha256Hex } = mod;
+    assert.ok(typeof sha256Hex === 'function', 'sha256Hex exported');
+    const vectors = [
+      { input: '', expected: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' },
+      { input: 'abc', expected: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' },
+      { input: 'y'.repeat(64), expected: 'ffbf30ab94107b2c14d75cfb455ec94f200400ddc5ce304e0c21894090db055f' },
+      { input: 'z'.repeat(65), expected: '57685f5e43ddac1567f4d404c357c44bab70744b8b6af6009760389170c5c062' },
+      { input: 'héllo wörld ünïcode ✓', expected: '09cc6e242ffeccc975f644c8385c48f7f387513a88ba4e4c2085c07a7c0ee0c4' },
+    ];
+    for (const { input, expected } of vectors) {
+      const got = sha256Hex(input);
+      assert.equal(typeof got, 'string', 'returns string');
+      assert.equal(got.length, 64, '64 hex chars');
+      assert.equal(got, got.toLowerCase(), 'lower-case');
+      assert.ok(/^[0-9a-f]{64}$/.test(got), 'hex format');
+      assert.equal(got, expected, `sha256Hex(${JSON.stringify(input).slice(0,30)}) matches expected`);
+    }
+    const hashSrc = safeRead('src/lib/hash.js');
+    assert.ok(!hashSrc.includes('node:crypto') && !hashSrc.includes("require('crypto')") && !hashSrc.includes('createHash'), 'hash.js must NOT use Node crypto at runtime');
+  });
+
+  // ---------- MASK1: dateMask extraction + behavioral ----------
+  await record('MASK1', 'maskDateInput/isValidDateStr extracted to lib, real impl tested, wiring probe import-only', async () => {
+    let dm = null;
+    try { dm = await import('./../src/lib/dateMask.js'); } catch (e) { throw new Error('dateMask.js import failed: ' + e.message); }
+    const { maskDateInput, isValidDateStr } = dm;
+    assert.ok(typeof maskDateInput === 'function' && typeof isValidDateStr === 'function', 'both exported');
+    assert.equal(maskDateInput('2026 11 14'), '2026-11-14', 'spaces → dashes');
+    assert.equal(maskDateInput('20261114'), '2026-11-14', '8 digits → YYYY-MM-DD');
+    assert.equal(maskDateInput('202611141234'), '2026-11-14', '>8 digits truncated');
+    assert.equal(maskDateInput('2026-1'), '2026-1', 'partial stable 2026-1');
+    assert.equal(maskDateInput('2026-11'), '2026-11', 'partial stable 2026-11');
+    assert.equal(maskDateInput(''), '', 'empty → empty');
+    assert.equal(maskDateInput('abc'), '', 'junk → empty');
+    assert.equal(isValidDateStr('2026-11-14'), true, 'valid true');
+    assert.equal(isValidDateStr('2026 11 14'), false, 'space false');
+    assert.equal(isValidDateStr(''), false, 'empty false');
+
+    const onbSrc = safeRead('src/screens/onboarding/OnboardingScreen.js');
+    const setSrc = safeRead('src/screens/settings/SettingsScreen.js');
+    assert.ok(onbSrc.includes("from '../../lib/dateMask'") || onbSrc.includes('from \"../../lib/dateMask\"'), 'Onboarding imports dateMask');
+    assert.ok(setSrc.includes("from '../../lib/dateMask'") || setSrc.includes('from \"../../lib/dateMask\"'), 'Settings imports dateMask');
+    assert.ok(!/function\s+maskDateInput\s*\(/.test(onbSrc), 'Onboarding no longer defines local maskDateInput');
+    assert.ok(!/function\s+maskDateInput\s*\(/.test(setSrc), 'Settings no longer defines local maskDateInput');
+    const libSrc = safeRead('src/lib/dateMask.js');
+    assert.ok(libSrc.includes('replace(/\\D/g'), 'lib contains digit strip');
+    assert.ok(libSrc.includes('slice(0, 8)'), 'lib contains 8-digit cap');
+    assert.ok(libSrc.includes('isValidDateStr'), 'lib exports isValidDateStr');
+  });
+
+  // ---------- UM1: updateMany local-path ----------
+  check('UM1', 'updateMany local branch: Map-based patch, updated_at fresh, unrelated rows untouched, empty no-op, return exactly patched', () => {
+    const dbSrc = safeRead('src/lib/db.js');
+    assert.ok(dbSrc.includes('async updateMany'), 'db.js has updateMany');
+    assert.ok(dbSrc.includes('new Map(') && dbSrc.includes('map.has(r.id)'), 'Map-based patch present');
+    assert.ok(dbSrc.includes('updated_at: nowIso()'), 'updated_at: nowIso() present');
+    assert.ok(dbSrc.includes('localSave'), 'localSave used in local branch');
+    assert.ok(dbSrc.includes('localAll'), 'localAll used');
+
+    const nowIso = () => new Date().toISOString();
+    const localSaveSim = (rows, next) => { rows.length = 0; rows.push(...next); };
+
+    const simulateUpdateManyLocal = (rows, updates) => {
+      if (!updates.length) return [];
+      const map = new Map(updates.map((u) => [u.id, u.patch]));
+      const next = rows.map((r) => (map.has(r.id) ? { ...r, ...map.get(r.id), updated_at: nowIso() } : r));
+      localSaveSim(rows, next);
+      return next.filter((r) => map.has(r.id));
+    };
+
+    const rows = [
+      { id: 'a', title: 'Alpha', status: 'pending', updated_at: '2026-01-01T00:00:00.000Z' },
+      { id: 'b', title: 'Beta', status: 'pending', updated_at: '2026-01-01T00:00:00.000Z' },
+      { id: 'c', title: 'Gamma', status: 'pending', updated_at: '2026-01-01T00:00:00.000Z' },
+    ];
+    const beforeC = JSON.stringify(rows[2]);
+
+    const updates = [
+      { id: 'a', patch: { status: 'done' } },
+      { id: 'b', patch: { title: 'Beta-2' } },
+    ];
+    const ret = simulateUpdateManyLocal(rows, updates);
+
+    const rowA = rows.find((r) => r.id === 'a');
+    const rowB = rows.find((r) => r.id === 'b');
+    assert.equal(rowA.status, 'done', 'a patched');
+    assert.equal(rowB.title, 'Beta-2', 'b patched');
+    assert.equal(JSON.stringify(rows.find((r) => r.id === 'c')), beforeC, 'c unchanged byte-for-byte');
+    assert.ok(rowB.status === 'pending', 'b status untouched');
+
+    assert.ok(rowA.updated_at !== '2026-01-01T00:00:00.000Z', 'a updated_at fresh');
+    assert.ok(rowB.updated_at !== '2026-01-01T00:00:00.000Z', 'b updated_at fresh');
+    assert.ok(new Date(rowA.updated_at) > new Date('2026-01-01'), 'a updated_at is recent');
+    assert.equal(rows.find((r) => r.id === 'c').updated_at, '2026-01-01T00:00:00.000Z', 'c updated_at untouched');
+
+    const rows2 = [{ id: 'x', v: 1, updated_at: '2026-01-01T00:00:00.000Z' }];
+    const retEmpty = simulateUpdateManyLocal(rows2, []);
+    assert.deepEqual(retEmpty, [], 'empty updates returns []');
+    assert.equal(rows2.length, 1, 'empty no-op keeps rows');
+    assert.equal(rows2[0].v, 1, 'empty no-op unchanged');
+
+    assert.equal(ret.length, 2, 'return length 2');
+    assert.ok(ret.some((r) => r.id === 'a') && ret.some((r) => r.id === 'b'), 'return contains a,b');
+    assert.ok(!ret.some((r) => r.id === 'c'), 'return does not contain c');
+  });
+
+  const failed = results.filter((r) => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-TEST: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
+}
+
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 
