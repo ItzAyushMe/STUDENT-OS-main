@@ -746,22 +746,26 @@ export function SettingsScreen({ navigation }) {
           />
         </View>
         {settings.dailyReminder ? (
-          <Input
-            label="Time (HH:MM)"
-            value={reminderTime}
-            onChangeText={setReminderTime}
-            placeholder="20:00"
-            style={{ marginTop: 10 }}
-            onBlur={async () => {
-              // L-2 (audit): editing the time used to do nothing until the
-              // toggle was flipped — reschedule immediately on blur.
-              if (!/^\d{1,2}:\d{2}$/.test(reminderTime)) return;
-              try {
-                if (Platform.OS !== 'web') await scheduleReminder(reminderTime);
-                settings.update({ dailyReminder: reminderTime });
-              } catch { /* keep the old schedule */ }
-            }}
-          />
+          <>
+            <Input
+              label="Time (HH:MM)"
+              value={reminderTime}
+              onChangeText={setReminderTime}
+              placeholder="20:00"
+              style={{ marginTop: 10 }}
+              onBlur={async () => {
+                if (!/^\d{1,2}:\d{2}$/.test(reminderTime)) return;
+                try {
+                  if (Platform.OS !== 'web') await scheduleReminder(reminderTime);
+                  settings.update({ dailyReminder: reminderTime });
+                } catch { /* keep the old schedule */ }
+              }}
+            />
+            {/* FIX-NOTIF: battery-optimization hint for Xiaomi/Oppo */}
+            <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 8, lineHeight: 15 }}>
+              ℹ️ Android pe notification na aaye to: Settings → Apps → StudentOS → Battery → Unrestricted / Autostart allow karo. OEM battery savers alarms defer kar dete hain. Channel: daily, IMPORTANCE_HIGH.
+            </Text>
+          </>
         ) : null}
       </Card>
 
@@ -894,16 +898,37 @@ function Row({ label, value }) {
   );
 }
 
+// FIX-NOTIF: channel IMPORTANCE_HIGH + re-register on boot + battery hint
+async function ensureDailyChannel() {
+  if (Platform.OS === 'android') {
+    try {
+      await Notifications.setNotificationChannelAsync('daily', {
+        name: 'Daily reminder',
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#6D28D9',
+        sound: 'default',
+      });
+    } catch {}
+  }
+}
 async function scheduleReminder(hhmm) {
+  await ensureDailyChannel();
   await Notifications.cancelAllScheduledNotificationsAsync();
   const [h, m] = hhmm.split(':').map(Number);
-  // Daily repeating trigger (Android + iOS)
+  // Daily repeating trigger (Android + iOS) — pass channelId for HIGH importance
   await Notifications.scheduleNotificationAsync({
     content: {
       title: 'StudentOS 🎮',
       body: 'Aaj ke quests complete kiye? 15 min padh lo — shaabaash! 💪',
     },
-    trigger: { hour: h || 20, minute: m || 0, repeats: true, type: 'daily' },
+    trigger: {
+      hour: h || 20,
+      minute: m || 0,
+      repeats: true,
+      type: 'daily',
+      channelId: Platform.OS === 'android' ? 'daily' : undefined,
+    },
   });
 }
 
