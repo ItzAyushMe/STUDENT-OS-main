@@ -147,10 +147,11 @@ export function TutorScreen({ navigation, route }) {
           }
         />
 
+        {/* FIX-BYTE3: messages ScrollView gets flex:1 priority, chrome tightened */}
         <ScrollView
           ref={scrollRef}
-          style={{ flex: 1, paddingHorizontal: 16 }}
-          contentContainerStyle={{ paddingTop: 8, paddingBottom: 12 }}
+          style={{ flex: 1, minHeight: 0, paddingHorizontal: 16 }}
+          contentContainerStyle={{ paddingTop: 8, paddingBottom: 12, flexGrow: 1 }}
           keyboardShouldPersistTaps="handled"
         >
           {messages.length === 0 ? (
@@ -195,21 +196,21 @@ export function TutorScreen({ navigation, route }) {
           ) : null}
         </ScrollView>
 
-        {/* quick actions */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8 }}>
+        {/* quick actions — FIX-BYTE3: single scrollable line, compact */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, maxHeight: 44 }} contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 6 }}>
           {QUICK.map((q) => (
             <Chip key={q.key} label={q.label} small onPress={() => (q.prompt.endsWith(' ') ? setInput(q.prompt) : send(q.prompt))} mode="light" />
           ))}
         </ScrollView>
 
-        {/* input */}
+        {/* input — compact */}
         <View
           style={{
             flexDirection: 'row',
             alignItems: 'flex-end',
-            paddingHorizontal: 12,
-            paddingTop: 6,
-            paddingBottom: insets.bottom + 10,
+            paddingHorizontal: 10,
+            paddingTop: 4,
+            paddingBottom: insets.bottom + 6,
             backgroundColor: LIGHT.surface,
             borderTopWidth: 1,
             borderTopColor: LIGHT.border,
@@ -224,16 +225,16 @@ export function TutorScreen({ navigation, route }) {
             style={{
               flex: 1,
               fontFamily: fonts.body,
-              fontSize: 14.5,
+              fontSize: 14,
               color: LIGHT.text,
               backgroundColor: LIGHT.card,
               borderWidth: 1,
               borderColor: LIGHT.border,
               borderRadius: radius.lg,
-              paddingHorizontal: 14,
-              paddingTop: 10,
-              paddingBottom: 10,
-              maxHeight: 110,
+              paddingHorizontal: 12,
+              paddingTop: 8,
+              paddingBottom: 8,
+              maxHeight: 90,
               marginRight: 8,
             }}
             onSubmitEditing={() => send()}

@@ -1,7 +1,7 @@
 // DECK — study flashcards with flip animation and spaced
 // repetition (SM-2 lite): Easy +3d×mastery, Medium +1d, Hard +4h.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Dimensions, Easing, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
@@ -171,8 +171,8 @@ export function DeckScreen({ navigation, route }) {
             </View>
           </View>
 
-          {/* flip card */}
-          <Pressable onPress={() => setFlipped((f) => !f)} style={{ height: 300, justifyContent: 'center' }}>
+          {/* flip card — FIX-FLASH: flexible height + scrollable content + rate row in flow */}
+          <Pressable onPress={() => setFlipped((f) => !f)} style={{ minHeight: 200, maxHeight: Dimensions.get('window').height * 0.55, justifyContent: 'center' }}>
             <Animated.View
               style={{
                 ...StyleSheet.absoluteFillObject,
@@ -180,16 +180,18 @@ export function DeckScreen({ navigation, route }) {
                 opacity: frontOpacity,
               }}
             >
-              <Card mode="light" style={{ flex: 1, minHeight: 280, justifyContent: 'center', padding: 22, borderWidth: 2, borderColor: color + '55' }}>
-                <Text style={{ fontFamily: fonts.body, fontSize: 11, color, letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
-                  QUESTION
-                </Text>
-                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 19, color: '#1E293B', textAlign: 'center', lineHeight: 28 }}>
-                  <MathText>{card.front_text}</MathText>
-                </Text>
-                <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', textAlign: 'center', marginTop: 20 }}>
-                  Tap to flip 🔄
-                </Text>
+              <Card mode="light" style={{ flex: 1, minHeight: 200, maxHeight: Dimensions.get('window').height * 0.55, padding: 0, borderWidth: 2, borderColor: color + '55', overflow: 'hidden' }}>
+                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, justifyContent: 'center' }} showsVerticalScrollIndicator={false}>
+                  <Text style={{ fontFamily: fonts.body, fontSize: 11, color, letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
+                    QUESTION
+                  </Text>
+                  <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 19, color: '#1E293B', textAlign: 'center', lineHeight: 28 }}>
+                    <MathText>{card.front_text}</MathText>
+                  </Text>
+                  <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#94A3B8', textAlign: 'center', marginTop: 20 }}>
+                    Tap to flip 🔄
+                  </Text>
+                </ScrollView>
               </Card>
             </Animated.View>
 
@@ -201,13 +203,15 @@ export function DeckScreen({ navigation, route }) {
               }}
               pointerEvents={flipped ? 'auto' : 'none'}
             >
-              <Card mode="light" style={{ flex: 1, minHeight: 280, justifyContent: 'center', padding: 22, backgroundColor: '#F0FDFA', borderWidth: 2, borderColor: '#10B98155' }}>
-                <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#0891B2', letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
-                  ANSWER
-                </Text>
-                <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 18, color: '#1E293B', textAlign: 'center', lineHeight: 27 }}>
-                  <MathText>{card.back_text}</MathText>
-                </Text>
+              <Card mode="light" style={{ flex: 1, minHeight: 200, maxHeight: Dimensions.get('window').height * 0.55, padding: 0, backgroundColor: '#F0FDFA', borderWidth: 2, borderColor: '#10B98155', overflow: 'hidden' }}>
+                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, justifyContent: 'center' }} showsVerticalScrollIndicator={false}>
+                  <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#0891B2', letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
+                    ANSWER
+                  </Text>
+                  <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 18, color: '#1E293B', textAlign: 'center', lineHeight: 27 }}>
+                    <MathText>{card.back_text}</MathText>
+                  </Text>
+                </ScrollView>
               </Card>
             </Animated.View>
           </Pressable>

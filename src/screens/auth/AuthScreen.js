@@ -10,6 +10,7 @@ import { GAMER, fonts, radius } from '../../config/theme';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { PixelText } from '../../components/gamer/PixelText';
+import { isOnline } from '../../lib/aiService';
 
 export function AuthScreen() {
   const { signIn, signUp, signInWithGoogle, continueAsGuest, cloudMode } = useAuth();
@@ -21,13 +22,28 @@ export function AuthScreen() {
   const [error, setError] = useState('');
   const insets = useSafeAreaInsets();
 
+  // FIX-A4: offline auth UX — pre-flight isOnline + friendly message, never raw exception
   const run = async (fn) => {
     setError('');
     setBusy(true);
     try {
+      if (cloudMode) {
+        const online = await isOnline();
+        if (!online) {
+          setError('You are offline — check your connection and try again. (Wi-Fi / mobile data on karo)');
+          return;
+        }
+      }
       await fn();
     } catch (e) {
-      setError(e?.message || 'Kuch gadbad ho gayi. Try again!');
+      const msg = String(e?.message || '');
+      const lower = msg.toLowerCase();
+      // map raw network errors to friendly offline message
+      if (lower.includes('unknownhost') || lower.includes('network') || lower.includes('timeout') || lower.includes('failed to fetch') || lower.includes('internet') || lower.includes('unable to resolve')) {
+        setError('You are offline — check your connection and try again. (Wi-Fi / mobile data on karo)');
+      } else {
+        setError(msg || 'Kuch gadbad ho gayi. Try again!');
+      }
     } finally {
       setBusy(false);
     }
