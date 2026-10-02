@@ -29,17 +29,23 @@ export function SegmentedControl({ options, value, onChange, mode, style }) {
             onPress={() => onChange(key)}
             style={{
               flex: 1,
+              minWidth: 72,
               paddingVertical: 8,
+              paddingHorizontal: 6,
               borderRadius: radius.sm,
               backgroundColor: active ? theme.primary : 'transparent',
               alignItems: 'center',
+              justifyContent: 'center',
             }}
           >
             <Text
+              numberOfLines={1}
+              ellipsizeMode="tail"
               style={{
                 fontFamily: fonts.bodySemiBold,
                 fontSize: 13,
                 color: active ? '#FFFFFF' : theme.subtext,
+                textAlign: 'center',
               }}
             >
               {label}

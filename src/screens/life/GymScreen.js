@@ -628,24 +628,28 @@ const styles = {
   colHead: { fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#64748B' },
 };
 
-function MiniInput({ value, onChangeText, placeholder, flex }) {
+function MiniInput({ value, onChangeText, placeholder, flex, keyboardType }) {
+  // FIX-GYM2: reps are free-form strings like "12 each leg" — numeric keyboard
+  // blocked typing letters, and minWidth 44 clipped "each leg". Now default
+  // keyboard is text (free-form), numeric only for sets/weight; minWidth widened
+  // to 56 and flex 0.8 default so "12 each leg" is fully visible.
   return (
     <TextInput
       value={value}
       onChangeText={onChangeText}
       placeholder={placeholder}
       placeholderTextColor="#CBD5E1"
-      keyboardType="numeric"
+      keyboardType={keyboardType || 'default'}
       style={{
-        flex: flex === undefined ? 0.6 : flex,
-        minWidth: 44,
+        flex: flex === undefined ? 0.8 : flex,
+        minWidth: 56,
         minHeight: 36,
         marginLeft: 4,
         backgroundColor: '#F8FAFC',
         borderWidth: 1,
         borderColor: '#E2E8F0',
         borderRadius: 8,
-        paddingHorizontal: 6,
+        paddingHorizontal: 8,
         paddingVertical: 7,
         fontFamily: fonts.body,
         fontSize: 12.5,
@@ -669,7 +673,7 @@ function ExerciseRow({ ex, entry, narrow, onSet, removable, onRemove }) {
           borderTopColor: '#F1F5F9',
         }}
       >
-        <View style={{ flex: 1.8, marginRight: 6 }}>
+        <View style={{ flex: 1.6, marginRight: 6 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', flexShrink: 1 }}>
               {ex.name}
@@ -680,13 +684,13 @@ function ExerciseRow({ ex, entry, narrow, onSet, removable, onRemove }) {
               </Pressable>
             ) : null}
           </View>
-          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8' }}>
+          <Text numberOfLines={1} style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8' }}>
             target {ex.sets}×{ex.reps} {ex.group ? `· ${ex.group}` : ''}
           </Text>
         </View>
-        <MiniInput value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} />
-        <MiniInput value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} />
-        <MiniInput value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" />
+        <MiniInput keyboardType="numeric" value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} flex={0.6} />
+        <MiniInput keyboardType="default" value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} flex={1.1} />
+        <MiniInput keyboardType="numeric" value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" flex={0.7} />
       </View>
     );
   }
@@ -709,16 +713,16 @@ function ExerciseRow({ ex, entry, narrow, onSet, removable, onRemove }) {
           </Pressable>
         ) : null}
       </View>
-      <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 1, marginBottom: 8 }}>
+      <Text numberOfLines={1} style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 1, marginBottom: 8 }}>
         target {ex.sets}×{ex.reps} {ex.group ? `· ${ex.group}` : ''}
       </Text>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 38 }}>Sets</Text>
-        <MiniInput flex={1} value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} />
+        <MiniInput keyboardType="numeric" flex={1} value={entry.sets ?? String(ex.sets)} onChangeText={(v) => onSet({ sets: v })} placeholder={String(ex.sets)} />
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 34, marginLeft: 8 }}>Reps</Text>
-        <MiniInput flex={1} value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} />
+        <MiniInput keyboardType="default" flex={1.2} value={entry.reps ?? String(ex.reps)} onChangeText={(v) => onSet({ reps: v })} placeholder={String(ex.reps)} />
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 11, color: '#64748B', width: 34, marginLeft: 8 }}>Wt</Text>
-        <MiniInput flex={1} value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" />
+        <MiniInput keyboardType="numeric" flex={1} value={entry.weight ?? ''} onChangeText={(v) => onSet({ weight: v })} placeholder="0" />
       </View>
     </View>
   );

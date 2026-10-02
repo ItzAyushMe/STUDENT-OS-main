@@ -494,7 +494,7 @@ export function TestBuilderScreen({ navigation }) {
       ) : null}
 
       {result?.kind === 'bank' ? (
-        <Card mode="light" style={{ marginBottom: 14 }}>
+        <Card mode="light" style={{ marginBottom: 14, paddingHorizontal: 16 }}>
           {result.data._banner ? (
             <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginBottom: 10 }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#92400E' }}>{result.data._banner}</Text>
@@ -509,7 +509,7 @@ export function TestBuilderScreen({ navigation }) {
             Question Bank — {result.data.questions.length} questions{result.data._partial ? ' (partial)' : ''}
           </Text>
           {result.data.questions.map((q, qi) => (
-            <View key={qi} style={{ marginBottom: 9 }}>
+            <View key={qi} style={{ marginBottom: 9, alignSelf: 'stretch' }}>
               <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', lineHeight: 18 }}>
                 Q{qi + 1} [{String(q.type || 'q').toUpperCase()}]. <MathText>{stemOf(q)}</MathText>
               </Text>

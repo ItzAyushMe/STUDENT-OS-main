@@ -19,6 +19,18 @@ import { daysUntil } from '../../lib/utils';
 
 const TOTAL_STEPS = 5;
 
+// FIX-EXAM: masked date input — digits → YYYY-MM-DD. Numeric keyboard can't type '-',
+// so we accept default keyboard and auto-insert dashes. Keeps storage format unchanged.
+function maskDateInput(v) {
+  const digits = String(v || '').replace(/\D/g, '').slice(0, 8);
+  if (digits.length <= 4) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
+}
+function isValidDateStr(s) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
+}
+
 export function OnboardingScreen() {
   const { profile, updateProfile, session } = useAuth();
   const insets = useSafeAreaInsets();
@@ -115,7 +127,11 @@ export function OnboardingScreen() {
     }
   };
 
-  const next = () => setStep((s) => Math.min(6, s + 1));
+  const next = () => {
+    // FIX-A1: dismiss keyboard instantly + immediate visual feedback via Button ripple
+    try { const { Keyboard } = require('react-native'); Keyboard.dismiss(); } catch {}
+    setStep((s) => Math.min(6, s + 1));
+  };
   const skipAll = () => setStep(5);
 
   const setSchoolExam = (i, patch) => {
@@ -313,10 +329,13 @@ export function OnboardingScreen() {
                   mode="gamer"
                   label="Exam date (YYYY-MM-DD)"
                   value={form.exam_date}
-                  onChangeText={(v) => set({ exam_date: v })}
+                  onChangeText={(v) => set({ exam_date: maskDateInput(v) })}
                   placeholder="2027-05-24"
                   hint="AI uses this to auto-plan your deadlines. You can change it anytime."
                 />
+                {form.exam_date && !isValidDateStr(form.exam_date) ? (
+                  <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#FCA5A5', marginTop: 4 }}>Use YYYY-MM-DD</Text>
+                ) : null}
               </View>
             ) : null}
             <InfoText>Optional — 'None' bilkul fine hai, school padhai bhi game hai.</InfoText>
@@ -337,10 +356,13 @@ export function OnboardingScreen() {
                   mode="gamer"
                   label="Olympiad date (YYYY-MM-DD)"
                   value={form.olympiad_date}
-                  onChangeText={(v) => set({ olympiad_date: v })}
+                  onChangeText={(v) => set({ olympiad_date: maskDateInput(v) })}
                   placeholder="2026-11-15"
                   hint="Optional — helps the scheduler plan around it."
                 />
+                {form.olympiad_date && !isValidDateStr(form.olympiad_date) ? (
+                  <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#FCA5A5', marginTop: 4 }}>Use YYYY-MM-DD</Text>
+                ) : null}
               </View>
             ) : null}
 
@@ -365,31 +387,33 @@ export function OnboardingScreen() {
                     </Pressable>
                   </View>
                   {e.exact ? (
-                    <Input
-                      mode="gamer"
-                      value={e.date}
-                      onChangeText={(v) => setSchoolExam(i, { date: v })}
-                      placeholder="Exact date YYYY-MM-DD"
-                      keyboardType="numeric"
-                    />
+                    <>
+                      <Input
+                        mode="gamer"
+                        value={e.date}
+                        onChangeText={(v) => setSchoolExam(i, { date: maskDateInput(v) })}
+                        placeholder="Exact date YYYY-MM-DD"
+                      />
+                      {e.date && !isValidDateStr(e.date) ? (
+                        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#FCA5A5', marginTop: 4 }}>Use YYYY-MM-DD (e.g. 2026-11-14)</Text>
+                      ) : null}
+                    </>
                   ) : (
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                       <View style={{ flex: 1, marginRight: 8 }}>
                         <Input
                           mode="gamer"
                           value={e.start_date}
-                          onChangeText={(v) => setSchoolExam(i, { start_date: v })}
+                          onChangeText={(v) => setSchoolExam(i, { start_date: maskDateInput(v) })}
                           placeholder="From YYYY-MM-DD"
-                          keyboardType="numeric"
                         />
                       </View>
                       <View style={{ flex: 1 }}>
                         <Input
                           mode="gamer"
                           value={e.end_date}
-                          onChangeText={(v) => setSchoolExam(i, { end_date: v })}
+                          onChangeText={(v) => setSchoolExam(i, { end_date: maskDateInput(v) })}
                           placeholder="To YYYY-MM-DD"
-                          keyboardType="numeric"
                         />
                       </View>
                     </View>
@@ -461,24 +485,27 @@ export function OnboardingScreen() {
             <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: GAMER.subtext, marginVertical: 8 }}>
               Days off (breaks are part of the plan)
             </Text>
-            <View style={{ flexDirection: 'row' }}>
-              {WEEKDAYS.map((d, i) => (
-                <Chip
-                  key={d}
-                  label={d}
-                  small
-                  selected={form.days_off.includes(i)}
-                  onPress={() =>
-                    set({
-                      days_off: form.days_off.includes(i)
-                        ? form.days_off.filter((x) => x !== i)
-                        : [...form.days_off, i],
-                    })
-                  }
-                  mode="gamer"
-                />
-              ))}
-            </View>
+            {/* FIX-A2: Sunday clipped on narrow phones — row now horizontally scrollable */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 12 }}>
+              <View style={{ flexDirection: 'row' }}>
+                {WEEKDAYS.map((d, i) => (
+                  <Chip
+                    key={d}
+                    label={d}
+                    small
+                    selected={form.days_off.includes(i)}
+                    onPress={() =>
+                      set({
+                        days_off: form.days_off.includes(i)
+                          ? form.days_off.filter((x) => x !== i)
+                          : [...form.days_off, i],
+                      })
+                    }
+                    mode="gamer"
+                  />
+                ))}
+              </View>
+            </ScrollView>
             <Input
               mode="gamer"
               label="Other commitments (optional)"

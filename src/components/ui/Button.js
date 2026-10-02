@@ -53,10 +53,15 @@ export function Button({
         })
       : {};
 
+  // FIX-A1: instant pressed feedback — ripple on Android + opacity.
+  // Before, Next() was pure setState with no visual feedback, so on a heavy
+  // step-tree re-render it felt "slow". Ripple + lower pressed opacity gives
+  // immediate tactile response.
   return (
     <Pressable
       onPress={onPress}
       disabled={disabled || loading}
+      android_ripple={{ color: 'rgba(255,255,255,0.18)', borderless: false }}
       style={({ pressed }) => [
         {
           backgroundColor: bg,
@@ -64,9 +69,10 @@ export function Button({
           alignItems: 'center',
           justifyContent: 'center',
           flexDirection: 'row',
-          opacity: disabled ? 0.45 : pressed ? 0.82 : 1,
+          opacity: disabled ? 0.45 : pressed ? 0.72 : 1,
           borderWidth: variant === 'secondary' ? 1 : 0,
           borderColor: theme.border,
+          transform: [{ scale: pressed ? 0.98 : 1 }],
           ...s,
         },
         glow,

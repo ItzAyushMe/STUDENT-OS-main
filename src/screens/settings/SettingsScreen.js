@@ -26,6 +26,17 @@ import { clearXpOnceCache } from '../../lib/xpOnce';
 import * as Notifications from 'expo-notifications';
 import { useHubBack } from '../../hooks/useHubBack';
 
+// FIX-EXAM: same masked date helper as onboarding — numeric keyboard can't type '-'
+function maskDateInput(v) {
+  const digits = String(v || '').replace(/\D/g, '').slice(0, 8);
+  if (digits.length <= 4) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
+}
+function isValidDateStr(s) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
+}
+
 export function SettingsScreen({ navigation }) {
   const { profile, signOut, cloudMode, updateProfile } = useAuth();
   const onBack = useHubBack(navigation, 'HomeMain');
@@ -549,7 +560,7 @@ export function SettingsScreen({ navigation }) {
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}
-          onChangeText={setExamDate}
+          onChangeText={(v) => setExamDate(maskDateInput(v))}
           placeholder="2027-05-24"
           hint="Smart schedule + auto deadlines isse use karte hain."
         />
@@ -567,7 +578,7 @@ export function SettingsScreen({ navigation }) {
           <Input
             label={`Olympiad date — ${profile.olympiad} (YYYY-MM-DD)`}
             value={olympiadDate}
-            onChangeText={setOlympiadDate}
+            onChangeText={(v) => setOlympiadDate(maskDateInput(v))}
             placeholder="2026-11-15"
             style={{ marginTop: 10 }}
           />
@@ -616,26 +627,23 @@ export function SettingsScreen({ navigation }) {
             {e.exact ? (
               <Input
                 value={e.date}
-                onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, date: v } : x)))}
+                onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, date: maskDateInput(v) } : x)))}
                 placeholder="Exact date YYYY-MM-DD"
-                keyboardType="numeric"
               />
             ) : (
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <View style={{ flex: 1, marginRight: 8 }}>
                   <Input
                     value={e.start_date}
-                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, start_date: v } : x)))}
+                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, start_date: maskDateInput(v) } : x)))}
                     placeholder="From YYYY-MM-DD"
-                    keyboardType="numeric"
                   />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Input
                     value={e.end_date}
-                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, end_date: v } : x)))}
+                    onChangeText={(v) => setSchoolExams((prev) => prev.map((x, j) => (j === i ? { ...x, end_date: maskDateInput(v) } : x)))}
                     placeholder="To YYYY-MM-DD"
-                    keyboardType="numeric"
                   />
                 </View>
               </View>
