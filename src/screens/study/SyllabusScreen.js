@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
 import { Screen } from '../../components/ui/Screen';
@@ -27,6 +28,7 @@ import { fonts, radius } from '../../config/theme';
 import { pct, subjectColor, nowIso } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
 import { useSettings } from '../../context/SettingsContext';
+import { computeTaughtTill, buildTaughtTillUpdates, toggleRowPatch } from '../../lib/taughtTill';
 
 const STATUS_ICON = { completed: '✅', in_progress: '🔄', locked: '🔒' };
 
@@ -219,6 +221,32 @@ export function SyllabusScreen({ navigation }) {
     await load();
   };
 
+  // FIX-SCHED4 D2: taught-till slider per subject + individual toggle, last-action-wins, no DDL
+  const handleTaughtTill = async (subject, list, newTill) => {
+    try {
+      const updates = buildTaughtTillUpdates(list, newTill, nowIso());
+      if (updates.length) {
+        await db.updateMany('syllabus', updates);
+        await load();
+      }
+    } catch (e) {
+      infoAlert('Taught-till update fail', e?.message || 'Slider update nahi ho paya');
+    }
+  };
+
+  const handleToggleRow = async (row) => {
+    try {
+      const patch = toggleRowPatch(row, nowIso());
+      await db.update('syllabus', row.id, patch);
+      await load();
+      if (patch.status === 'completed') {
+        try { awardXP('CHAPTER_COMPLETE', 5); } catch {}
+      }
+    } catch (e) {
+      infoAlert('Toggle fail', e?.message || 'Chapter toggle nahi ho paya');
+    }
+  };
+
   const trackMeta = TRACKS[activeTrack] || TRACKS.class;
   const trackDone = trackRows.filter((r) => r.status === 'completed').length;
 
@@ -342,10 +370,36 @@ export function SyllabusScreen({ navigation }) {
 
               {open ? (
                 <View style={{ marginTop: 8, marginLeft: 6 }}>
+                  {/* FIX-SCHED4 D2: taught-till slider per subject — uses existing fields, no DDL, last-action-wins */}
+                  <View style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: radius.md, padding: 10, marginBottom: 10 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#334155' }}>
+                        Taught till: {computeTaughtTill(list)}/{list.length}
+                      </Text>
+                      <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B' }}>
+                        {computeTaughtTill(list) === list.length ? 'All done ✅' : `${list.length - computeTaughtTill(list)} left`}
+                      </Text>
+                    </View>
+                    <Slider
+                      style={{ width: '100%', height: 30 }}
+                      minimumValue={0}
+                      maximumValue={list.length}
+                      step={1}
+                      value={computeTaughtTill(list)}
+                      minimumTrackTintColor={color}
+                      maximumTrackTintColor="#E2E8F0"
+                      thumbTintColor={color}
+                      onSlidingComplete={(v) => handleTaughtTill(subject, list, v)}
+                    />
+                    <Text style={{ fontFamily: fonts.body, fontSize: 10, color: '#94A3B8', marginTop: 2, lineHeight: 13 }}>
+                      Slider = first N chapters taught. Individual toggle below overrides — last action wins. No DDL, uses status/progress/completed_at.
+                    </Text>
+                  </View>
                   {list.map((row) => (
                     <ChapterRow
                       key={row.id}
                       row={row}
+                      onToggle={() => handleToggleRow(row)}
                       onOpen={() =>
                         navigation.navigate('TopicDetail', {
                           rowId: row.id,
@@ -554,7 +608,7 @@ function HeaderBtn({ icon, onPress }) {
   );
 }
 
-function ChapterRow({ row, onOpen, onDelete }) {
+function ChapterRow({ row, onOpen, onDelete, onToggle }) {
   const icon = STATUS_ICON[row.status] || '🔒';
   const high = (row.weightage || 0) >= 5;
   // FIX-SCHED1: show effective hours — Base ~4h → Effective ~8h
@@ -567,13 +621,14 @@ function ChapterRow({ row, onOpen, onDelete }) {
   const hoursLine = track === 'class'
     ? `Base ~${base}h → Effective planned: ~${effective.toFixed(1)}h (${mult}×)${row.deadline ? ` · due ${row.deadline}` : ''}`
     : `${base} hrs${row.deadline ? ` · due ${row.deadline}` : ''}`;
+  const isDone = String(row.status).toLowerCase() === 'completed';
   return (
     <Pressable
       onPress={onOpen}
       style={({ pressed }) => ({
         backgroundColor: '#FFFFFF',
         borderWidth: 1,
-        borderColor: '#E2E8F0',
+        borderColor: isDone ? '#BBF7D0' : '#E2E8F0',
         borderRadius: radius.md,
         padding: 12,
         marginBottom: 8,
@@ -612,6 +667,10 @@ function ChapterRow({ row, onOpen, onDelete }) {
           )}
         </View>
       </View>
+      {/* FIX-SCHED4 D2: individual toggle — done/new, last-action-wins */}
+      <Pressable onPress={onToggle} hitSlop={8} style={{ backgroundColor: isDone ? '#DCFCE7' : '#F1F5F9', borderWidth: 1, borderColor: isDone ? '#86EFAC' : '#E2E8F0', borderRadius: 8, paddingVertical: 5, paddingHorizontal: 8, marginLeft: 6 }}>
+        <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 10.5, color: isDone ? '#15803D' : '#64748B' }}>{isDone ? 'Done ✓' : 'New'}</Text>
+      </Pressable>
       <Pressable onPress={onDelete} hitSlop={8} style={{ padding: 6, marginLeft: 4 }}>
         <Ionicons name="trash-outline" size={16} color="#CBD5E1" />
       </Pressable>

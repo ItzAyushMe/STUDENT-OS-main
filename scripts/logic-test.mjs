@@ -2645,7 +2645,143 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   });
 
   // ================= preservation of the accepted 938e69d foundation =================
+
+  // ================= FIX-SCHED4 — taught-till slider per subject + individual toggles, no DDL, last-action-wins =================
+  let TT = null; let ttErr = '';
+  try { TT = await import('./../src/lib/taughtTill.js'); }
+  catch (e) { ttErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+
+  check('SCH4a', 'taughtTill pure: computeTaughtTill leading contiguous, countCompleted total', () => {
+    assert.ok(TT, `taughtTill import failed: ${ttErr}`);
+    const rows = [
+      { id: '1', status: 'completed' },
+      { id: '2', status: 'completed' },
+      { id: '3', status: 'locked' },
+      { id: '4', status: 'completed' },
+    ];
+    assert.equal(TT.computeTaughtTill(rows), 2, 'leading contiguous should be 2, not 3');
+    assert.equal(TT.countCompleted(rows), 3, 'total completed should be 3');
+    assert.equal(TT.computeTaughtTill([]), 0, 'empty -> 0');
+    assert.equal(TT.computeTaughtTill([{status:'completed'},{status:'completed'}]), 2, 'all completed -> length');
+    assert.equal(TT.computeTaughtTill([{status:'locked'}]), 0, 'none completed -> 0');
+  });
+
+  check('SCH4b', 'buildTaughtTillUpdates: slider 0..N sets contiguous prefix completed, rest locked, no DDL', () => {
+    assert.ok(TT, `taughtTill import failed: ${ttErr}`);
+    const rows = [
+      { id: 'a', status: 'locked', progress_percent: 0, chapter: 'Ch1' },
+      { id: 'b', status: 'locked', progress_percent: 0, chapter: 'Ch2' },
+      { id: 'c', status: 'completed', progress_percent: 100, chapter: 'Ch3' },
+    ];
+    const now = '2026-01-05T00:00:00.000Z';
+    const up0 = TT.buildTaughtTillUpdates(rows, 0, now);
+    assert.equal(up0.length, 1, 'till 0: only Ch3 needs flip to locked');
+    assert.ok(up0.some(u => u.id === 'c' && u.patch.status === 'locked'), 'Ch3 should become locked');
+    const up2 = TT.buildTaughtTillUpdates(rows, 2, now);
+    // a,b should be completed, c locked
+    assert.ok(up2.some(u => u.id === 'a' && u.patch.status === 'completed' && u.patch.progress_percent === 100), 'a completed');
+    assert.ok(up2.some(u => u.id === 'b' && u.patch.status === 'completed'), 'b completed');
+    assert.ok(up2.some(u => u.id === 'c' && u.patch.status === 'locked'), 'c locked');
+    const up3 = TT.buildTaughtTillUpdates(rows, 3, now);
+    assert.equal(up3.length, 2, 'till 3: a,b need completed, c already completed? actually c is completed in input, so only a,b');
+    // verify no DDL fields: only status, progress_percent, completed_at
+    for (const u of [...up0, ...up2, ...up3]) {
+      const keys = Object.keys(u.patch).sort();
+      assert.ok(keys.includes('status') && keys.includes('progress_percent') && keys.includes('completed_at'), `patch must use existing fields only, got ${keys}`);
+      assert.ok(!keys.includes('taught_till') && !keys.includes('taughtTill'), 'no new DDL field');
+    }
+  });
+
+  check('SCH4c', 'toggleRowPatch: completed->locked, locked->completed, uses existing fields only', () => {
+    assert.ok(TT, `taughtTill import failed: ${ttErr}`);
+    const now = '2026-01-05T00:00:00.000Z';
+    const done = { id: 'x', status: 'completed', progress_percent: 100 };
+    const p1 = TT.toggleRowPatch(done, now);
+    assert.equal(p1.status, 'locked');
+    assert.equal(p1.progress_percent, 0);
+    assert.equal(p1.completed_at, null);
+    const locked = { id: 'y', status: 'locked', progress_percent: 0 };
+    const p2 = TT.toggleRowPatch(locked, now);
+    assert.equal(p2.status, 'completed');
+    assert.equal(p2.progress_percent, 100);
+    assert.equal(p2.completed_at, now);
+  });
+
+  check('SCH4d', 'last-action-wins: slider overrides individual toggle, toggle overrides slider, then slider again', () => {
+    assert.ok(TT, `taughtTill import failed: ${ttErr}`);
+    const now = '2026-01-05T00:00:00.000Z';
+    let rows = [
+      { id: '1', status: 'locked', chapter: 'A' },
+      { id: '2', status: 'locked', chapter: 'B' },
+      { id: '3', status: 'locked', chapter: 'C' },
+      { id: '4', status: 'locked', chapter: 'D' },
+      { id: '5', status: 'locked', chapter: 'E' },
+    ];
+    // slider to 3
+    rows = TT.applyTaughtTillInMemory(rows, 3, now);
+    assert.equal(TT.computeTaughtTill(rows), 3, 'after slider 3, leading 3 completed');
+    assert.equal(TT.countCompleted(rows), 3);
+    // individual toggle chapter 5 (index 4) to completed — non-contiguous
+    const row5 = rows[4];
+    const patch5 = TT.toggleRowPatch(row5, now);
+    rows[4] = { ...rows[4], ...patch5 };
+    assert.equal(TT.countCompleted(rows), 4, 'after toggling Ch5, total 4');
+    assert.equal(TT.computeTaughtTill(rows), 3, 'leading still 3, toggle does not affect slider value');
+    // slider to 2 overrides — Ch5 should become locked again
+    rows = TT.applyTaughtTillInMemory(rows, 2, now);
+    assert.equal(TT.computeTaughtTill(rows), 2, 'slider 2 overrides');
+    assert.equal(TT.countCompleted(rows), 2, 'Ch5 locked again, last-action-wins');
+    assert.equal(rows[4].status, 'locked', 'Ch5 is locked after slider override');
+    // toggle Ch2 to locked (individual override)
+    const row2 = rows[1];
+    const patch2 = TT.toggleRowPatch(row2, now);
+    rows[1] = { ...rows[1], ...patch2 };
+    assert.equal(rows[1].status, 'locked', 'Ch2 toggled to locked');
+    assert.equal(TT.computeTaughtTill(rows), 1, 'leading now 1 because Ch2 broke contiguity');
+    assert.equal(TT.countCompleted(rows), 1, 'only Ch1 left');
+  });
+
+  check('SCH4e', 'SyllabusScreen wiring: slider + toggle present, uses existing fields, no DDL', () => {
+    const src = read('src/screens/study/SyllabusScreen.js');
+    assert.ok(/computeTaughtTill/.test(src), 'SyllabusScreen must use computeTaughtTill');
+    assert.ok(/buildTaughtTillUpdates/.test(src), 'must use buildTaughtTillUpdates');
+    assert.ok(/toggleRowPatch/.test(src), 'must use toggleRowPatch');
+    assert.ok(/Slider/.test(src), 'must use Slider component');
+    assert.ok(/@react-native-community\/slider/.test(src), 'must import slider dep');
+    assert.ok(/Taught till/.test(src), 'UI must show Taught till label');
+    assert.ok(/last-action-wins|last action wins/i.test(src) || /last-action-wins/.test(src), 'must mention last-action-wins');
+    assert.ok(!/taught_till/.test(src) || /Taught till/.test(src), 'no DDL field taught_till column');
+    // verify it uses db.updateMany and db.update with existing fields
+    assert.ok(/updateMany/.test(src), 'must use updateMany for batch');
+    assert.ok(/progress_percent/.test(src) && /completed_at/.test(src), 'must use existing fields');
+  });
+
+  check('SCH4f', 'scheduleGenerator respects taught-till: completed rows excluded, ladder still works', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const rows = [
+      mkS('1', 'Science', 'Ch1', { status:'completed', progress_percent:100, completed_at:'2026-01-01T00:00:00.000Z' }),
+      mkS('2', 'Science', 'Ch2', { status:'completed', progress_percent:100, completed_at:'2026-01-01T00:00:00.000Z' }),
+      mkS('3', 'Science', 'Ch3', { status:'locked', progress_percent:0 }),
+      mkS('4', 'Science', 'Ch4', { status:'locked', progress_percent:0 }),
+    ];
+    const p = generateSchedule({
+      syllabus: rows, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-sch4f', today:'2026-01-05', createdAt:'2026-01-05T00:00:00.000Z',
+    });
+    // completed rows should be excluded from study
+    assert.ok(!p.some(r => r.topic === 'Ch1' && r.session_type === 'study'), 'Ch1 completed should not be study-scheduled');
+    assert.ok(!p.some(r => r.topic === 'Ch2' && r.session_type === 'study'), 'Ch2 completed should not be study-scheduled');
+    // remaining chapters should be scheduled
+    assert.ok(p.some(r => r.topic === 'Ch3'), 'Ch3 should be scheduled');
+    assert.ok(p.some(r => r.topic === 'Ch4'), 'Ch4 should be scheduled');
+    // completed should still produce ladder (chapter test + spaced)
+    const tests = p.filter(r => /^Chapter test:/.test(r.topic));
+    assert.ok(tests.length >= 2, `completed chapters should produce chapter tests, got ${tests.length}`);
+  });
+
   check('SP1'
+
 , 'the accepted foundation survives FIX-S: idempotent regen, deadlines-first, completed exclusion, hours parsing, FIX-D4/E wiring', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     // (1) idempotent regeneration: kept rows are never re-created
