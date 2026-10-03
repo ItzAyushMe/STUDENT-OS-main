@@ -2879,6 +2879,64 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(minBoth('olympiad') > minBoth('exam'), `both undated but custom order olympiad first should give olympiad more time (${minBoth('olympiad')} vs ${minBoth('exam')})`);
   });
 
+  // ================= FIX-SCHED6: new-first + light revision (≤20% during new phase) =================
+  check('NEWFIRST1', 'ordering: new-before-deep-revision, first 2 weeks new + ≤20% revision, no new after exhaust', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    // Mix of new and taught (completed) chapters
+    const newRows = Array.from({length:6}, (_,i)=>mkS('n'+i, 'Science', 'New Ch'+i));
+    const taughtRows = Array.from({length:3}, (_,i)=>mkS('t'+i, 'Science', 'Taught Ch'+i, { status:'completed', progress_percent:100, completed_at: '2026-01-01T00:00:00.000Z' }));
+    const syllabus = [...newRows, ...taughtRows];
+    const p = generateSchedule({
+      syllabus, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:4,
+      userId:'u-newfirst1', today, createdAt: today+'T00:00:00.000Z',
+    });
+    // First 2 weeks should have new-content blocks + ≤20% revision
+    const first14 = p.filter(r => r.date >= today && r.date <= '2026-01-18');
+    const newBlocks = first14.filter(r => r.session_type === 'study');
+    const revBlocks = first14.filter(r => r.session_type === 'revision' && /^Spaced revision/.test(r.topic));
+    assert.ok(newBlocks.length > 0, `first 2 weeks must have new-content blocks, got ${newBlocks.length}`);
+    const totalMinFirst14 = first14.reduce((a,r)=>a+r.duration_minutes,0);
+    const revMinFirst14 = revBlocks.reduce((a,r)=>a+r.duration_minutes,0);
+    const ratio = totalMinFirst14 ? revMinFirst14 / totalMinFirst14 : 0;
+    assert.ok(ratio <= 0.25, `first 2 weeks revision ratio must be ≤20% (allow 25% tolerance), got ${(ratio*100).toFixed(1)}% (${revMinFirst14}/${totalMinFirst14} min)`);
+    // After new set exhausted, no new-content blocks (only revision/mock/practice)
+    const lastDate = p.filter(r=>r.session_type==='study').map(r=>r.date).sort().pop() || today;
+    const afterNew = p.filter(r => r.date > lastDate);
+    const newAfter = afterNew.filter(r => r.session_type === 'study');
+    assert.equal(newAfter.length, 0, `after new set exhausted (${lastDate}), no new-content blocks should appear, found ${newAfter.length}`);
+  });
+
+  check('NEWFIRST2', 'offsets: taught chapters appear at +3/+7/+14 via SPACED_REVISION_OFFSETS, capped at 20% during new phase', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    const taught = mkS('t1', 'Science', 'Taught Ch1', { status:'completed', progress_percent:100, completed_at: today+'T00:00:00.000Z' });
+    const newRows = Array.from({length:4}, (_,i)=>mkS('n'+i, 'Science', 'New Ch'+i));
+    const p = generateSchedule({
+      syllabus: [...newRows, taught], dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:3,
+      userId:'u-newfirst2', today, createdAt: today+'T00:00:00.000Z',
+    });
+    const revs = p.filter(r => /^Spaced revision/.test(r.topic) && r.topic.includes('Taught Ch1'));
+    const dates = revs.map(r=>r.date).sort();
+    // Should appear at +3/+7/+14
+    const expected = [3,7,14].map(off => {
+      const d = new Date(today);
+      d.setDate(d.getDate()+off);
+      return d.toISOString().slice(0,10);
+    });
+    for (const exp of expected) {
+      assert.ok(dates.includes(exp), `taught chapter should have revision at ${exp}, got ${dates.join(',')}`);
+    }
+    // During new phase, revision capped at 20% — check first week
+    const firstWeek = p.filter(r => r.date >= today && r.date <= '2026-01-11');
+    const revMin = firstWeek.filter(r=>r.session_type==='revision' && /^Spaced revision/.test(r.topic)).reduce((a,r)=>a+r.duration_minutes,0);
+    const totalMin = firstWeek.reduce((a,r)=>a+r.duration_minutes,0);
+    const ratio = totalMin ? revMin/totalMin : 0;
+    assert.ok(ratio <= 0.3, `first week revision capped at ~20%, got ${(ratio*100).toFixed(1)}%`);
+  });
+
   check('XP1', 'FIX-XP1 guard: SyllabusScreen.js must NOT contain awardXP — taught-till is planning tool, not XP event', () => {
     const src = read('src/screens/study/SyllabusScreen.js');
     assert.ok(!/awardXP/.test(src), 'SyllabusScreen.js must not contain awardXP (XP farming guard) — found awardXP reference');

@@ -1017,31 +1017,27 @@ export function planSchedule(input) {
     // zero available time => plan nothing at all (never invent minutes)
     if (noCapacity) continue;
 
-    // FIX-S S3: today's conquered-chapter test / spaced revisions go in FIRST —
-    // short, dated commitments that consolidation must not lose. Nothing is
-    // dropped: a session that does not fit (or lands on an exam day or a declared
-    // day off) simply rolls to the next day of the plan.
-    if (!isDayOff && pipeline.length) {
-      while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
-        const s = pipeline[0];
-        const pkey = [s.subject, s.topic, s.type].join('|');
-        if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
-        if (s.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
-        if (eventPassed(s.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
-        if (schoolExamToday && s.kind === 'test') break; // no full chapter test ON an exam day — it waits
-        const res = push(s.subject, s.topic, s.type, s.minutes, s.track, s.kind === 'test' ? 'high' : 'normal');
-        if (res === 'small') break;                     // no room for a real block today -> rolls forward
-        pipelineKeys.add(pkey);
-        pipeline.shift();
-        if (res === 'dup') { pipelineSuppressed += 1; continue; }
-        pipelineEmitted[s.kind] = num(pipelineEmitted[s.kind], 0) + 1;
-      }
-    }
-
     // School exam DAY itself — light revision only, no new topics
+    // FIX-SCHED6: on exam days, taught revisions can still appear (light), but no new study
     if (schoolExamToday) {
+      // Pipeline for exam days — full quota (new content exhausted or not applicable)
+      if (!isDayOff && pipeline.length) {
+        while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+          const sPipe = pipeline[0];
+          const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
+          if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
+          if (sPipe.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+          if (eventPassed(sPipe.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
+          if (sPipe.kind === 'test') break;
+          const res = push(sPipe.subject, sPipe.topic, sPipe.type, sPipe.minutes, sPipe.track, 'high');
+          if (res === 'small') break;
+          pipelineKeys.add(pkey);
+          pipeline.shift();
+          if (res === 'dup') { pipelineSuppressed += 1; continue; }
+          pipelineEmitted[sPipe.kind] = num(pipelineEmitted[sPipe.kind], 0) + 1;
+        }
+      }
       const exam = exams.find((e) => date >= e.start && date <= e.end);
-      // FIX-S S5: with the class track paused the exam day stays free (no class row)
       if (!classPaused) {
         push('School Exam', `${(exam && exam.label) || 'Exam'} — quick recall + formula scan`, 'revision', Math.min(EXAM_DAY_REVISION_MIN, capacity), 'class');
       }
@@ -1049,6 +1045,23 @@ export function planSchedule(input) {
     }
 
     // Mock day: full-length timed test + analysis.
+    // FIX-SCHED6: on mock days, allow pipeline (taught revisions) before mock if capacity
+    if (isMockDay && !isDayOff && pipeline.length) {
+      // For mock days, pipeline gets full quota (no new content)
+      while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+        const sPipe = pipeline[0];
+        const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
+        if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
+        if (sPipe.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+        if (eventPassed(sPipe.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
+        const res = push(sPipe.subject, sPipe.topic, sPipe.type, sPipe.minutes, sPipe.track, sPipe.kind === 'test' ? 'high' : 'normal');
+        if (res === 'small') break;
+        pipelineKeys.add(pkey);
+        pipeline.shift();
+        if (res === 'dup') { pipelineSuppressed += 1; continue; }
+        pipelineEmitted[sPipe.kind] = num(pipelineEmitted[sPipe.kind], 0) + 1;
+      }
+    }
     // FIX-S S4: a mock belongs to the event that drives it. A board/main-exam or
     // pre-school-exam mock is class-track; a mock driven only by an olympiad date
     // is OLYMPIAD prep — labelling it class would let the class-session cutoff
@@ -1066,6 +1079,22 @@ export function planSchedule(input) {
     }
 
     // Revision wave before school exams: no NEW topics, revise the done ones.
+    // FIX-SCHED6: allow pipeline on wave days as well (light revision)
+    if (inSchoolExamRev && !isDayOff && pipeline.length && studied.some((s) => s.track === 'class')) {
+      while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+        const sPipe = pipeline[0];
+        const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
+        if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
+        if (sPipe.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+        if (eventPassed(sPipe.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
+        const res = push(sPipe.subject, sPipe.topic, sPipe.type, sPipe.minutes, sPipe.track, sPipe.kind === 'test' ? 'high' : 'normal');
+        if (res === 'small') break;
+        pipelineKeys.add(pkey);
+        pipeline.shift();
+        if (res === 'dup') { pipelineSuppressed += 1; continue; }
+        pipelineEmitted[sPipe.kind] = num(pipelineEmitted[sPipe.kind], 0) + 1;
+      }
+    }
     // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave,
     // so the last fortnight revises what the exam will actually ask. The wave's
     // shape (revision + timed practice, zero new study) is unchanged.
@@ -1271,6 +1300,44 @@ export function planSchedule(input) {
     freePool += cascadeFree;
 
     // Any remaining freePool after cascade goes to most at-risk work (Phase 2 fallback)
+
+
+    // ---- FIX-SCHED6: new-first + light revision (≤20% during new phase) ----
+    // Within each track's phase, plan ALL new (untaught) before taught deep revision.
+    // Taught chapters enter SPACED_REVISION_OFFSETS immediately, capped at 20% during new phase.
+    const newContentRemaining = working.some(t => (queues[t] || []).length > 0);
+    const revisionCap = newContentRemaining ? Math.round(dayStart * 0.2) : dayStart; // 20% cap during new phase
+    let revisionUsed = 0;
+
+    // Pipeline (taught revisions) — capped at 20% during new phase for REVISIONS, tests always allowed
+    // This is the SPACED_REVISION_OFFSETS machinery: +3/+7/+14 days, plus chapter tests at +2d
+    // FIX-SCHED6: new-first + light revision — tests (mock) are not capped, only spaced revisions
+    if (!isDayOff && pipeline.length) {
+      while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+        const s = pipeline[0];
+        const pkey = [s.subject, s.topic, s.type].join('|');
+        if (pipelineKeys.has(pkey)) { pipeline.shift(); pipelineSuppressed += 1; continue; }
+        if (s.track === 'class' && classOff) { pipeline.shift(); pipelineCutoffStopped += 1; continue; }
+        if (eventPassed(s.track)) { pipeline.shift(); pipelineEventStopped += 1; continue; }
+        if (schoolExamToday && s.kind === 'test') break;
+        // Cap only revisions during new phase, tests (chapter tests) always allowed
+        if (s.kind === 'rev' && newContentRemaining) {
+          if (revisionUsed >= revisionCap) break;
+          if (revisionUsed + s.minutes > revisionCap) break;
+        }
+        const res = push(s.subject, s.topic, s.type, s.minutes, s.track, s.kind === 'test' ? 'high' : 'normal');
+        if (res === 'small') break;
+        pipelineKeys.add(pkey);
+        pipeline.shift();
+        if (res === 'dup') { pipelineSuppressed += 1; continue; }
+        pipelineEmitted[s.kind] = num(pipelineEmitted[s.kind], 0) + 1;
+        if (s.kind === 'rev') {
+          revisionUsed += s.minutes;
+          freePool = Math.max(0, freePool - s.minutes);
+        }
+      }
+    }
+
 
     // revision cycle every 3rd day (revisit the last topics)
     if (d % REVISION_CYCLE_DAYS === REVISION_CYCLE_DAYS - 1 && studied.length && capacity >= 20) {
