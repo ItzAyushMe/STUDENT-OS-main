@@ -181,7 +181,7 @@ export function DeckScreen({ navigation, route }) {
               }}
             >
               <Card mode="light" style={{ flex: 1, minHeight: 200, maxHeight: Dimensions.get('window').height * 0.55, padding: 0, borderWidth: 2, borderColor: color + '55', overflow: 'hidden' }}>
-                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, justifyContent: 'center' }} showsVerticalScrollIndicator={false}>
+                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
                   <Text style={{ fontFamily: fonts.body, fontSize: 11, color, letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
                     QUESTION
                   </Text>
@@ -204,7 +204,7 @@ export function DeckScreen({ navigation, route }) {
               pointerEvents={flipped ? 'auto' : 'none'}
             >
               <Card mode="light" style={{ flex: 1, minHeight: 200, maxHeight: Dimensions.get('window').height * 0.55, padding: 0, backgroundColor: '#F0FDFA', borderWidth: 2, borderColor: '#10B98155', overflow: 'hidden' }}>
-                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, justifyContent: 'center' }} showsVerticalScrollIndicator={false}>
+                <ScrollView contentContainerStyle={{ padding: 22, flexGrow: 1, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
                   <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#0891B2', letterSpacing: 1, marginBottom: 14, textAlign: 'center' }}>
                     ANSWER
                   </Text>

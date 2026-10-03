@@ -4,7 +4,7 @@
 // through aiService; StudentOS context is selected per-message by the pure
 // lib byteContext.js (relevant categories only, never the whole DB).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
@@ -43,6 +43,12 @@ export function TutorScreen({ navigation, route }) {
   const [messages, setMessages] = useState(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      try { scrollRef.current?.scrollToEnd({ animated: true }); } catch {}
+    });
+    return () => sub.remove();
+  }, []);
   const scrollRef = useRef(null);
   const prefill = route?.params?.prefill;
 
@@ -132,8 +138,8 @@ export function TutorScreen({ navigation, route }) {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: LIGHT.bg }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
     >
       <View style={{ paddingTop: insets.top + 8, flex: 1 }}>
         <ScreenHeader

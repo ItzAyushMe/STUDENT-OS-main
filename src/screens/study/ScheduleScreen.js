@@ -51,6 +51,7 @@ export function ScheduleScreen({ navigation, route }) {
   const [aiPlanMsg, setAiPlanMsg] = useState('');
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
   const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
+  const [coverageExpanded, setCoverageExpanded] = useState(false); // FIX-QA-UI
   const [genError, setGenError] = useState('');
   const [autoRollMsg, setAutoRollMsg] = useState('');
   const autoRolledRef = useRef(false); // FIX-E: guard to auto-roll only once per screen load session
@@ -397,6 +398,45 @@ export function ScheduleScreen({ navigation, route }) {
         style={{ marginBottom: 14 }}
       />
 
+      {/* FIX-QA-UI: goals-first — DailyView immediately under tabs */}
+      {loading ? <Loading mode="light" /> : null}
+
+      {view === 'daily' ? (
+        <DailyView
+          selected={selected}
+          setSelected={setSelected}
+          sessions={daySessions}
+          onComplete={completeSession}
+          onSkip={skipSession}
+          onGenerate={() => setGenOpen(true)}
+        />
+      ) : null}
+
+      {view === 'weekly' ? (
+        <WeeklyView
+          weekDays={weekDays}
+          sessions={sessions}
+          today={todayStr()}
+          onPickDay={(d) => {
+            setSelected(d);
+            setView('daily');
+          }}
+        />
+      ) : null}
+
+      {view === 'monthly' ? (
+        <MonthlyView
+          monthOffset={monthOffset}
+          setMonthOffset={setMonthOffset}
+          sessions={sessions}
+          onPickDay={(d) => {
+            setSelected(d);
+            setMonthOffset(0);
+            setView('daily');
+          }}
+        />
+      ) : null}
+
       {/* FIX-S S5: promotion decision — paused class track / result / error */}
       {promo.paused ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
@@ -518,8 +558,35 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
-      {/* Priority coverage banner — class first, olympiad second, exam last + honest warning + Feb-25 horizon */}
+      {/* FIX-QA-UI: collapsed coverage+warning — compact dismissible summary, goals-first */}
       {coverage ? (
+        <Pressable
+          onPress={() => setCoverageExpanded((v) => !v)}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            backgroundColor: coverage.coverageWarning ? '#FEF2F2' : '#F5F3FF',
+            borderWidth: 1,
+            borderColor: coverage.coverageWarning ? '#FECACA' : '#DDD6FE',
+            borderRadius: 20,
+            paddingVertical: 7,
+            paddingHorizontal: 12,
+            marginTop: 8,
+            marginBottom: 8,
+          }}
+        >
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: coverage.coverageWarning ? '#B91C1C' : '#5B21B6', flex: 1 }} numberOfLines={1}>
+            {coverage.coverageWarning ? '⚠️ ' : '✅ '}
+            🏫 {coverage.classPlanned}/{coverage.classTotal}
+            {coverage.olympiadTotal ? ` · 🏅 ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
+            {coverage.examTotal ? ` · 🎯 ${coverage.examPlanned}/${coverage.examTotal}` : ''}
+            {coverage.totalRequiredHours ? ` · ${coverage.totalRequiredHours}h req` : ''}
+            {'  '}Tap to {coverageExpanded ? 'collapse' : 'expand'}
+          </Text>
+          <Ionicons name={coverageExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={coverage.coverageWarning ? '#B91C1C' : '#5B21B6'} />
+        </Pressable>
+      ) : null}
+      {coverage && coverageExpanded ? (
         <>
           <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#5B21B6' }}>
@@ -543,11 +610,9 @@ export function ScheduleScreen({ navigation, route }) {
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
                 {coverage.coverageWarning}
               </Text>
-              {/* FIX-SCHED3: honest shortfall — how to fix link */}
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
                 💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× → lower. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
               </Text>
-              {/* FIX-H: when the workload genuinely does not fit, name what was left out */}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
                 <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 6, lineHeight: 16 }}>
                   Not scheduled yet:{' '}
@@ -573,44 +638,6 @@ export function ScheduleScreen({ navigation, route }) {
         </>
       ) : null}
 
-      {loading ? <Loading mode="light" /> : null}
-
-      {view === 'daily' ? (
-        <DailyView
-          selected={selected}
-          setSelected={setSelected}
-          sessions={daySessions}
-          onComplete={completeSession}
-          onSkip={skipSession}
-          onGenerate={() => setGenOpen(true)}
-        />
-      ) : null}
-
-      {view === 'weekly' ? (
-        <WeeklyView
-          weekDays={weekDays}
-          sessions={sessions}
-          today={todayStr()}
-          onPickDay={(d) => {
-            setSelected(d);
-            setView('daily');
-          }}
-        />
-      ) : null}
-
-      {view === 'monthly' ? (
-        <MonthlyView
-          monthOffset={monthOffset}
-          setMonthOffset={setMonthOffset}
-          sessions={sessions}
-          onPickDay={(d) => {
-            setSelected(d);
-            setMonthOffset(0);
-            setView('daily');
-          }}
-        />
-      ) : null}
-
       {/* Generate modal — FIX-SCHED3: shows effective hours + progress + editable session end */}
       <ModalSheet visible={genOpen} onClose={() => setGenOpen(false)} title="Generate Smart Schedule" mode="light">
         <Text style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#475569', lineHeight: 20, marginBottom: 14 }}>
@@ -618,7 +645,7 @@ export function ScheduleScreen({ navigation, route }) {
           revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
         </Text>
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
-        <InfoRow label="Chapter workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
+        <InfoRow label="Workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
         <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (full off)` : 'None'} />
         <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only`} />
@@ -1043,9 +1070,9 @@ function NavArrow({ dir, onPress }) {
 
 function InfoRow({ label, value }) {
   return (
-    <View style={{ flexDirection: 'row', paddingVertical: 7 }}>
-      <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#64748B', flex: 1 }}>{label}</Text>
-      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B' }}>{value}</Text>
+    <View style={{ flexDirection: 'row', paddingVertical: 7, alignItems: 'flex-start' }}>
+      <Text style={{ fontFamily: fonts.body, fontSize: 13, color: '#64748B', width: 110, flexShrink: 0, marginRight: 8 }}>{label}</Text>
+      <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#1E293B', flex: 1, flexShrink: 1, flexWrap: 'wrap' }}>{value}</Text>
     </View>
   );
 }

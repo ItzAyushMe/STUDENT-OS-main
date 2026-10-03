@@ -67,14 +67,15 @@ export function ModalSheet({ visible, onClose, title, mode = 'light', children, 
               container adds a flat 24 breathing room (handoff's 24 + insets
               intent, without doubling the inset). */}
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
             style={{ flexShrink: 1 }}
           >
             <ScrollView
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
               style={{ flexShrink: 1 }}
-              contentContainerStyle={{ paddingBottom: 24 }}
+              contentContainerStyle={{ paddingBottom: 24, flexGrow: 1 }}
             >
               {children}
             </ScrollView>

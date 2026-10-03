@@ -352,7 +352,7 @@ export function HabitsScreen({ navigation }) {
             fold and the keyboard covered the name field. Body now SCROLLS
             (flexShrink so it only shrinks when the content is too tall) inside
             a KeyboardAvoidingView, and Save stays PINNED outside the scroll. */}
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView
           style={{ flexGrow: 0, flexShrink: 1 }}
           contentContainerStyle={{ paddingBottom: 4 }}
