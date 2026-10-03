@@ -460,7 +460,9 @@ export async function aiEstimateWeightage({ syllabusRows = [], profile = {}, _as
   }
   const allResults = [];
   const ctx = buildProfileContext(profile);
-  for (const batch of batches) {
+  // FIX-SLOW: bounded concurrency 3-4 for weightage batches — was sequential 14 awaits for 136 chapters
+  const CONCURRENCY = 3;
+  const runBatch = async (batch) => {
     const list = batch.map(c => `${c.subject} — ${c.chapter}`).join('; ');
     const data = await ask({
       prompt: `Estimate exam weightage (1-5) for these chapters for an Indian student.
@@ -474,17 +476,31 @@ Rules: weightage 1=low, 5=very high exam importance; base on board exam patterns
       noCache: true,
     });
     const results = Array.isArray(data?.results) ? data.results : [];
+    const out = [];
     for (const r of results) {
       if (!r || !r.subject || !r.chapter) continue;
       const w = Math.max(1, Math.min(5, Math.round(Number(r.weightage) || 3)));
-      allResults.push({
+      out.push({
         subject: String(r.subject),
         chapter: String(r.chapter),
         weightage: w,
         reason: String(r.reason || '').slice(0, 200),
       });
     }
-  }
+    return out;
+  };
+  // concurrency pool
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+    while (idx < batches.length) {
+      const cur = idx++;
+      const batch = batches[cur];
+      if (!batch) break;
+      const res = await runBatch(batch);
+      allResults.push(...res);
+    }
+  });
+  await Promise.all(workers);
   if (!allResults.length) throw new AIUnavailableError("The AI couldn't estimate weightage.");
   return allResults;
 }
