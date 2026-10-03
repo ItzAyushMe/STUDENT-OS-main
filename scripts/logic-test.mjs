@@ -3156,6 +3156,29 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     // The task says no screen changes for CLAMP round
   });
 
+  // ================= FIX-BATTLE: idempotent invites + removeChannel =================
+  check('BATTLE1', 'battleRealtime idempotent subscribeInvites same userId returns same handle no throw', () => {
+    const brtSrc = read('src/lib/battleRealtime.js');
+    assert.ok(/inviteChannels/.test(brtSrc) && /Map/.test(brtSrc), 'must have inviteChannels Map cache');
+    assert.ok(/refCount/.test(brtSrc), 'must refcount');
+    assert.ok(/existing/.test(brtSrc) && /return existing/.test(brtSrc), 'must return existing if already subscribed');
+    assert.ok(/callbacks/.test(brtSrc) && /Set/.test(brtSrc), 'must store callbacks Set');
+    assert.ok(/unsubscribeInvites/.test(brtSrc), 'must have unsubscribeInvites');
+    assert.ok(/removeChannel/.test(brtSrc), 'unsubscribe must call removeChannel');
+  });
+
+  check('BATTLE2', 'battleRealtime unsubscribe+removeChannel then re-subscribe works, screens use unsubscribeInvites', () => {
+    const brtSrc = read('src/lib/battleRealtime.js');
+    assert.ok(/supabase\.removeChannel/.test(brtSrc), 'must call supabase.removeChannel');
+    assert.ok(/unsubscribe\(\)/.test(brtSrc), 'must call unsubscribe()');
+    assert.ok(/__testOnly/.test(brtSrc), 'should expose test helpers');
+    const guildSrc = read('src/screens/guild/GuildScreen.js');
+    assert.ok(/unsubscribeInvites/.test(guildSrc), 'GuildScreen must use unsubscribeInvites');
+    assert.ok(!/sub\?\.unsubscribe\(\)/.test(guildSrc) || /unsubscribeInvites/.test(guildSrc), 'GuildScreen cleanup must use unsubscribeInvites not bare unsubscribe');
+    const battleSrc = read('src/screens/guild/BattleScreen.js');
+    assert.ok(/unsubscribeInvites/.test(battleSrc), 'BattleScreen must use unsubscribeInvites');
+  });
+
   check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });

@@ -40,7 +40,7 @@ import {
   battlesAvailable, LOCAL_MODE_MESSAGE,
   trackPresence, untrackPresence, guildPresenceState,
   createChallenge, listChallenges, acceptChallenge, declineChallenge, cancelChallenge,
-  expireDueChallenges, subscribeInvites, getBattleByChallenge, fetchMyActiveBattle,
+  expireDueChallenges, subscribeInvites, unsubscribeInvites, getBattleByChallenge, fetchMyActiveBattle,
   joinBattleChannel, leaveBattleChannel, broadcastProgress,
   saveBattleResult, listBattleResults, finalizeBattle, abandonBattle, subscribeBattle,
   ledgerGet, ledgerSet, applyBattleXp, quizResultRow,
@@ -301,8 +301,9 @@ export function BattleScreen({ navigation }) {
     return () => {
       // leaving the screen: untrack presence (refcounted with GuildScreen) and
       // drop every channel/interval this screen owns
+      // FIX-BATTLE: idempotent unsubscribe + removeChannel
       untrackPresence();
-      try { inviteSubRef.current?.unsubscribe(); } catch {}
+      try { unsubscribeInvites(me); } catch {}
       inviteSubRef.current = null;
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       dropChannel();

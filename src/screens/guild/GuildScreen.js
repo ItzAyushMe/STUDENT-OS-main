@@ -31,7 +31,7 @@ import { QUIZ_BANK } from '../../lib/quizBank';
 // All decisions live in battleRules/battleRealtime — this screen only renders them.
 import {
   battlesAvailable, trackPresence, untrackPresence, pendingInvites,
-  acceptChallenge, declineChallenge, expireDueChallenges, subscribeInvites,
+  acceptChallenge, declineChallenge, expireDueChallenges, subscribeInvites, unsubscribeInvites,
   msUntilExpiry, normalizeQuestions, isPlayableSet, BATTLE_QUESTION_COUNT,
 } from '../../lib/battleRealtime';
 
@@ -228,7 +228,7 @@ export function GuildScreen({ navigation }) {
     }
     return () => {
       if (battlesAvailable()) untrackPresence();
-      try { sub?.unsubscribe(); } catch {}
+      try { unsubscribeInvites(profile.id); } catch {}
       if (poll) clearInterval(poll);
     };
   }, [profile?.id, loadBattleInvites]));

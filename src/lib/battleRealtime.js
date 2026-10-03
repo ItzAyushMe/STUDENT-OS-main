@@ -305,23 +305,66 @@ export async function expireDueChallenges(userId, now = nowIso()) {
   return changed;
 }
 
-/** Realtime invites: postgres_changes on rows addressed to me + a polling fallback. */
+// FIX-BATTLE: idempotent invites subscription — same channel name reused without re-attaching .on after subscribe
+// supabase-js 2.112.4 throws "cannot add postgres_changes callbacks after subscribe()" if .on is called on a subscribed channel.
+// GuildScreen and BattleScreen both subscribed to bc-invites-<userId> → crash on Guild→Battle navigation.
+// This cache makes subscribeInvites return the existing channel wrapper (never re-attach .on) and refcounts.
+// unsubscribeInvites does unsubscribe() + removeChannel() so the name can be reused.
+const inviteChannels = new Map(); // userId string -> { channel, callbacks: Set, refCount }
+
 export function subscribeInvites(userId, onChange) {
   if (!battlesAvailable() || !userId) return null;
+  const key = String(userId);
+  const existing = inviteChannels.get(key);
+  if (existing) {
+    existing.refCount += 1;
+    if (onChange) existing.callbacks.add(onChange);
+    return existing.channel;
+  }
+  const callbacks = new Set();
+  if (onChange) callbacks.add(onChange);
   const ch = supabase
     .channel(`bc-invites-${userId}`)
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'battle_challenges', filter: `to_user=eq.${userId}` },
-      (payload) => { try { onChange(payload); } catch {} }
+      (payload) => { callbacks.forEach((cb) => { try { cb(payload); } catch {} }); }
     )
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'battle_challenges', filter: `from_user=eq.${userId}` },
-      (payload) => { try { onChange(payload); } catch {} }
+      (payload) => { callbacks.forEach((cb) => { try { cb(payload); } catch {} }); }
     )
     .subscribe();
+  inviteChannels.set(key, { channel: ch, callbacks, refCount: 1 });
   return ch;
+}
+
+export function unsubscribeInvites(userId, onChange) {
+  const key = String(userId);
+  const entry = inviteChannels.get(key);
+  if (!entry) return;
+  if (onChange) {
+    try { entry.callbacks.delete(onChange); } catch {}
+  }
+  entry.refCount -= 1;
+  if (entry.refCount <= 0) {
+    try { entry.channel.unsubscribe(); } catch {}
+    try { supabase.removeChannel(entry.channel); } catch {}
+    inviteChannels.delete(key);
+  }
+}
+
+// For testing: expose cache size / clear
+export function __testOnly_inviteChannelCount() {
+  return inviteChannels.size;
+}
+export function __testOnly_clearInviteChannels() {
+  for (const [, entry] of inviteChannels) {
+    try { entry.channel.unsubscribe(); } catch {}
+    try { supabase.removeChannel(entry.channel); } catch {}
+  }
+  inviteChannels.clear();
 }
 
 // ============================================================
