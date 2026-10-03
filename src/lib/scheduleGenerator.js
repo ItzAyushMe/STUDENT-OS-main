@@ -1183,6 +1183,20 @@ export function planSchedule(input) {
     };
     const pushFiller = () => {
       let pushed = 0;
+      // FIX-FILL2: bound ALL filler by per-track hard ends — no sessions after exam/olympiad/cutoff
+      // examDate is final hard end, class past cutoff, olympiad past its date
+      const isPastHardEnd = (track) => {
+        if (track === 'class' && classOff) return true;
+        if (eventPassed(track)) return true;
+        if (track === 'class' && date > cutoff) return true;
+        if (track === 'olympiad' && olympiadDate && date >= dateStr(dayjs(olympiadDate))) return true;
+        if (track === 'exam' && examDate && date > dateStr(dayjs(examDate))) return true;
+        // Global final hard end: no filler past examDate at all
+        if (examDate && date > dateStr(dayjs(examDate))) return true;
+        return false;
+      };
+      // If date is past final exam, no filler at all
+      if (examDate && date > dateStr(dayjs(examDate))) return 0;
       // Try to fill remaining capacity with track-appropriate practice, respecting phase priority
       const fillerTracks = priorityOrder.length ? priorityOrder : allocatable;
       let attempts = 0;
@@ -1191,8 +1205,7 @@ export function planSchedule(input) {
         let placed = false;
         for (const track of fillerTracks) {
           if (capacity < MIN_BLOCK_MIN) break;
-          if (track === 'class' && classOff) continue;
-          if (eventPassed(track)) continue;
+          if (isPastHardEnd(track)) continue;
           const filler = fillerForTrack(track);
           if (!filler) continue;
           const res = push(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
@@ -1200,9 +1213,11 @@ export function planSchedule(input) {
           if (res === 'dup') { placed = true; break; }
         }
         if (!placed) {
-          // fallback: any studied track
-          const anyFiller = fillerForTrack(allocatable.find(t => studied.some(s => s.track===t)) || 'class');
+          // fallback: any studied track that respects hard ends
+          const viableTrack = allocatable.find(t => studied.some(s => s.track===t) && !isPastHardEnd(t));
+          const anyFiller = fillerForTrack(viableTrack || null);
           if (!anyFiller || capacity < MIN_BLOCK_MIN) break;
+          if (isPastHardEnd(anyFiller.track)) break;
           const res = push(anyFiller.subject, anyFiller.topic, anyFiller.type, Math.min(40, capacity), anyFiller.track);
           if (res !== 'ok' && res !== 'dup') break;
           if (res === 'ok') pushed += 1;

@@ -3103,6 +3103,28 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/syllabus covered/.test(sgSrc) && /maintain with practice/.test(sgSrc), 'engine must have honesty message syllabus covered — maintain with practice');
   });
 
+  check('FILL2', 'FIX-FILL2: filler never past hard ends — no rows after examDate/olympiadDate/cutoff', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:5, archived:false, ...over });
+    const today = '2026-10-03';
+    const rows = [];
+    for (let i=0;i<10;i++) rows.push(mkS('c'+i, 'Sub', 'Chapter '+i, { estimated_hours: 2 }));
+    // Tiny syllabus, exam far, should fill but never past exam
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[5,6], lightDay:6, weeks:82,
+      userId:'u-fill2-test', today, createdAt: today+'T00:00:00.000Z',
+      examDate:'2028-04-12', olympiadDate:'2027-09-06', hoursMultiplier:2.0, olympiadMultiplier:3.0, examMultiplier:1.5,
+    });
+    const afterExam = p.filter(r => r.date > '2028-04-12');
+    assert.equal(afterExam.length, 0, `FIX-FILL2: ZERO rows after examDate 2028-04-12, got ${afterExam.length}: ${afterExam.slice(0,3).map(r=>r.date+' '+r.topic).join('; ')}`);
+    const olyAfter = p.filter(r => r.track==='olympiad' && r.date >= '2027-09-06');
+    assert.equal(olyAfter.length, 0, `FIX-FILL2: ZERO olympiad rows on/after olympiadDate, got ${olyAfter.length}`);
+    const classAfterCutoff = p.filter(r => r.track==='class' && r.date > '2028-02-25' && r.date <= '2028-04-12' && !/Mock|Pre-school|Revision wave/.test(r.topic));
+    // Class new study should not be after cutoff (except exam-related mocks/waves)
+    const classNewAfterCutoff = p.filter(r => r.track==='class' && r.session_type==='study' && r.date > '2028-02-25');
+    assert.equal(classNewAfterCutoff.length, 0, `FIX-FILL2: ZERO class study after cutoff 2028-02-25, got ${classNewAfterCutoff.length}`);
+  });
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');
