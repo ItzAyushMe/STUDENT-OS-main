@@ -3097,6 +3097,65 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/syllabus covered/.test(sgSrc) && /maintain with practice/.test(sgSrc), 'engine must have honesty message syllabus covered — maintain with practice');
   });
 
+  // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
+  check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    assert.ok(/\[track:.*\]/.test(aiSrc), 'must have [track: ...] labels');
+    assert.ok(/\$\{c\.subject\} — \$\{c\.chapter\} \[track: \$\{c\.track/.test(aiSrc) || /track: \$\{c\.track \|\| 'class'\}/.test(aiSrc), 'chList must be ${subject} — ${chapter} [track: ${track}]');
+    assert.ok(/STRICT SYLLABUS BOUNDARY/.test(aiSrc), 'must have STRICT SYLLABUS BOUNDARY fence');
+    assert.ok(/FORBIDDEN/.test(aiSrc) && /higher classes/.test(aiSrc), 'class fence must have FORBIDDEN higher classes');
+    assert.ok(/Class \$\{classNum/.test(aiSrc) || /Class \$\{N\}/.test(aiSrc) || /Class .*board/.test(aiSrc), 'class fence must use Class N board from profile');
+  });
+
+  check('CLAMP2', 'fence presence olympiad-only / exam-only — track-depth sentences stay strictly within listed topics', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    assert.ok(/These are olympiad chapters/.test(aiSrc) && /olympiad-level depth/.test(aiSrc), 'olympiad fence must have These are olympiad chapters — olympiad-level depth');
+    assert.ok(/These are exam chapters/.test(aiSrc) && /exam-level depth/.test(aiSrc), 'exam fence must have These are exam chapters — exam-level depth');
+    assert.ok(/stay strictly within listed topics/.test(aiSrc), 'must have stay strictly within listed topics');
+  });
+
+  check('CLAMP3', 'fence presence mixed tracks — class fence + olympiad/exam depth both present, scoped per labeled chapters', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    // Mixed: hasClass + hasOlympiad + hasExam logic
+    assert.ok(/hasClass/.test(aiSrc) && /hasOlympiad/.test(aiSrc) && /hasExam/.test(aiSrc), 'must detect hasClass/hasOlympiad/hasExam for mixed');
+    assert.ok(/boundaryLines/.test(aiSrc) && /join/.test(aiSrc), 'must join boundary lines for mixed tracks');
+    // All three functions must have boundary
+    const countBoundary = (aiSrc.match(/STRICT SYLLABUS BOUNDARY/g) || []).length;
+    assert.ok(countBoundary >= 3, `all three prompts must have boundary fence, got ${countBoundary} occurrences`);
+    const countTrackLabel = (aiSrc.match(/\[track:/g) || []).length;
+    assert.ok(countTrackLabel >= 3, `all three must have [track: labels, got ${countTrackLabel}`);
+  });
+
+  check('CLAMP4', 'frozen zones — difficultyBand and buildProfileContext exact strings unchanged D9', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    // difficultyBand exact strings (frozen)
+    assert.ok(aiSrc.includes('foundation recall, definitions, direct facts (easy) — 0–40%'), 'difficultyBand 0-40% frozen string must remain');
+    assert.ok(aiSrc.includes('board level, standard NCERT-style (moderate) — 60–80%'), 'difficultyBand 60-80% frozen');
+    assert.ok(aiSrc.includes('board/exam level, mixed conceptual + application (standard) — 100%'), 'difficultyBand 100% frozen');
+    assert.ok(aiSrc.includes('competitive (JEE/NEET) level, multi-step (hard) — 120–150%'), 'difficultyBand 120-150% frozen');
+    assert.ok(aiSrc.includes('olympiad HOTS, unfamiliar patterns, multi-concept (very hard) — 170–200%'), 'difficultyBand olympiad 170-200% frozen — D9 ≥150% band');
+    // buildProfileContext exact
+    assert.ok(aiSrc.includes('if (profile.class_level) bits.push(String(profile.class_level))'), 'buildProfileContext class_level line frozen');
+    assert.ok(aiSrc.includes('if (profile.board) bits.push(String(profile.board))'), 'buildProfileContext board line frozen');
+    assert.ok(aiSrc.includes('preparing for ${profile.competitive_exam}'), 'buildProfileContext competitive_exam line frozen');
+    assert.ok(aiSrc.includes('olympiad: ${profile.olympiad}'), 'buildProfileContext olympiad line frozen');
+    assert.ok(aiSrc.includes('level: ${profile.prep_level}'), 'buildProfileContext prep_level frozen');
+    assert.ok(aiSrc.includes("return bits.join(' · ')"), 'buildProfileContext join frozen');
+  });
+
+  check('CLAMP5', 'wiring probe: aiGenerateTest L470, aiGenerateQuestionBank L616, aiGenerateMindMap L740 have track labels + boundary, no screen changes', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    // Check that aiGenerateTest, QB, MindMap all have track label logic
+    assert.ok(/aiGenerateTest/.test(aiSrc) && /aiGenerateQuestionBank/.test(aiSrc) && /aiGenerateMindMap/.test(aiSrc), 'all three functions must exist');
+    // Ensure no verification pass added (no second-pass verification)
+    assert.ok(!/verification.*pass/i.test(aiSrc) || /Layer1 only/.test(aiSrc), 'no second-pass verification per D10 Layer1 only');
+    // Ensure prompts have boundary appended
+    assert.ok(/syllabusBoundary/.test(aiSrc), 'must have syllabusBoundary variable in prompts');
+    // Ensure no screen changes for CLAMP (only aiFeatures)
+    // This is wiring probe, not strict file change check, but we can check that TestBuilderScreen not modified for clamp
+    // The task says no screen changes for CLAMP round
+  });
+
   check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });

@@ -513,8 +513,32 @@ export async function aiMoodReply({ mood, note = '' }) {
 
 export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = {}, totalMarks = 80, totalQuestions = 30, difficultyPct = 100, timeMinutes = 180 }) {
   const ctx = buildProfileContext(profile);
-  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
+  // FIX-CLAMP D10 Layer1: track-labeled chapter list
+  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter} [track: ${c.track || 'class'}]`).join('; ') : 'whole syllabus';
   const band = difficultyBand(difficultyPct);
+  // FIX-CLAMP D10: syllabus boundary fence
+  const classLevelRaw = String(profile?.class_level || 'Class 10');
+  const classNumMatch = classLevelRaw.match(/(\d+)/);
+  const classNum = classNumMatch ? classNumMatch[1] : '10';
+  const boardRaw = String(profile?.board || 'CBSE');
+  const hasClass = chapters.some(c => (c.track || 'class') === 'class');
+  const hasOlympiad = chapters.some(c => c.track === 'olympiad');
+  const hasExam = chapters.some(c => c.track === 'exam');
+  const boundaryLines = [];
+  if (hasClass) {
+    boundaryLines.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNum} ${boardRaw} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNum} scope of that chapter.`);
+  }
+  if (hasOlympiad) {
+    boundaryLines.push(`These are olympiad chapters — olympiad-level depth, stay strictly within listed topics, olympiad-level problem solving but only from those chapters.`);
+  }
+  if (hasExam) {
+    boundaryLines.push(`These are exam chapters — exam-level depth (JEE/NEET), stay strictly within listed topics, competitive depth but only from those chapters.`);
+  }
+  // If no track info (whole syllabus), default to class fence
+  if (!hasClass && !hasOlympiad && !hasExam) {
+    boundaryLines.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNum} ${boardRaw} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNum} scope of that chapter.`);
+  }
+  const syllabusBoundary = boundaryLines.join(' ');
   const diffInstruction = difficultyInstruction(difficultyPct);   // FIX-G2
   const diffDefault = bandDifficultyDefault(difficultyPct);
   let skippedCount = 0;                                           // FIX-G0: counted, never silent
@@ -538,6 +562,7 @@ Test: ${totalMarks} marks, ${totalQuestions} questions, ${timeMinutes} minutes.
 ${breakdownPrompt}.
 Difficulty: ${difficultyPct}% — ${band}.
 ${diffInstruction}
+${syllabusBoundary}
 Create TWO full sets (Set A and Set B) with DIFFERENT questions of the same pattern, like real exam papers.
 Answer lengths: VSAQ one line (~10–20 words), SAQ 20–30 words, LAQ 50–60 words. Write each answer as bullet points and wrap the 2–4 key terms in **double asterisks**.
 Questions must be syllabus-accurate, in simple English, no markdown anywhere except the **bold** markers inside answers.
@@ -659,8 +684,31 @@ export async function aiGenerateQuestionBank({
   _askJSON = null,          // FIX-G: test seam (no live provider needed)
 }) {
   const ctx = buildProfileContext(profile);
-  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter}`).join('; ') : 'whole syllabus';
+  // FIX-CLAMP D10 Layer1: track-labeled chapter list
+  const chList = chapters.length ? chapters.map((c) => `${c.subject} — ${c.chapter} [track: ${c.track || 'class'}]`).join('; ') : 'whole syllabus';
   const band = difficultyBand(difficultyPct);
+  // FIX-CLAMP D10: syllabus boundary fence
+  const classLevelRawQB = String(profile?.class_level || 'Class 10');
+  const classNumMatchQB = classLevelRawQB.match(/(\d+)/);
+  const classNumQB = classNumMatchQB ? classNumMatchQB[1] : '10';
+  const boardRawQB = String(profile?.board || 'CBSE');
+  const hasClassQB = chapters.some(c => (c.track || 'class') === 'class');
+  const hasOlympiadQB = chapters.some(c => c.track === 'olympiad');
+  const hasExamQB = chapters.some(c => c.track === 'exam');
+  const boundaryLinesQB = [];
+  if (hasClassQB) {
+    boundaryLinesQB.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNumQB} ${boardRawQB} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNumQB} scope of that chapter.`);
+  }
+  if (hasOlympiadQB) {
+    boundaryLinesQB.push(`These are olympiad chapters — olympiad-level depth, stay strictly within listed topics, olympiad-level problem solving but only from those chapters.`);
+  }
+  if (hasExamQB) {
+    boundaryLinesQB.push(`These are exam chapters — exam-level depth (JEE/NEET), stay strictly within listed topics, competitive depth but only from those chapters.`);
+  }
+  if (!hasClassQB && !hasOlympiadQB && !hasExamQB) {
+    boundaryLinesQB.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNumQB} ${boardRawQB} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNumQB} scope of that chapter.`);
+  }
+  const syllabusBoundaryQB = boundaryLinesQB.join(' ');
   const diffInstruction = difficultyInstruction(difficultyPct);          // FIX-G2: concrete band language
   const targets = scaleBreakdown(breakdown, totalQuestions);             // FIX-G1: exact per-type targets
   const diffDefault = bandDifficultyDefault(difficultyPct);
@@ -682,6 +730,7 @@ THIS BATCH — return EXACTLY: ${mixLine} (${reqCount} questions).
 Overall target: ${totalQuestions}. Per-type targets: MCQ ${targets.mcq}, VSAQ ${targets.vsaq}, SAQ ${targets.saq}, LAQ ${targets.laq}.
 Already generated: ${already.length} — do not repeat any of them.${retry ? '\nThe previous reply was empty or unreadable — return valid JSON this time.' : ''}
 ${diffInstruction}
+${syllabusBoundaryQB}
 Answer lengths: VSAQ one line ~10–20 words, SAQ 20–30 words, LAQ 50–60 words. Write answers as bullet points and wrap the 2–4 key terms in **double asterisks**.
 Simple English, no markdown other than the **bold** markers. Math in plain text only.
 Every question MUST have a non-empty "q" stem — a question with no stem is unusable.`,
@@ -793,6 +842,28 @@ export async function aiGenerateMindMap({
   const band = difficultyBand(difficultyPct);
   const contentInstruction = mindMapContentInstruction(difficultyPct);   // FIX-G4: difficulty changes CONTENT TYPE
   const ask = _askJSON || askAIJSON;
+  // FIX-CLAMP D10 Layer1: track-labeled chapter list + boundary
+  const classLevelRawMM = String(profile?.class_level || 'Class 10');
+  const classNumMatchMM = classLevelRawMM.match(/(\d+)/);
+  const classNumMM = classNumMatchMM ? classNumMatchMM[1] : '10';
+  const boardRawMM = String(profile?.board || 'CBSE');
+  const hasClassMM = chapters.some(c => (c.track || 'class') === 'class');
+  const hasOlympiadMM = chapters.some(c => c.track === 'olympiad');
+  const hasExamMM = chapters.some(c => c.track === 'exam');
+  const boundaryLinesMM = [];
+  if (hasClassMM) {
+    boundaryLinesMM.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNumMM} ${boardRawMM} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNumMM} scope of that chapter.`);
+  }
+  if (hasOlympiadMM) {
+    boundaryLinesMM.push(`These are olympiad chapters — olympiad-level depth, stay strictly within listed topics, olympiad-level problem solving but only from those chapters.`);
+  }
+  if (hasExamMM) {
+    boundaryLinesMM.push(`These are exam chapters — exam-level depth (JEE/NEET), stay strictly within listed topics, competitive depth but only from those chapters.`);
+  }
+  if (!hasClassMM && !hasOlympiadMM && !hasExamMM) {
+    boundaryLinesMM.push(`STRICT SYLLABUS BOUNDARY: every question and answer must be answerable using ONLY the Class ${classNumMM} ${boardRawMM} treatment of the listed chapters. Content from higher classes (e.g., Class 11/12 or JEE/NEET-only topics) is FORBIDDEN, even if the chapter name is broad — stay inside the Class ${classNumMM} scope of that chapter.`);
+  }
+  const syllabusBoundaryMM = boundaryLinesMM.join(' ');
 
   // FIX-G4.2: ONE chapter per request. Batching every chapter into a single
   // prompt is why maps came back thin — the model split its budget across
@@ -807,12 +878,15 @@ export async function aiGenerateMindMap({
     const shape = heavy
       ? `8–10 main branches, each with 3–4 leaf points, at least 3 levels deep — ${minNodes}+ nodes in total`
       : `5–6 main branches, each with 3–4 leaf points, at least 2 levels deep — ${minNodes}+ nodes in total`;
+    // FIX-CLAMP D10: track-labeled single chapter + boundary
+    const trackLabel = ch?.track ? ` [track: ${ch.track}]` : ' [track: class]';
     return ask({
       prompt: `Create a one-page revision MIND MAP as JSON for ONE chapter only.
-Chapter: ${esc(ch?.chapter || 'the chapter')} (${esc(ch?.subject || '')}).
+Chapter: ${esc(ch?.chapter || 'the chapter')} (${esc(ch?.subject || '')})${trackLabel}.
 Student: ${esc(ctx)}.
 Difficulty: ${difficultyPct}% — ${band}.
 ${contentInstruction}
+${syllabusBoundaryMM}
 Structure: a central idea with ${shape}. Short phrases only (3–7 words), the kind a topper writes on one page. No markdown anywhere.${extraInstruction}`,
       system: `${AI_PERSONA}\nYou are a revision-notes expert. Output ONLY the JSON object.`,
       schemaHint: `{
