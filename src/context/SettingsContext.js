@@ -17,7 +17,9 @@ const DEFAULTS = {
   soundEffects: true,
   ambientVolume: 0.6,
   dailyReminder: null, // 'HH:MM' or null
-  hoursMultiplier: 2.0, // FIX-SCHED1: chapter workload multiplier default 2.0× (PO 2026-10-02)
+  hoursMultiplier: 2.0, // FIX-SCHED1: school workload multiplier default 2.0× (PO 2026-10-02) — kept for D1
+  olympiadMultiplier: 3.0, // FIX-SCHED7 D1: olympiad workload default 3.0×
+  examMultiplier: 2.0, // FIX-SCHED7 D1: competitive workload default 2.0×
   classSessionEnd: '02-25', // FIX-SCHED3 D7: school session ends MM-DD, editable, default 02-25
 };
 

@@ -263,6 +263,8 @@ export function ScheduleScreen({ navigation, route }) {
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
         hoursMultiplier: settings.hoursMultiplier ?? 2.0,
+        olympiadMultiplier: settings.olympiadMultiplier ?? 3.0,
+        examMultiplier: settings.examMultiplier ?? 2.0,
         classSessionEnd: settings.classSessionEnd || '02-25',
         weeks: (() => {
           const today = dayjs();
@@ -531,7 +533,7 @@ export function ScheduleScreen({ navigation, route }) {
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
-                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Workload {settings.hoursMultiplier ?? 2}× (Base→Effective shown in syllabus)
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× (Base→Effective per track)
               </Text>
             ) : null}
           </Card>
@@ -542,7 +544,7 @@ export function ScheduleScreen({ navigation, route }) {
               </Text>
               {/* FIX-SCHED3: honest shortfall — how to fix link */}
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
-                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload {settings.hoursMultiplier ?? 2}× → 1.0×/1.5×. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
+                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× → lower. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
               </Text>
               {/* FIX-H: when the workload genuinely does not fit, name what was left out */}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
@@ -615,7 +617,7 @@ export function ScheduleScreen({ navigation, route }) {
           revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
         </Text>
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
-        <InfoRow label="Chapter workload" value={`${settings.hoursMultiplier ?? 2}× — e.g. Base 4h → Effective ~${(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (class only, revision separate)`} />
+        <InfoRow label="Chapter workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
         <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week` : 'None'} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />

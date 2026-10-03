@@ -606,16 +606,17 @@ function HeaderBtn({ icon, onPress }) {
 function ChapterRow({ row, onOpen, onDelete, onToggle }) {
   const icon = STATUS_ICON[row.status] || '🔒';
   const high = (row.weightage || 0) >= 5;
-  // FIX-SCHED1: show effective hours — Base ~4h → Effective ~8h
+  // FIX-SCHED7 D1: per-track effective hours — School 2.0× / Olympiad 3.0× / Competitive 2.0×
   let settings;
-  try { settings = useSettings(); } catch { settings = { hoursMultiplier: 2.0 }; }
-  const mult = settings?.hoursMultiplier ?? 2.0;
+  try { settings = useSettings(); } catch { settings = { hoursMultiplier: 2.0, olympiadMultiplier: 3.0, examMultiplier: 2.0 }; }
   const base = Number(row.estimated_hours) || 4;
   const track = row.track || 'class';
-  const effective = track === 'class' ? base * mult : base;
-  const hoursLine = track === 'class'
-    ? `Base ~${base}h → Effective planned: ~${effective.toFixed(1)}h (${mult}×)${row.deadline ? ` · due ${row.deadline}` : ''}`
-    : `${base} hrs${row.deadline ? ` · due ${row.deadline}` : ''}`;
+  let mult = 1;
+  if (track === 'class') mult = settings?.hoursMultiplier ?? 2.0;
+  else if (track === 'olympiad') mult = settings?.olympiadMultiplier ?? 3.0;
+  else if (track === 'exam') mult = settings?.examMultiplier ?? 2.0;
+  const effective = base * mult;
+  const hoursLine = `Base ~${base}h → Effective ~${effective.toFixed(1)}h (${track} ${mult}×)${row.deadline ? ` · due ${row.deadline}` : ''}`;
   const isDone = String(row.status).toLowerCase() === 'completed';
   return (
     <Pressable

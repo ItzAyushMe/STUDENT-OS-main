@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Platform, Pressable, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { Screen } from '../../components/ui/Screen';
@@ -564,21 +565,78 @@ export function SettingsScreen({ navigation }) {
           </View>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
         </View>
-        {/* FIX-SCHED1: chapter workload multiplier selector — default 2.0×, persisted in Settings */}
-        <View style={{ marginBottom: 4 }}>
-          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Chapter workload (effective hours)</Text>
-          <SegmentedControl
-            mode="light"
-            options={[
-              { key: '1', label: '1.0×' },
-              { key: '1.5', label: '1.5×' },
-              { key: '2', label: '2.0×' },
-            ]}
-            value={String(settings.hoursMultiplier ?? 2)}
-            onChange={(k) => settings.update({ hoursMultiplier: Number(k) })}
-          />
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
-            Base estimate: e.g. 4h per chapter → Effective planned: ~{(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (multiplier {settings.hoursMultiplier ?? 2}×, class-track only, revision separate)
+        {/* FIX-SCHED7 D1/D1b: per-track workload multipliers — THREE sliders, 1.0–10.0× step 0.5, replaces SegmentedControl */}
+        <View style={{ marginBottom: 12 }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 10 }}>Chapter workload — per-track multipliers (effective hours)</Text>
+
+          {/* School workload */}
+          <View style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 10, marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#334155' }}>🏫 School workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#7C3AED' }}>{(settings.hoursMultiplier ?? 2.0).toFixed(1)}×</Text>
+            </View>
+            <Slider
+              style={{ width: '100%', height: 30 }}
+              minimumValue={1.0}
+              maximumValue={10.0}
+              step={0.5}
+              value={settings.hoursMultiplier ?? 2.0}
+              minimumTrackTintColor="#7C3AED"
+              maximumTrackTintColor="#E2E8F0"
+              thumbTintColor="#7C3AED"
+              onSlidingComplete={(v) => settings.update({ hoursMultiplier: Number(v.toFixed(1)) })}
+            />
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', lineHeight: 14 }}>
+              Base ~4h → Effective ~{(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h (School {settings.hoursMultiplier ?? 2.0}×, default 2.0×)
+            </Text>
+          </View>
+
+          {/* Olympiad workload */}
+          <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 10, padding: 10, marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#92400E' }}>🏅 Olympiad workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#D97706' }}>{(settings.olympiadMultiplier ?? 3.0).toFixed(1)}×</Text>
+            </View>
+            <Slider
+              style={{ width: '100%', height: 30 }}
+              minimumValue={1.0}
+              maximumValue={10.0}
+              step={0.5}
+              value={settings.olympiadMultiplier ?? 3.0}
+              minimumTrackTintColor="#D97706"
+              maximumTrackTintColor="#FEF3C7"
+              thumbTintColor="#D97706"
+              onSlidingComplete={(v) => settings.update({ olympiadMultiplier: Number(v.toFixed(1)) })}
+            />
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#92400E', lineHeight: 14 }}>
+              Base ~4h → Effective ~{(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h (Olympiad {settings.olympiadMultiplier ?? 3.0}×, default 3.0×, D1)
+            </Text>
+          </View>
+
+          {/* Competitive workload */}
+          <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 4 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#991B1B' }}>🎯 Competitive workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#DC2626' }}>{(settings.examMultiplier ?? 2.0).toFixed(1)}×</Text>
+            </View>
+            <Slider
+              style={{ width: '100%', height: 30 }}
+              minimumValue={1.0}
+              maximumValue={10.0}
+              step={0.5}
+              value={settings.examMultiplier ?? 2.0}
+              minimumTrackTintColor="#DC2626"
+              maximumTrackTintColor="#FEE2E2"
+              thumbTintColor="#DC2626"
+              onSlidingComplete={(v) => settings.update({ examMultiplier: Number(v.toFixed(1)) })}
+            />
+            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#991B1B', lineHeight: 14 }}>
+              Base ~4h → Effective ~{(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (Competitive {settings.examMultiplier ?? 2.0}×, default 2.0×, D1)
+            </Text>
+          </View>
+
+          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>
+            Per-track multipliers: School 2.0× / Olympiad 3.0× / Competitive 2.0× defaults (D1). Range 1.0–10.0× step 0.5 (D1b). Slider dep @react-native-community/slider D13. Engine applies track's own multiplier.
           </Text>
         </View>
         {/* FIX-SCHED3 D7: School session end MM-DD, editable, default 02-25 */}

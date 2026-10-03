@@ -438,7 +438,7 @@ export function classSessionCutoff(today, overrideMMDD) {
 export function buildWorkItems(input) {
   const {
     syllabus = [], existing = [], deadlines = null, prio, factor = 1,
-    hoursMultiplier = 2,
+    hoursMultiplier = 2, olympiadMultiplier = 3, examMultiplier = 2,
     today, examDate = null, olympiadDate = null, schoolExams = [], allocatable = [],
     classPaused = null,
   } = input || {};
@@ -511,10 +511,13 @@ export function buildWorkItems(input) {
       excludedItems.push({ id: row.id, chapter, reason: 'track-not-planned', track });
       continue;
     }
-    // FIX-SCHED1: chapter workload multiplier — default 2.0×, class-track only, revision outside
+    // FIX-SCHED7 D1: per-track workload multipliers — School 2.0×, Olympiad 3.0×, Competitive 2.0×
     const rawHours = num(row.estimated_hours, 4);
-    const isClassTrack = track === 'class';
-    const mult = isClassTrack ? num(hoursMultiplier, 2) : 1;
+    let mult = 1;
+    if (track === 'class') mult = num(hoursMultiplier, 2);
+    else if (track === 'olympiad') mult = num(olympiadMultiplier, 3);
+    else if (track === 'exam') mult = num(examMultiplier, 2);
+    else mult = 1; // custom tracks default 1×
     const effectiveHours = rawHours * mult;
     const baseMin = Math.max(0, Math.round(effectiveHours * 60 * num(factor, 1) * (1 - progress / 100)));
     const key = `${String(row.subject || '').toLowerCase()}|${chapter.toLowerCase()}`;
@@ -647,9 +650,11 @@ export function planSchedule(input) {
   const archivedIn = Array.isArray(syllabus) ? syllabus.filter((r) => r && isArchivedRow(r)).length : 0;
 
   const hoursMultiplier = opts.hoursMultiplier != null ? num(opts.hoursMultiplier, 2) : 2;
+  const olympiadMultiplier = opts.olympiadMultiplier != null ? num(opts.olympiadMultiplier, 3) : 3;
+  const examMultiplier = opts.examMultiplier != null ? num(opts.examMultiplier, 2) : 2;
   const built = buildWorkItems({
     syllabus, existing: existingRows, deadlines: opts.deadlines || null, prio, factor,
-    hoursMultiplier,
+    hoursMultiplier, olympiadMultiplier, examMultiplier,
     today, examDate, olympiadDate, schoolExams: exams, allocatable, classPaused,
   });
   const items = built.items;

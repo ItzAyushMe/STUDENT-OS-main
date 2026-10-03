@@ -176,7 +176,7 @@ const planTight = generateSchedule({
   syllabus: multiTrackSyllabus, examDate: null, dailyHours: 1, preferredTime: 'Morning',
   daysOff: [], prepLevel: 'Intermediate', weeks: 6, userId: 'u2',
   today: '2027-01-14',
-  hoursMultiplier: 1,
+  hoursMultiplier: 1, olympiadMultiplier: 1, examMultiplier: 1,
 });
 const tightMin = (t) => planTight.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
 assert.ok(tightMin('class') > tightMin('exam') && tightMin('class') > tightMin('olympiad'), `tight capacity honours 60/30/10 split (class ${tightMin('class')} vs exam ${tightMin('exam')} vs olympiad ${tightMin('olympiad')} min)`);
@@ -192,7 +192,7 @@ const plan2 = generateSchedule({
   weeks: 6,
   userId: 'u2',
   today: '2027-01-14',
-  hoursMultiplier: 1,
+  hoursMultiplier: 1, olympiadMultiplier: 1, examMultiplier: 1,
   priorities: { order: ['olympiad', 'class', 'exam'], enabled: { class: true, exam: true, olympiad: true }, timeSplit: { olympiad: 70, class: 20, exam: 10 } },
 });
 const studyMin2 = (t) => plan2.filter(r => r.session_type === 'study' && r.track === t).reduce((a, r) => a + r.duration_minutes, 0);
@@ -1597,6 +1597,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     const p = generateSchedule({
       syllabus: classOnly, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2,
       userId: 'u-h3', today: H_TODAY, createdAt: H_CREATED,
+      hoursMultiplier: 1, olympiadMultiplier: 1, examMultiplier: 1,
       priorities: {
         order: ['class', 'exam', 'olympiad'],
         enabled: { class: true, exam: true, olympiad: true },
@@ -1614,8 +1615,9 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
         mkRow('c1', 'Science', 'Life Processes', { track: 'class', estimated_hours: 8 }),
         mkRow('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 8 }),
       ],
-      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 2, userId: 'u-h3',
+      dailyHours: 1, preferredTime: 'Morning', daysOff: [], weeks: 2, userId: 'u-h3',
       today: H_TODAY, createdAt: H_CREATED,
+      hoursMultiplier: 1, olympiadMultiplier: 1, examMultiplier: 1,
       priorities: {
         order: ['class', 'olympiad'],
         enabled: { class: true, olympiad: true, exam: false },
@@ -2782,6 +2784,85 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
 
   // ================= FIX-SCHED4 D4: date-cascade allocator — three-phase, overflow, undated deprioritization =================
+  // ================= FIX-SCHED7 D1/D1b: per-track multiplier sliders =================
+  check('MULT1', 'per-track multiplier math: class 2.0×, olympiad 3.0×, exam 2.0× defaults', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const classRow = mkS('c1', 'Science', 'Class Ch', { track:'class', estimated_hours:4 });
+    const olympRow = mkS('o1', 'Maths Olympiad', 'Olympiad Ch', { track:'olympiad', estimated_hours:4 });
+    const examRow = mkS('e1', 'JEE', 'Exam Ch', { track:'exam', estimated_hours:4 });
+    const builtDefault = SG.buildWorkItems({
+      syllabus: [classRow, olympRow, examRow],
+      existing: [], deadlines: null, prio: SG.normalizePriorities(null), factor:1,
+      hoursMultiplier:2, olympiadMultiplier:3, examMultiplier:2,
+      today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class','olympiad','exam'], classPaused:null,
+    });
+    const cItem = builtDefault.items.find(i=>i.track==='class');
+    const oItem = builtDefault.items.find(i=>i.track==='olympiad');
+    const eItem = builtDefault.items.find(i=>i.track==='exam');
+    assert.ok(cItem, 'class item exists');
+    assert.ok(oItem, 'olympiad item exists');
+    assert.ok(eItem, 'exam item exists');
+    assert.equal(cItem.effectiveHours, 8, `class 4h *2.0× =8h, got ${cItem.effectiveHours}`);
+    assert.equal(oItem.effectiveHours, 12, `olympiad 4h *3.0× =12h, got ${oItem.effectiveHours}`);
+    assert.equal(eItem.effectiveHours, 8, `exam 4h *2.0× =8h, got ${eItem.effectiveHours}`);
+    // custom multipliers
+    const builtCustom = SG.buildWorkItems({
+      syllabus: [classRow, olympRow, examRow],
+      existing: [], deadlines: null, prio: SG.normalizePriorities(null), factor:1,
+      hoursMultiplier:1.5, olympiadMultiplier:5.0, examMultiplier:10.0,
+      today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class','olympiad','exam'], classPaused:null,
+    });
+    assert.equal(builtCustom.items.find(i=>i.track==='class').effectiveHours, 6, 'class 4h*1.5=6');
+    assert.equal(builtCustom.items.find(i=>i.track==='olympiad').effectiveHours, 20, 'olympiad 4h*5.0=20');
+    assert.equal(builtCustom.items.find(i=>i.track==='exam').effectiveHours, 40, 'exam 4h*10.0=40');
+  });
+
+  check('MULT2', 'persistence probe: SettingsContext DEFAULTS has olympiadMultiplier 3.0 and examMultiplier 2.0, same pattern as hoursMultiplier', () => {
+    const ctxSrc = read('src/context/SettingsContext.js');
+    assert.ok(/hoursMultiplier/.test(ctxSrc), 'must have hoursMultiplier');
+    assert.ok(/olympiadMultiplier/.test(ctxSrc), 'must have olympiadMultiplier');
+    assert.ok(/examMultiplier/.test(ctxSrc), 'must have examMultiplier');
+    assert.ok(/2\.0/.test(ctxSrc) && /3\.0/.test(ctxSrc), 'defaults 2.0 and 3.0 present');
+    // Check DEFAULTS
+    assert.ok(/hoursMultiplier:\s*2\.0/.test(ctxSrc), 'hoursMultiplier default 2.0');
+    assert.ok(/olympiadMultiplier:\s*3\.0/.test(ctxSrc), 'olympiadMultiplier default 3.0');
+    assert.ok(/examMultiplier:\s*2\.0/.test(ctxSrc), 'examMultiplier default 2.0');
+    // Persistence pattern: update uses ...ref.current and AsyncStorage.setItem
+    assert.ok(/AsyncStorage\.setItem/.test(ctxSrc), 'must persist via AsyncStorage');
+  });
+
+  check('MULT3', 'wiring probe: SettingsScreen has THREE sliders School/Olympiad/Competitive, ranges 1.0–10.0 step 0.5, live labels', () => {
+    const src = read('src/screens/settings/SettingsScreen.js');
+    assert.ok(/School workload/.test(src), 'must have School workload slider');
+    assert.ok(/Olympiad workload/.test(src), 'must have Olympiad workload slider');
+    assert.ok(/Competitive workload/.test(src), 'must have Competitive workload slider');
+    // Check Slider import
+    assert.ok(/@react-native-community\/slider/.test(src), 'must import slider');
+    // Check ranges
+    assert.ok(/minimumValue.*1\.0/.test(src) && /maximumValue.*10\.0/.test(src), 'range 1.0–10.0');
+    assert.ok(/step.*0\.5/.test(src), 'step 0.5');
+    // Check live value labels
+    assert.ok(/hoursMultiplier/.test(src) && /olympiadMultiplier/.test(src) && /examMultiplier/.test(src), 'must use all three multipliers');
+    // Ensure old SegmentedControl for workload is gone (only AI provider uses it)
+    const workloadSeg = (src.match(/Chapter workload/g) || []).length;
+    assert.ok(workloadSeg >= 1, 'Chapter workload section exists');
+    // The old 1.0×/1.5×/2.0× segmented for workload should be replaced — check no SegmentedControl with 1.0×/1.5×/2.0× for workload
+    // We allow SegmentedControl for AI provider, but not for workload
+    const hasOldWorkloadSeg = /Chapter workload[\s\S]*?SegmentedControl[\s\S]*?1\.0×/.test(src);
+    assert.ok(!hasOldWorkloadSeg, 'old workload SegmentedControl 1.0×/1.5×/2.0× must be replaced by sliders');
+  });
+
+  check('MULT4', 'engine + UI wiring: ScheduleScreen passes per-track multipliers, SyllabusScreen uses track multiplier', () => {
+    const schedSrc = read('src/screens/study/ScheduleScreen.js');
+    assert.ok(/olympiadMultiplier/.test(schedSrc), 'ScheduleScreen must pass olympiadMultiplier');
+    assert.ok(/examMultiplier/.test(schedSrc), 'ScheduleScreen must pass examMultiplier');
+    assert.ok(/School.*Olympiad.*Competitive/.test(schedSrc) || /Workload School/.test(schedSrc), 'InfoRow must show all three');
+    const sylSrc = read('src/screens/study/SyllabusScreen.js');
+    assert.ok(/olympiadMultiplier/.test(sylSrc) && /examMultiplier/.test(sylSrc), 'SyllabusScreen ChapterRow must use per-track multipliers');
+    assert.ok(/track.*mult|mult.*track/.test(sylSrc) || /olympiad.*3\.0/.test(sylSrc), 'ChapterRow effective hours per track');
+  });
+
   check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
