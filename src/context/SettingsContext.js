@@ -18,6 +18,7 @@ const DEFAULTS = {
   ambientVolume: 0.6,
   dailyReminder: null, // 'HH:MM' or null
   hoursMultiplier: 2.0, // FIX-SCHED1: chapter workload multiplier default 2.0× (PO 2026-10-02)
+  classSessionEnd: '02-25', // FIX-SCHED3 D7: school session ends MM-DD, editable, default 02-25
 };
 
 const SettingsCtx = createContext(null);

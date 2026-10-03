@@ -84,8 +84,8 @@ export function ScheduleScreen({ navigation, route }) {
     setLoading(true);
     try {
       const from = dateStr(dayjs().subtract(30, 'day'));
-      // v1.0.6 recovery: load up to 365 days to support long-horizon schedules
-      const to = dateStr(dayjs().add(365, 'day'));
+      // FIX-SCHED3: load up to 1100 days to support long-horizon schedules (Apr 2028)
+      const to = dateStr(dayjs().add(1100, 'day'));
       const data = await db.list('schedule', {
         eq: { user_id: profile.id },
         gte: { date: from },
@@ -225,7 +225,7 @@ export function ScheduleScreen({ navigation, route }) {
       const allExisting = await db.list('schedule', {
         eq: { user_id: profile.id },
         gte: { date: dateStr(dayjs(planToday).subtract(30, 'day')) },
-        lte: { date: dateStr(dayjs(planToday).add(365, 'day')) },
+        lte: { date: dateStr(dayjs(planToday).add(1100, 'day')) },
         order: { col: 'date', asc: true },
         limit: 1000,
       });
@@ -263,6 +263,7 @@ export function ScheduleScreen({ navigation, route }) {
         daysOff: profile.days_off || [],
         prepLevel: profile.prep_level,
         hoursMultiplier: settings.hoursMultiplier ?? 2.0,
+        classSessionEnd: settings.classSessionEnd || '02-25',
         weeks: (() => {
           const today = dayjs();
           const exam = profile.exam_date ? dayjs(profile.exam_date) : null;
@@ -279,15 +280,18 @@ export function ScheduleScreen({ navigation, route }) {
               }
             }
           }
-          // FIX-SCHED1: horizon must reach classSessionCutoff (Feb 25), not 42 days
+          // FIX-SCHED3: horizon must reach classSessionCutoff (editable via D7) + 14-day buffer, cap 160 weeks
           try {
-            const cutoffStr = classSessionCutoff(todayStr());
+            const override = settings.classSessionEnd || '02-25';
+            const cutoffStr = classSessionCutoff(todayStr(), override);
             const cutoffDay = dayjs(cutoffStr);
             if (cutoffDay.isValid() && cutoffDay.isAfter(maxDate)) maxDate = cutoffDay;
           } catch {}
+          // +14-day post-exam buffer so wind-down days exist
+          maxDate = maxDate.add(14, 'day');
           const diffDays = Math.max(42, maxDate.diff(today, 'day'));
           const weeksNeeded = Math.ceil(diffDays / 7);
-          return Math.min(52, Math.max(6, weeksNeeded));
+          return Math.min(160, Math.max(6, weeksNeeded));
         })(),
         userId: profile.id,
       });
@@ -523,7 +527,7 @@ export function ScheduleScreen({ navigation, route }) {
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
               {coverage.classDoneBy && coverage.nextSchoolExam
                 ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label || coverage.nextSchoolExam.start || 'School Exam'}" (${coverage.nextSchoolExam.start || ''}) 📅`
-                : `Plan horizon: till ${classSessionCutoff(coverage.today || todayStr())} (Feb 25 session end) — class first, olympiad second, exam last ⚡`}
+                : `Plan horizon: till ${classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')} (${settings.classSessionEnd || '02-25'} session end) — class first, olympiad second, exam last ⚡`}
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
@@ -538,7 +542,7 @@ export function ScheduleScreen({ navigation, route }) {
               </Text>
               {/* FIX-SCHED3: honest shortfall — how to fix link */}
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
-                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload {settings.hoursMultiplier ?? 2}× → 1.0×/1.5×. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr())}, never fabricates impossible hours.
+                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload {settings.hoursMultiplier ?? 2}× → 1.0×/1.5×. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
               </Text>
               {/* FIX-H: when the workload genuinely does not fit, name what was left out */}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
@@ -604,11 +608,11 @@ export function ScheduleScreen({ navigation, route }) {
         />
       ) : null}
 
-      {/* Generate modal — FIX-SCHED1/2: shows effective hours + progress */}
+      {/* Generate modal — FIX-SCHED3: shows effective hours + progress + editable session end */}
       <ModalSheet visible={genOpen} onClose={() => setGenOpen(false)} title="Generate Smart Schedule" mode="light">
         <Text style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#475569', lineHeight: 20, marginBottom: 14 }}>
           Ye engine tumhare syllabus ke weightage + estimated hours × workload multiplier + available time se ek day-by-day plan banayegi —
-          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr())} (Feb 25).
+          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
         </Text>
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
         <InfoRow label="Chapter workload" value={`${settings.hoursMultiplier ?? 2}× — e.g. Base 4h → Effective ~${(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (class only, revision separate)`} />

@@ -2021,8 +2021,11 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
       prepLevel: 'Intermediate', weeks: 1, userId: 'u-s1a', today: S_TODAY, createdAt: S_CREATED,
     });
     const grid = classStudyByDate(p);
-    const days = Object.keys(grid).sort();
-    assert.ok(days.length >= 5, `expected class study on most of the 7 days, got ${days.length}`);
+    // FIX-SCHED3: horizon now = cutoff+14d buffer (was 51d, now 65d) — S1a intent is first 7 days pair, not entire 65d tail
+    const allDays = Object.keys(grid).sort();
+    const firstWeek = allDays.filter((d) => d < sadd(S_TODAY, 7));
+    const days = firstWeek.length ? firstWeek : allDays.slice(0, 7);
+    assert.ok(days.length >= 5, `expected class study on most of the 7 days, got ${days.length} (all ${allDays.length})`);
     for (const d of days) {
       assert.ok(grid[d].size >= 2, `grid day ${d} studied only ${[...grid[d]].join('/')} — the pair interleave is not wired into the planner`);
     }
@@ -2536,8 +2539,114 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/todayStr\(\)/.test(sgSrcS), 'still the single date system');
   });
 
+
+  // ================= FIX-SCHED3 — per-track horizons, 1100 cap, 14d buffer, D7 override =================
+  check('SCH3a', 'exam 2028-04-15 reach: horizon must include Apr 2028 + 14d buffer (per-track max)', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const p = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life Processes', { estimated_hours: 8 })],
+      examDate: '2028-04-15',
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 6,
+      userId: 'u-s3a', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    const last = p.coverage.totalDays;
+    assert.ok(last >= 800, `horizon must reach 2028-04-15 (~831d from 2026-01-05) +14d buffer, got totalDays ${last}`);
+    assert.ok(p.some((r) => r.date >= '2028-04-01' && r.date <= '2028-04-15'), 'schedule must have rows near exam date');
+  });
+
+  check('SCH3b', 'olympiad 2027-09-20 blocks Aug-Sep none after: olympiad track hard-stops at its date', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const p = generateSchedule({
+      syllabus: [
+        mkS('o1', 'Maths Olympiad', 'Number Theory', { track: 'olympiad', estimated_hours: 10 }),
+        mkS('o2', 'Maths Olympiad', 'Combinatorics', { track: 'olympiad', estimated_hours: 10 }),
+        mkS('c1', 'Science', 'Life Processes', { estimated_hours: 8 }),
+      ],
+      olympiadDate: '2027-09-20',
+      dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 6,
+      userId: 'u-s3b', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    const olympAfter = p.filter((r) => r.track === 'olympiad' && r.date > '2027-09-20');
+    assert.equal(olympAfter.length, 0, `olympiad sessions must not exist after 2027-09-20, found ${olympAfter.slice(0,3).map(r=>r.date).join(', ')}`);
+    assert.ok(p.some((r) => r.track === 'olympiad' && r.date >= '2027-08-01'), 'olympiad should have sessions in Aug-Sep before the date');
+  });
+
+  check('SCH3c', 'class never past cutoff even with 1100 cap: class study stops at Feb 25', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const p = generateSchedule({
+      syllabus: Array.from({ length: 20 }, (_, i) => mkS(`h${i}`, 'Science', `Chapter ${i}`, { estimated_hours: 20 })),
+      dailyHours: 2, preferredTime: 'Morning', daysOff: [], weeks: 10,
+      userId: 'u-s3c', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    const lateClass = p.filter((r) => r.track === 'class' && r.session_type === 'study' && r.date > '2026-02-25');
+    assert.equal(lateClass.length, 0, `class study must never be past cutoff, found ${lateClass.slice(0,3).map(r=>r.date).join(', ')}`);
+  });
+
+  check('SCH3d', 'horizon-matrix: per-track max = max(weeks, cutoff, olympiad, exam, furthestSchool)+14d', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const baseToday = '2026-01-05';
+    const pWeeks = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 4 })],
+      dailyHours: 3, weeks: 6, userId: 'u-s3d1', today: baseToday, createdAt: baseToday+'T00:00:00.000Z',
+    });
+    const pExam = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 4 })],
+      dailyHours: 3, weeks: 6, examDate: '2026-08-15', userId: 'u-s3d2', today: baseToday, createdAt: baseToday+'T00:00:00.000Z',
+    });
+    const pOlymp = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 4 })],
+      dailyHours: 3, weeks: 6, olympiadDate: '2026-09-20', userId: 'u-s3d3', today: baseToday, createdAt: baseToday+'T00:00:00.000Z',
+    });
+    assert.ok(pExam.coverage.totalDays > pWeeks.coverage.totalDays, `exam horizon ${pExam.coverage.totalDays} must be > weeks-only ${pWeeks.coverage.totalDays}`);
+    assert.ok(pOlymp.coverage.totalDays > pWeeks.coverage.totalDays, 'olympiad horizon must extend beyond weeks-only');
+    const cutoff = SG.classSessionCutoff(baseToday);
+    const cutoffDiff = Math.round((new Date(cutoff) - new Date(baseToday)) / 86400000) + 14;
+    assert.ok(pWeeks.coverage.totalDays >= cutoffDiff, `weeks plan totalDays ${pWeeks.coverage.totalDays} must include cutoff+14 buffer ${cutoffDiff}`);
+  });
+
+  check('SCH3e', 'cap-lift 1100 vs >1100 truncate: 1100 cap enforced, >1100 exam truncated', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const farExam = '2029-06-01';
+    const p = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 4 })],
+      examDate: farExam,
+      dailyHours: 3, weeks: 6, userId: 'u-s3e', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    assert.ok(p.coverage.totalDays <= 1100, `totalDays ${p.coverage.totalDays} must be capped at 1100`);
+    assert.ok(p.coverage.totalDays >= 1090, `capped horizon should be near 1100, got ${p.coverage.totalDays}`);
+    const withinCap = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 4 })],
+      examDate: '2028-04-15',
+      dailyHours: 3, weeks: 6, userId: 'u-s3e2', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    assert.ok(withinCap.coverage.totalDays < 1100 && withinCap.coverage.totalDays >= 800, `1100-cap lift allows 2028-04-15 (~831d) to be fully included, got ${withinCap.coverage.totalDays}`);
+  });
+
+  check('SCH3f', 'session-end override 03-15 moves cutoff: classSessionCutoff respects MM-DD override and schedule respects it', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    assert.equal(SG.classSessionCutoff('2026-01-05', '03-15'), '2026-03-15', 'override 03-15 must move cutoff to Mar 15');
+    assert.equal(SG.classSessionCutoff('2026-04-01', '03-15'), '2027-03-15', 'Apr 1 + override 03-15 -> next year Mar 15');
+    assert.equal(SG.classSessionCutoff('2026-01-05', 'invalid'), '2026-02-25', 'invalid override falls back to default');
+    const pDefault = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 8 })],
+      dailyHours: 3, weeks: 6, userId: 'u-s3f1', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+    });
+    const pOverride = generateSchedule({
+      syllabus: [mkS('c1', 'Science', 'Life', { estimated_hours: 8 })],
+      dailyHours: 3, weeks: 6, userId: 'u-s3f2', today: '2026-01-05', createdAt: '2026-01-05T00:00:00.000Z',
+      classSessionEnd: '03-15',
+    });
+    assert.ok(pOverride.coverage.totalDays > pDefault.coverage.totalDays, `override 03-15 horizon ${pOverride.coverage.totalDays} must be > default 02-25 horizon ${pDefault.coverage.totalDays}`);
+    assert.equal(pOverride.coverage.classCutoff, '2026-03-15', 'coverage must report overridden cutoff');
+    const lateDefault = pDefault.filter((r) => r.track === 'class' && r.session_type === 'study' && r.date > '2026-02-25');
+    const lateOverride = pOverride.filter((r) => r.track === 'class' && r.session_type === 'study' && r.date > '2026-03-15');
+    assert.equal(lateDefault.length, 0, 'default cutoff still respected');
+    assert.equal(lateOverride.length, 0, 'overridden cutoff respected');
+  });
+
   // ================= preservation of the accepted 938e69d foundation =================
-  check('SP1', 'the accepted foundation survives FIX-S: idempotent regen, deadlines-first, completed exclusion, hours parsing, FIX-D4/E wiring', () => {
+  check('SP1'
+, 'the accepted foundation survives FIX-S: idempotent regen, deadlines-first, completed exclusion, hours parsing, FIX-D4/E wiring', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     // (1) idempotent regeneration: kept rows are never re-created
     const syl = [mkS('k1', 'Science', 'Life Processes', { estimated_hours: 6 }), mkS('k2', 'Maths', 'Trigonometry', { estimated_hours: 6 })];

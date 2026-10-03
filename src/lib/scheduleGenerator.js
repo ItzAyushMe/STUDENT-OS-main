@@ -246,7 +246,8 @@ const URGENT_LEAD_DAYS = 14;     // a deadline this close starts demanding capac
 const LEFTOVER_CAP_MIN = 90;     // unspent split budget may bank up to this
 const REVISION_CYCLE_DAYS = 3;
 const REV_WAVE_PICKS = 6;
-const HORIZON_CAP_DAYS = 365;
+const HORIZON_CAP_DAYS = 1100;
+const POST_EXAM_BUFFER_DAYS = 14; // wind-down days after last exam/olympiad/cutoff
 const MAX_BLOCKS_PER_DAY = 40;   // hard stop — an allocation loop can never spin
 
 // ---------- FIX-S: planner constants ----------
@@ -411,9 +412,11 @@ export function buildSubjectRotation(pendingRows, startDate, numDays) {
  *   classSessionCutoff('2027-04-01') -> '2028-02-25'   (new session started)
  *   classSessionCutoff('2028-02-29') -> '2028-02-25'   (leap-safe: MM-DD compare)
  */
-export function classSessionCutoff(today) {
+export function classSessionCutoff(today, overrideMMDD) {
   const base = isDateStr(today) ? dayjs(today) : dayjs(todayStr());
-  const [mm, dd] = String(CLASS_SESSION_END || '02-25').split('-');
+  // D7: optional override MM-DD from settings, fallback to CLASS_SESSION_END constant
+  const rawMMDD = (typeof overrideMMDD === 'string' && /^\d{2}-\d{2}$/.test(overrideMMDD)) ? overrideMMDD : String(CLASS_SESSION_END || '02-25');
+  const [mm, dd] = rawMMDD.split('-');
   const month = clampNum(mm, 1, 12);
   const day = clampNum(dd, 1, 31);
   // April..December belong to the session that ENDS next year; January..March to
@@ -597,11 +600,11 @@ export function planSchedule(input) {
   const olympiadDate = opts.olympiadDate || null;
   const exams = allSchoolExams(opts.schoolExams);
 
-  // horizon: the rolling window, EXTENDED to cover a distant main exam,
-  // olympiad date, furthest school exam, AND class session cutoff (Feb 25 per PO 2026-10-02),
-  // capped at 365d. FIX-SCHED1: whole chain must plan to classSessionCutoff, never 42-day remnant.
+  // horizon: per-track max (class cutoff, olympiad, exam, furthest school exam, weeks) + 14-day buffer
+  // FIX-SCHED3: raise cap 365→1100, add buffer, per-track hard ends, D7 override
   const examLimit = examDate ? dayjs(examDate) : null;
   const olympiadLimit = olympiadDate ? dayjs(olympiadDate) : null;
+  const classEndOverride = opts.classSessionEnd || opts.classSessionEndOverride || null;
   let horizon = dayjs(today).add(Math.max(1, num(opts.weeks, 6)) * 7, 'day');
   if (examLimit && examLimit.isAfter(horizon)) horizon = examLimit;
   if (olympiadLimit && olympiadLimit.isAfter(horizon)) horizon = olympiadLimit;
@@ -609,12 +612,14 @@ export function planSchedule(input) {
     const furthestSchool = dayjs(exams[exams.length - 1].end || exams[exams.length - 1].start);
     if (furthestSchool.isAfter(horizon)) horizon = furthestSchool;
   }
-  // FIX-SCHED1: class track must schedule till 25 Feb (session cutoff), not 1-2 months
+  // FIX-SCHED1: class track must schedule till session cutoff (default Feb 25, editable via D7)
   try {
-    const cutoffStr = classSessionCutoff(today);
+    const cutoffStr = classSessionCutoff(today, classEndOverride);
     const cutoffDay = dayjs(cutoffStr);
     if (cutoffDay.isValid() && cutoffDay.isAfter(horizon)) horizon = cutoffDay;
   } catch {}
+  // +14-day post-exam buffer so wind-down days exist (SCHED3)
+  horizon = horizon.add(POST_EXAM_BUFFER_DAYS, 'day');
   const maxHorizon = dayjs(today).add(HORIZON_CAP_DAYS, 'day');
   if (horizon.isAfter(maxHorizon)) horizon = maxHorizon;
   const totalDays = clampNum(horizon.diff(dayjs(today), 'day'), 1, HORIZON_CAP_DAYS);
@@ -662,7 +667,8 @@ export function planSchedule(input) {
   // ---------- FIX-S S4: the class session's hard cutoff ----------
   // Class-track NEW content stops here; olympiad / competitive tracks run to their
   // own event dates. Pure + date-injected, so the dev-date offset tests it too.
-  const cutoff = classSessionCutoff(today);
+  // FIX-SCHED3: D7 override from settings
+  const cutoff = classSessionCutoff(today, classEndOverride);
 
   // ---------- FIX-S S1: the class week is a rotation of subject PAIRS ----------
   // Built once per plan from the class chapters that still need time, keyed by

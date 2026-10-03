@@ -45,6 +45,7 @@ export function SettingsScreen({ navigation }) {
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
   const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
   const [dailyHours, setDailyHours] = useState(Number(profile?.daily_study_hours) || 3);
+  const [classSessionEnd, setClassSessionEnd] = useState(settings.classSessionEnd || '02-25'); // FIX-SCHED3 D7
   const [schoolExams, setSchoolExams] = useState(
     Array.isArray(profile?.school_exams)
       ? profile.school_exams.map((e) => ({
@@ -579,6 +580,21 @@ export function SettingsScreen({ navigation }) {
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
             Base estimate: e.g. 4h per chapter → Effective planned: ~{(4 * (settings.hoursMultiplier ?? 2)).toFixed(1)}h (multiplier {settings.hoursMultiplier ?? 2}×, class-track only, revision separate)
           </Text>
+        </View>
+        {/* FIX-SCHED3 D7: School session end MM-DD, editable, default 02-25 */}
+        <View style={{ marginBottom: 12 }}>
+          <Input
+            label="School session ends (MM-DD)"
+            value={classSessionEnd}
+            onChangeText={setClassSessionEnd}
+            placeholder="02-25"
+            hint="Class track hard-stops here (default Feb 25). Format MM-DD, e.g. 02-25 or 03-15. Olympiad/competitive run to their own dates."
+          />
+          <View style={{ flexDirection: 'row', marginTop: 8 }}>
+            <Pressable onPress={() => { setClassSessionEnd('02-25'); settings.update({ classSessionEnd: '02-25' }); }} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 5, paddingHorizontal: 10, marginRight: 8 }}><Text style={{ fontSize: 11, color: '#334155', fontFamily: fonts.bodyMedium }}>Reset 02-25</Text></Pressable>
+            <Pressable onPress={() => { if (/^\d{2}-\d{2}$/.test(classSessionEnd)) settings.update({ classSessionEnd }); }} style={{ backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', borderRadius: 8, paddingVertical: 5, paddingHorizontal: 10 }}><Text style={{ fontSize: 11, color: '#5B21B6', fontFamily: fonts.bodyMedium }}>Save</Text></Pressable>
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>Current: {settings.classSessionEnd || '02-25'} — used as classSessionCutoff override. Class blocks never past this date; unfinished reported as shortfall.</Text>
         </View>
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
