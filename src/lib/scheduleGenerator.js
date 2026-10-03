@@ -811,14 +811,13 @@ export function planSchedule(input) {
   const LIGHT_DAY_FACTOR = 0.5;
   const dayCapacity = (date, isDayOff, isLightDay) => {
     if (noCapacity) return 0;
-    if (isDayOff) return 0; // D8: days_off remain full days off
     let base = capacityMin;
-    if (hasLightDay && isLightDay) base = Math.round(capacityMin * LIGHT_DAY_FACTOR);
+    // FIX-FILL: days_off → 50% light day revision/mock/practice only, never free
+    if (isDayOff || (hasLightDay && isLightDay)) base = Math.round(capacityMin * LIGHT_DAY_FACTOR);
     return Math.max(0, base - num(loadByDate[date], 0));
   };
 
-  // FIX-S S2 edge: a revision-wave day that falls on a declared day off moves to the
-  // PREVIOUS day — a day off stays a day off, and the run-up loses no revision.
+  // FIX-FILL: revision-wave day on reduced day (days_off/light) stays — 50% quota, no move needed
   const movedWaveDates = new Map(); // day before -> the day-off date it carries
   if (offDays.size && runUps.length) {
     for (let d = 1; d < totalDays; d++) {
@@ -883,7 +882,8 @@ export function planSchedule(input) {
     const date = dateStr(dayjs(today).add(d, 'day'));
     const weekday = (dayjs(date).day() + 6) % 7; // 0=Mon
     const isDayOff = offDays.has(weekday);
-    const isLightDay = hasLightDay && weekday === lightDayIdx && !isDayOff; // D8: light day independent of days_off, days_off wins, only if hasLightDay
+    const isLightDay = hasLightDay && weekday === lightDayIdx; // FIX-FILL: light day independent, days_off also 50% (both reduced)
+    const isReducedDay = isDayOff || isLightDay; // 50% quota, revision/mock/practice only
     const daysToExam = examDate ? dayjs(examDate).diff(dayjs(date), 'day') : null;
     const schoolExamToday = schoolExamDates.has(date);
     const dayBeforeSchoolExam = exams.some((e) => dateStr(dayjs(e.start).subtract(1, 'day')) === date);
@@ -898,9 +898,9 @@ export function planSchedule(input) {
     const olympiadAhead = !!olympiadDate && date < dateStr(dayjs(olympiadDate));
     const isMockDay =
       !schoolExamToday &&
-      ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 70 : olympiadAhead)) ||
+      ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 180 : olympiadAhead)) ||
         dayBeforeSchoolExam ||
-        (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date));
+        (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date)); // FIX-FILL: weekly mock final 6 months (180d)
     const classProtected = protectedDates.has(date);
     // FIX-S S4: after the session cutoff the class track takes no NEW content.
     // Exam-related class days are carved out — a school exam that straddles the
@@ -1040,7 +1040,7 @@ export function planSchedule(input) {
     // FIX-SCHED6: on exam days, taught revisions can still appear (light), but no new study
     if (schoolExamToday) {
       // Pipeline for exam days — full quota (new content exhausted or not applicable)
-      if (!isDayOff && pipeline.length) {
+      if (pipeline.length) {
         while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
           const sPipe = pipeline[0];
           const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
@@ -1065,7 +1065,7 @@ export function planSchedule(input) {
 
     // Mock day: full-length timed test + analysis.
     // FIX-SCHED6: on mock days, allow pipeline (taught revisions) before mock if capacity
-    if (isMockDay && !isDayOff && pipeline.length) {
+    if (isMockDay && pipeline.length) {
       // For mock days, pipeline gets full quota (no new content)
       while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
         const sPipe = pipeline[0];
@@ -1099,7 +1099,7 @@ export function planSchedule(input) {
 
     // Revision wave before school exams: no NEW topics, revise the done ones.
     // FIX-SCHED6: allow pipeline on wave days as well (light revision)
-    if (inSchoolExamRev && !isDayOff && pipeline.length && studied.some((s) => s.track === 'class')) {
+    if (inSchoolExamRev && pipeline.length && studied.some((s) => s.track === 'class')) {
       while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
         const sPipe = pipeline[0];
         const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
@@ -1117,7 +1117,7 @@ export function planSchedule(input) {
     // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave,
     // so the last fortnight revises what the exam will actually ask. The wave's
     // shape (revision + timed practice, zero new study) is unchanged.
-    if (inSchoolExamRev && !isDayOff && !classPaused && studied.some((s) => s.track === 'class')) {
+    if (inSchoolExamRev && !classPaused && studied.some((s) => s.track === 'class')) {
       const classTopics = studied.filter((s) => s.track === 'class');
       const recent = classTopics.slice(-REV_WAVE_PICKS);
       const run = runUpFor(date);
@@ -1150,12 +1150,8 @@ export function planSchedule(input) {
     }
 
     // ---- normal study day ----
-    // FIX-SCHED9 D8: light day handling — 50% quota, revision/mock/practice only, never new
-    // days_off are full off (capacity 0), light day independent
-    if (isDayOff) {
-      // full day off — no work at all, honestly free
-      continue;
-    }
+    // FIX-FILL: days_off → 50% light day revision/mock/practice only, never free
+    // isReducedDay = days_off or light day: 50% quota, no new study, only revision/mock/practice
     studyDays += 1;
     studyCapacityMin += dayStart;
 
@@ -1277,7 +1273,7 @@ export function planSchedule(input) {
     let alloc = {};
     let freePool = dayStart;
     let free = freePool;
-    if (!isLightDay) {
+    if (!isReducedDay) {
       budgets = {};
       for (const t of allocatable) budgets[t] = Math.round((dayStart * num(prio.timeSplit[t], 0)) / 100);
       working = allocatable.filter((t) => (queues[t] || []).length);
@@ -1362,7 +1358,7 @@ export function planSchedule(input) {
       const quota = num(alloc[track], 0) + cascadeFree;
       cascadeFree = 0;
       if (quota < MIN_BLOCK_MIN) {
-        leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, quota);
+        leftover[track] = Math.min(LEFTOVER_CAP_MIN, quota); // FIX-FILL: days_off also gets leftover (50% already)
         continue;
       }
       const pair = track === 'class' ? classPair : null;
@@ -1389,7 +1385,7 @@ export function planSchedule(input) {
       }
       const unused = Math.max(0, quota - spent);
       if (unused > 0) cascadeFree += unused;
-      leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, Math.max(0, quota - spent));
+      leftover[track] = Math.min(LEFTOVER_CAP_MIN, Math.max(0, quota - spent)); // FIX-FILL
     }
     // Any cascadeFree left becomes part of freePool for Phase 2
     freePool += cascadeFree;
@@ -1407,7 +1403,7 @@ export function planSchedule(input) {
     // Pipeline (taught revisions) — capped at 20% during new phase for REVISIONS, tests always allowed
     // This is the SPACED_REVISION_OFFSETS machinery: +3/+7/+14 days, plus chapter tests at +2d
     // FIX-SCHED6: new-first + light revision — tests (mock) are not capped, only spaced revisions
-    if (!isDayOff && pipeline.length) {
+    if (pipeline.length) {
       while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
         const s = pipeline[0];
         const pkey = [s.subject, s.topic, s.type].join('|');
@@ -1463,7 +1459,7 @@ export function planSchedule(input) {
     // Phase 2 — minutes that no track claimed flow to the most at-risk REAL work.
     // FIX-SCHED4 D4: respect phase priority order for cascade, then urgency.
     // FIX-SCHED9 D8: light day skips new study in Phase 2 as well
-    if (!isLightDay) {
+    if (!isReducedDay) {
       while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
         for (const t of allocatable) sortQueue(t);
         const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
@@ -1499,16 +1495,23 @@ export function planSchedule(input) {
       const hasPipeline = pipeline.length > 0;
       const allDone = !hasNewWork && !hasPipeline;
       if (allDone) {
-        // syllabus covered — maintain with practice: days stay free, honesty in coverage
-        // no filler, let days stay free
-      } else if (isLightDay) {
-        // light day: always filler practice/mock if studied exists
+        // FIX-FILL: syllabus covered — maintain with practice: revision waves → practice → mocks, never free day
+        // Fill remaining capacity with practice/mocks from studied pool, plus weekly mock if Sunday
+        if (studied.length > 0) {
+          // revision waves already emitted via pipeline earlier; now fill with practice/mocks
+          pushFiller();
+          // If still capacity, push additional filler (up to 2 blocks) to avoid gaps like Oct-Dec 2027
+          if (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) pushFiller();
+        } else {
+          // No studied yet (tiny syllabus early days) — allow 1 filler every other day to keep honesty but avoid 0 gaps
+          if (d % 3 === 0) pushFiller();
+        }
+      } else if (isReducedDay) {
+        // reduced day (days_off or light day): 50% quota, revision/mock/practice only, never new
         pushFiller();
       } else if (!hasNewWork) {
-        // normal day, all new done but pipeline may have revisions — filler only if studied and not allDone
-        // For phase filler: if current phase order has no work but other phases have work, filler for covered tracks
-        // We allow limited filler (1 block) to avoid filling all days when tiny syllabus
-        if (studied.length > 0 && (d % 2 === 0)) { // every other day filler, keeps some days free for honesty
+        // normal day, all new done but pipeline may have revisions — filler for covered tracks
+        if (studied.length > 0) {
           pushFiller();
         }
       }

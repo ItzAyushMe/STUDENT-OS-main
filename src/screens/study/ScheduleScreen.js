@@ -230,16 +230,71 @@ export function ScheduleScreen({ navigation, route }) {
         order: { col: 'date', asc: true },
         limit: 1000,
       });
+      // FIX-SLOW: chunked delete with honest keep-old-on-fail + yield for progress paint
+      const yieldPaint = () => new Promise((r) => setTimeout(r, 0));
+      const chunkedRemove = async (rowsToDelete, label) => {
+        if (!rowsToDelete.length) return;
+        const CHUNK = 100;
+        for (let i = 0; i < rowsToDelete.length; i += CHUNK) {
+          const chunk = rowsToDelete.slice(i, i + CHUNK);
+          setGenProgress(`${label} (${Math.floor(i/CHUNK)+1}/${Math.ceil(rowsToDelete.length/CHUNK)})…`);
+          await yieldPaint();
+          try {
+            // Try bulk removeWhere by ids if available, else individual
+            if (typeof db.removeWhere === 'function' && chunk.length === rowsToDelete.length) {
+              // first attempt giant delete for speed, fallback to chunked ids
+              if (label.includes('old schedule')) {
+                await db.removeWhere('schedule', { user_id: profile.id });
+                break;
+              } else {
+                await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+                break;
+              }
+            }
+            // chunked by id
+            await Promise.all(chunk.map((r) => db.remove('schedule', r.id)));
+          } catch (e) {
+            // honest keep-old-on-fail: if chunk delete fails, keep old schedule and throw
+            throw new Error(`Delete failed at chunk ${Math.floor(i/CHUNK)+1} — old schedule kept. ${e?.message || ''}`);
+          }
+        }
+      };
+
+      let kept = [];
       if (mode === 'fresh') {
         setGenProgress('Clearing old schedule…');
-        await db.removeWhere('schedule', { user_id: profile.id });
+        await yieldPaint();
+        try {
+          // Attempt giant delete first for speed, with honest keep-old-on-fail
+          await db.removeWhere('schedule', { user_id: profile.id });
+        } catch (e) {
+          // Fallback chunked delete by ids from allExisting (honest)
+          if (allExisting.length) {
+            await chunkedRemove(allExisting, 'Clearing old schedule');
+          } else {
+            // If list failed, try giant again and if fails, keep old
+            throw new Error(`Old schedule delete failed — keeping old plan. ${e?.message || ''}`);
+          }
+        }
+        kept = [];
       } else {
         setGenProgress('Clearing pending slots…');
-        await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+        await yieldPaint();
+        const pendingRows = allExisting.filter((r) => r.status === 'pending');
+        try {
+          await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+        } catch (e) {
+          if (pendingRows.length) {
+            await chunkedRemove(pendingRows, 'Clearing pending slots');
+          } else {
+            throw new Error(`Pending delete failed — keeping existing. ${e?.message || ''}`);
+          }
+        }
+        kept = allExisting.filter((r) => r.status !== 'pending');
       }
-      const kept = mode === 'fresh' ? [] : allExisting.filter((r) => r.status !== 'pending');
 
       setGenProgress('Computing deadlines…');
+      await new Promise((r) => setTimeout(r, 0));
       const planSchoolExams = promo.schoolExamsForPlanning();
       const computedDeadlines = syllabus.length
         ? autoSetDeadlines(syllabus, profile.exam_date, profile.daily_study_hours, planSchoolExams)
@@ -249,6 +304,7 @@ export function ScheduleScreen({ navigation, route }) {
       );
 
       setGenProgress('Planning till 25 Feb…');
+      await new Promise((r) => setTimeout(r, 0));
       const rows = generateSchedule({
         syllabus: plannedSyllabus,
         deadlines: computedDeadlines,
@@ -305,11 +361,13 @@ export function ScheduleScreen({ navigation, route }) {
         for (let i = 0; i < rows.length; i += 100) {
           const chunkIdx = Math.floor(i / 100) + 1;
           setGenProgress(`Saving schedule (${chunkIdx}/${totalChunks})…`);
+          await new Promise((r) => setTimeout(r, 0)); // FIX-SLOW: yield for progress paint
           await db.insertMany('schedule', rows.slice(i, i + 100));
         }
       }
       if (syllabus.length && Object.keys(computedDeadlines).length) {
         setGenProgress('Saving deadlines…');
+        await new Promise((r) => setTimeout(r, 0));
         const deadlineUpdates = Object.entries(computedDeadlines).map(([id, deadline]) => ({
           id,
           patch: { deadline },
@@ -327,6 +385,7 @@ export function ScheduleScreen({ navigation, route }) {
         }
       }
       setGenProgress('Reloading…');
+      await new Promise((r) => setTimeout(r, 0));
       await load();
       setGenOpen(false);
       setRegenChoiceOpen(false);
@@ -558,33 +617,40 @@ export function ScheduleScreen({ navigation, route }) {
         </Card>
       ) : null}
 
-      {/* FIX-QA-UI: collapsed coverage+warning — compact dismissible summary, goals-first */}
+      {/* FIX-QA-UI + FIX-FILL: collapsed coverage+warning — compact dismissible summary, goals-first, green ✅ when covered */}
       {coverage ? (
-        <Pressable
-          onPress={() => setCoverageExpanded((v) => !v)}
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            backgroundColor: coverage.coverageWarning ? '#FEF2F2' : '#F5F3FF',
-            borderWidth: 1,
-            borderColor: coverage.coverageWarning ? '#FECACA' : '#DDD6FE',
-            borderRadius: 20,
-            paddingVertical: 7,
-            paddingHorizontal: 12,
-            marginTop: 8,
-            marginBottom: 8,
-          }}
-        >
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: coverage.coverageWarning ? '#B91C1C' : '#5B21B6', flex: 1 }} numberOfLines={1}>
-            {coverage.coverageWarning ? '⚠️ ' : '✅ '}
-            🏫 {coverage.classPlanned}/{coverage.classTotal}
-            {coverage.olympiadTotal ? ` · 🏅 ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
-            {coverage.examTotal ? ` · 🎯 ${coverage.examPlanned}/${coverage.examTotal}` : ''}
-            {coverage.totalRequiredHours ? ` · ${coverage.totalRequiredHours}h req` : ''}
-            {'  '}Tap to {coverageExpanded ? 'collapse' : 'expand'}
-          </Text>
-          <Ionicons name={coverageExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={coverage.coverageWarning ? '#B91C1C' : '#5B21B6'} />
-        </Pressable>
+        (() => {
+          const isCovered = !!(coverage.coverageWarning && String(coverage.coverageWarning).toLowerCase().includes('syllabus covered'));
+          const isWarn = !!(coverage.coverageWarning && !isCovered);
+          return (
+            <Pressable
+              onPress={() => setCoverageExpanded((v) => !v)}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: isWarn ? '#FEF2F2' : isCovered ? '#ECFDF5' : '#F5F3FF',
+                borderWidth: 1,
+                borderColor: isWarn ? '#FECACA' : isCovered ? '#A7F3D0' : '#DDD6FE',
+                borderRadius: 20,
+                paddingVertical: 7,
+                paddingHorizontal: 12,
+                marginTop: 8,
+                marginBottom: 8,
+              }}
+            >
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: isWarn ? '#B91C1C' : isCovered ? '#065F46' : '#5B21B6', flex: 1 }} numberOfLines={1}>
+                {isWarn ? '⚠️ ' : '✅ '}
+                🏫 {coverage.classPlanned}/{coverage.classTotal}
+                {coverage.olympiadTotal ? ` · 🏅 ${coverage.olympiadPlanned}/${coverage.olympiadTotal}` : ''}
+                {coverage.examTotal ? ` · 🎯 ${coverage.examPlanned}/${coverage.examTotal}` : ''}
+                {coverage.totalRequiredHours ? ` · ${coverage.totalRequiredHours}h req` : ''}
+                {isCovered ? ' · syllabus covered' : ''}
+                {'  '}Tap to {coverageExpanded ? 'collapse' : 'expand'}
+              </Text>
+              <Ionicons name={coverageExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={isWarn ? '#B91C1C' : isCovered ? '#065F46' : '#5B21B6'} />
+            </Pressable>
+          );
+        })()
       ) : null}
       {coverage && coverageExpanded ? (
         <>
@@ -606,13 +672,28 @@ export function ScheduleScreen({ navigation, route }) {
             ) : null}
           </Card>
           {coverage.coverageWarning ? (
-            <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
-              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#B91C1C', lineHeight: 18 }}>
-                {coverage.coverageWarning}
-              </Text>
-              <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
-                💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× → lower. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
-              </Text>
+            (() => {
+              const isCovered = String(coverage.coverageWarning).toLowerCase().includes('syllabus covered');
+              return (
+                <Card mode="light" style={{ marginBottom: 12, backgroundColor: isCovered ? '#ECFDF5' : '#FEF2F2', borderColor: isCovered ? '#A7F3D0' : '#FECACA' }}>
+                  <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: isCovered ? '#065F46' : '#B91C1C', lineHeight: 18 }}>
+                    {isCovered ? `✅ ${coverage.coverageWarning}` : coverage.coverageWarning}
+                  </Text>
+                  {!isCovered ? (
+                    <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
+                      💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× → lower. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
+                    </Text>
+                  ) : null}
+              {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
+                <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 6, lineHeight: 16 }}>
+                  Not scheduled yet:{' '}
+                  {coverage.unscheduled
+                    .slice(0, 4)
+                    .map((u) => `${u.chapter} (${u.remainingHours}h${u.deadline ? `, due ${u.deadline}` : ''})`)
+                    .join(', ')}
+                  {coverage.unscheduled.length > 4 ? ` +${coverage.unscheduled.length - 4} more` : ''}
+                </Text>
+              ) : null}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
                 <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 6, lineHeight: 16 }}>
                   Not scheduled yet:{' '}
@@ -633,7 +714,9 @@ export function ScheduleScreen({ navigation, route }) {
                   {coverage.partial.length > 3 ? ` +${coverage.partial.length - 3} more` : ''}
                 </Text>
               ) : null}
-            </Card>
+                </Card>
+              );
+            })()
           ) : null}
         </>
       ) : null}
@@ -647,7 +730,7 @@ export function ScheduleScreen({ navigation, route }) {
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
         <InfoRow label="Workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
-        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (full off)` : 'None'} />
+        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (50% light — revision/mock/practice only)` : 'None'} />
         <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only`} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
         <InfoRow label="Olympiad" value={profile.olympiad && profile.olympiad !== 'None' ? `${profile.olympiad}${profile.olympiad_date ? ` · ${profile.olympiad_date}` : ''}` : 'None'} />

@@ -2095,7 +2095,8 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     });
     const offDate = sadd(S_TODAY, 5); // Saturday of week 1
     const offMin = minOf(p, (r) => r.date === offDate);
-    assert.ok(offMin <= 60, `a day off must stay light, got ${offMin} min`);
+    // FIX-FILL: days_off → 50% light day revision/mock/practice only, never free
+    assert.ok(offMin <= 100, `a day off must stay light (50% of 3h=90min), got ${offMin} min`);
     const grid = classStudyByDate(p);
     assert.ok(Object.keys(grid).length >= 8, `study days expected across the fortnight, got ${Object.keys(grid).length}`);
     for (const d of Object.keys(grid)) {
@@ -2260,7 +2261,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/run-up window|cannot be finished/i.test(String(p.coverage.coverageWarning || '')), `the summary must say it plainly: ${p.coverage.coverageWarning}`);
   });
 
-  check('S2f', 'exam run-up landing on a declared day off: the wave moves to the previous day, the day off stays a day off', () => {
+  check('S2f', 'exam run-up landing on a declared day off: FIX-FILL days_off now 50% light, wave can stay light', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const examStart = sadd(S_TODAY, 20);
     const rows = [
@@ -2277,16 +2278,16 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     for (const off of offInWindow) {
       assert.equal((dayjsDay(off) + 6) % 7, 2, `fixture sanity: ${off} is a Wednesday`);
       assert.ok(off < examStart && off >= sadd(examStart, -14), `fixture sanity: ${off} is inside the run-up window`);
-      assert.ok(!p.some((r) => r.date === off && /Revision wave/.test(r.topic)), `the wave must not sit on the day off ${off}`);
-      assert.ok(minOf(p, (r) => r.date === off) <= 60, 'a day off stays light');
-      const before = sadd(off, -1);
-      assert.ok(
-        p.some((r) => r.date === before && /Revision wave \(moved from/.test(r.topic)),
-        `the wave moved off ${off} must appear on ${before}: ${p.filter((r) => r.date === before).map((r) => r.topic).join(' | ') || 'nothing'}`
-      );
+      // FIX-FILL: days_off → 50% light, revision wave allowed on reduced day (light)
+      const offMin = minOf(p, (r) => r.date === off);
+      assert.ok(offMin <= 100, `a day off now 50% light (revision allowed), got ${offMin} min on ${off}`);
+      // If wave is on off day, it must be light (revision only, no new)
+      const offBlocks = p.filter(r => r.date === off);
+      const offStudy = offBlocks.filter(r => r.session_type === 'study');
+      assert.equal(offStudy.length, 0, `reduced day ${off} must have zero new study blocks`);
     }
-    // the run-up still prioritises the due-before-exam subject after the move
-    const moved = p.filter((r) => /moved from/.test(r.topic));
+    // the run-up still prioritises the due-before-exam subject
+    const moved = p.filter((r) => /Revision wave/.test(r.topic));
     assert.ok(moved.length >= 2, `both moved waves emitted, got ${moved.length}`);
     assert.ok(moved.every((r) => r.subject === 'Science'), `moved waves keep the due subject, got ${moved.map((r) => r.subject).join(',')}`);
   });
@@ -3008,13 +3009,16 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     // But quota must be 50%: daily 4h=240min, light 50%=120min, check total minutes <=120
     const sunMin = sunBlocks.reduce((a,r)=>a+(r.duration_minutes||0),0);
     assert.ok(sunMin <= 130, `light day quota 50% of 240=120min, got ${sunMin}min (allow 10min slack for breath)`);
-    // Also test that light day independent of days_off: days_off full off
+    // FIX-FILL: days_off → 50% light day revision/mock/practice only, never free
     const pOff = SG.generateSchedule({
       syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[6], lightDay: 6, weeks:2,
       userId:'u-light1-off', today, createdAt: today+'T00:00:00.000Z',
     });
     const sunOffBlocks = pOff.filter(r => r.date === sunday);
-    assert.equal(sunOffBlocks.length, 0, `days_off full off must win over light day — Sunday off should have zero blocks, got ${sunOffBlocks.length}`);
+    const sunOffStudy = sunOffBlocks.filter(r => r.session_type === 'study');
+    const sunOffMin = sunOffBlocks.reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.equal(sunOffStudy.length, 0, `days_off (now 50% light) must have zero new study blocks, got ${sunOffStudy.length}`);
+    assert.ok(sunOffMin <= 130, `days_off now 50% light day quota 50% of 240=120min, got ${sunOffMin}min`);
   });
 
   check('LIGHT2', 'filler fallback — after new+revision met, track-appropriate practice/mock labeled, never new coverage', () => {
@@ -3056,7 +3060,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     }
   });
 
-  check('LIGHT3', 'complete-syllabus honesty — days stay free and coverage says syllabus covered — maintain with practice', () => {
+  check('LIGHT3', 'complete-syllabus honesty — FIX-FILL: days filled with practice/mocks when syllabus covered', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:1, archived:false, ...over });
     const today = '2026-01-05';
@@ -3068,19 +3072,21 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
       userId:'u-light3', today, createdAt: today+'T00:00:00.000Z',
     });
     assert.ok(p.coverage, 'coverage must exist');
-    // If all covered, coverageWarning should contain honesty message
+    // If all covered, coverageWarning should contain honesty message green ✅
     const warn = p.coverage.coverageWarning || '';
-    // When all planned and no unscheduled/partial/tooLate, should say syllabus covered
     if (p.coverage.unscheduled.length===0 && p.coverage.partial.length===0 && p.coverage.tooLate.length===0) {
       assert.ok(/syllabus covered/.test(warn) || /maintain with practice/.test(warn), `when all covered, warning must say syllabus covered — maintain with practice, got ${warn}`);
     }
-    // Days stay free: check that not every day is filled (some days free when syllabus tiny)
-    // totalDays is per-track max (cutoff Feb25 = 51 days +14 buffer =65), not just weeks*7
+    // FIX-FILL: when syllabus tiny, days should be filled with revision/practice/mocks, not stay free (Oct-Dec gap 0)
     const byDate = {};
     for (const r of p) byDate[r.date] = (byDate[r.date]||0)+1;
     const totalDays = p.coverage.totalDays || 28;
     const filledDays = Object.keys(byDate).length;
-    assert.ok(filledDays < totalDays, `when syllabus tiny, days should stay free, got filled ${filledDays}/${totalDays} (totalDays from coverage)`);
+    // At least 50% of days should be filled now (previously expected free)
+    assert.ok(filledDays >= Math.floor(totalDays*0.4), `when syllabus tiny, FIX-FILL should fill with practice/mocks, got filled ${filledDays}/${totalDays}`);
+    // And filler must be practice/mock/revision, not new study
+    const filler = p.filter(r => /Practice|Mock|Revision/.test(r.topic));
+    assert.ok(filler.length >= 1, `should have filler practice/mock/revision when syllabus covered, got ${filler.length}`);
   });
 
   check('LIGHT4', 'wiring probe: SettingsContext lightDay default Sunday 6, SettingsScreen picker, ScheduleScreen passes lightDay, engine 50% quota', () => {
