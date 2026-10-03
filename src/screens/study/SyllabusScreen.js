@@ -8,7 +8,6 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { useAuth } from '../../context/AuthContext';
-import { useGame } from '../../context/GameContext';
 import { Screen } from '../../components/ui/Screen';
 import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { Card } from '../../components/ui/Card';
@@ -37,7 +36,6 @@ const rowTrack = (r) => (r.track === 'olympiad' || r.track === 'exam' ? r.track 
 
 export function SyllabusScreen({ navigation }) {
   const { profile } = useAuth();
-  const { awardXP } = useGame();
   const settings = useSettings();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -239,9 +237,6 @@ export function SyllabusScreen({ navigation }) {
       const patch = toggleRowPatch(row, nowIso());
       await db.update('syllabus', row.id, patch);
       await load();
-      if (patch.status === 'completed') {
-        try { awardXP('CHAPTER_COMPLETE', 5); } catch {}
-      }
     } catch (e) {
       infoAlert('Toggle fail', e?.message || 'Chapter toggle nahi ho paya');
     }

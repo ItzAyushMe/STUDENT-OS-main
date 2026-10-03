@@ -2780,7 +2780,16 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(tests.length >= 2, `completed chapters should produce chapter tests, got ${tests.length}`);
   });
 
+
+  check('XP1', 'FIX-XP1 guard: SyllabusScreen.js must NOT contain awardXP — taught-till is planning tool, not XP event', () => {
+    const src = read('src/screens/study/SyllabusScreen.js');
+    assert.ok(!/awardXP/.test(src), 'SyllabusScreen.js must not contain awardXP (XP farming guard) — found awardXP reference');
+    assert.ok(!/CHAPTER_COMPLETE/.test(src), 'SyllabusScreen.js must not award CHAPTER_COMPLETE via toggle');
+    assert.ok(!/useGame/.test(src), 'useGame import must be removed when awardXP is gone');
+  });
+
   check('SP1'
+
 
 , 'the accepted foundation survives FIX-S: idempotent regen, deadlines-first, completed exclusion, hours parsing, FIX-D4/E wiring', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
