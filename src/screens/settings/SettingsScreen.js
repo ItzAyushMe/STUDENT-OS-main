@@ -909,8 +909,7 @@ export function SettingsScreen({ navigation }) {
             {APP_NAME} v{APP_VERSION}
           </Text>
           <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 5, lineHeight: 17 }}>
-            {APP_TAGLINE}{'
-'}Free for fellow students — made with ❤️ and chai.
+            {APP_TAGLINE}{'\n'}Free for fellow students — made with ❤️ and chai.
           </Text>
           {versionPressCount>0 && versionPressCount<7 && !devUnlocked ? (
             <Text style={{ fontFamily: fonts.body, fontSize: 10, color: '#94A3B8', textAlign: 'center', marginTop: 6 }}>{versionPressCount}/7</Text>
