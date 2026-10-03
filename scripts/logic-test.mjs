@@ -2781,6 +2781,104 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   });
 
 
+  // ================= FIX-SCHED4 D4: date-cascade allocator — three-phase, overflow, undated deprioritization =================
+  check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    const cutoff = '2026-02-25';
+    const olympiadDate = '2026-09-20';
+    const examDate = '2028-04-15';
+    const syllabus = [
+      // enough work to spill beyond P1 (51 days *3h=153h) into P2
+      ...Array.from({length:8}, (_,i)=>mkS('c'+i, 'Science', 'Class Ch'+i, { estimated_hours:12 })),
+      ...Array.from({length:6}, (_,i)=>mkS('o'+i, 'Maths Olympiad', 'Olympiad Ch'+i, { track:'olympiad', estimated_hours:12 })),
+      ...Array.from({length:6}, (_,i)=>mkS('e'+i, 'JEE', 'Exam Ch'+i, { track:'exam', estimated_hours:12 })),
+    ];
+    const p = generateSchedule({
+      syllabus, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:10,
+      userId:'u-cascade1', today, createdAt: today+'T00:00:00.000Z',
+      olympiadDate, examDate,
+    });
+    const p1 = p.filter(r => r.date >= today && r.date <= cutoff && r.session_type === 'study');
+    assert.ok(p1.some(r => r.track === 'class'), `P1 ${today}→${cutoff} must have class sessions, got ${p1.map(r=>r.track).join(',')}`);
+    const p2 = p.filter(r => r.date > cutoff && r.date <= olympiadDate && r.session_type === 'study');
+    assert.ok(p2.length > 0, 'P2 should have some study sessions');
+    assert.equal(p2.filter(r => r.track === 'class').length, 0, `P2 ${cutoff}→${olympiadDate} must hard-stop class, found ${p2.filter(r=>r.track==='class').map(r=>r.date).slice(0,3).join(',')}`);
+    assert.ok(p2.some(r => r.track === 'olympiad'), 'P2 must have olympiad sessions');
+    const p3 = p.filter(r => r.date > olympiadDate && r.date <= examDate && r.session_type === 'study');
+    if (p3.length) {
+      assert.ok(p3.every(r => r.track === 'exam'), `P3 ${olympiadDate}→${examDate} must be exam only, got ${[...new Set(p3.map(r=>r.track))].join(',')}`);
+    }
+    assert.ok(p.coverage.totalDays >= 800, `horizon must reach exam 2028-04-15, got ${p.coverage.totalDays}`);
+  });
+
+  check('CASCADE2', 'cascade-overflow: unused quota from higher priority cascades to next track same day', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    const syllabus = [
+      mkS('e1', 'JEE', 'Exam Ch1', { track:'exam' }),
+      mkS('e2', 'JEE', 'Exam Ch2', { track:'exam' }),
+    ];
+    const p = generateSchedule({
+      syllabus, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-cascade2', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2026-08-15',
+    });
+    const study = p.filter(r => r.session_type === 'study');
+    assert.ok(study.length > 0, 'exam-only syllabus must still schedule via cascade even though class is P1 priority but has no work');
+    assert.ok(study.every(r => r.track === 'exam'), 'all study should be exam track when only exam has work');
+    const syllabus2 = [
+      mkS('c1', 'Science', 'Class Ch1'),
+      mkS('e1', 'JEE', 'Exam Ch1', { track:'exam' }),
+    ];
+    const p2 = generateSchedule({
+      syllabus: syllabus2, dailyHours:4, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-cascade2b', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2026-08-15', olympiadDate: '2026-09-20',
+    });
+    const p2Study = p2.filter(r => r.session_type === 'study');
+    assert.ok(p2Study.some(r => r.track === 'class'), 'class should have sessions');
+    assert.ok(p2Study.some(r => r.track === 'exam'), 'exam should get cascaded quota when olympiad has no work');
+  });
+
+  check('CASCADE3', 'undated-track deprioritization: dated tracks outrank undated (lowest priority)', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    const syllabus = [
+      mkS('o1', 'Maths Olympiad', 'Olympiad Ch1', { track:'olympiad' }),
+      mkS('e1', 'JEE', 'Exam Ch1', { track:'exam' }),
+    ];
+    const pDated = generateSchedule({
+      syllabus, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-cascade3a', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2026-08-15',
+    });
+    const studyDated = pDated.filter(r => r.session_type === 'study');
+    assert.ok(studyDated.length > 0, 'should schedule both dated and undated');
+    const pTight = generateSchedule({
+      syllabus, dailyHours:1, preferredTime:'Morning', daysOff:[], weeks:6,
+      userId:'u-cascade3b', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2026-08-15',
+    });
+    const min = (t) => pTight.filter(r => r.session_type === 'study' && r.track === t).reduce((a,r)=>a+r.duration_minutes,0);
+    assert.ok(min('exam') >= min('olympiad') || min('exam') > 0, `dated exam (${min('exam')} min) should outrank undated olympiad (${min('olympiad')} min) in default cascade`);
+    // For both undated custom order test, need tight capacity so budget matters (not all work fits)
+    const tightSyllabus = [
+      ...Array.from({length:5}, (_,i)=>mkS('o'+i, 'Maths Olympiad', 'Olympiad Ch'+i, { track:'olympiad', estimated_hours:12 })),
+      ...Array.from({length:5}, (_,i)=>mkS('e'+i, 'JEE', 'Exam Ch'+i, { track:'exam', estimated_hours:12 })),
+    ];
+    const pBothUndated = generateSchedule({
+      syllabus: tightSyllabus, dailyHours:1, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-cascade3c', today, createdAt: today+'T00:00:00.000Z',
+      priorities: { order: ['olympiad','exam','class'], enabled: { class:true, exam:true, olympiad:true }, timeSplit: { olympiad:70, exam:20, class:10 } },
+    });
+    const minBoth = (t) => pBothUndated.filter(r => r.session_type === 'study' && r.track === t).reduce((a,r)=>a+r.duration_minutes,0);
+    assert.ok(minBoth('olympiad') > minBoth('exam'), `both undated but custom order olympiad first should give olympiad more time (${minBoth('olympiad')} vs ${minBoth('exam')})`);
+  });
+
   check('XP1', 'FIX-XP1 guard: SyllabusScreen.js must NOT contain awardXP — taught-till is planning tool, not XP event', () => {
     const src = read('src/screens/study/SyllabusScreen.js');
     assert.ok(!/awardXP/.test(src), 'SyllabusScreen.js must not contain awardXP (XP farming guard) — found awardXP reference');

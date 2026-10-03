@@ -1012,20 +1012,6 @@ export function planSchedule(input) {
       return spent;
     };
 
-    // minutes this track MUST get today to still make its deadlines (EDF rate)
-    const deadlineNeed = (track) => {
-      const q = queues[track];
-      if (!q || !q.length) return 0;
-      let need = 0;
-      for (const it of q) {
-        if (!isDateStr(it.deadline)) continue;
-        const days = dayjs(it.deadline).diff(dayjs(date), 'day');
-        if (days > URGENT_LEAD_DAYS) continue;
-        need += num(it.remainingMinutes, 0) / Math.max(1, days);
-      }
-      return Math.ceil(need);
-    };
-
     pruneExpired(date);
 
     // zero available time => plan nothing at all (never invent minutes)
@@ -1119,23 +1105,83 @@ export function planSchedule(input) {
     studyDays += 1;
     studyCapacityMin += dayStart;
 
-    // ---- daily allocation ----
-    // Phase 1a: the student's split is the FLOOR for every track that has work,
-    // so no track is ever starved to zero by another track's deadlines.
+    // ---- FIX-SCHED4 D4: date-cascade allocator (PO D4) ----
+    // Phases by date:
+    //   P1 = today → class cutoff (class → olympiad → exam)
+    //   P2 = cutoff → olympiad date (olympiad → exam; class hard-stopped)
+    //   P3 = olympiad date → exam date (exam only)
+    // Each day, daily quota fills in phase-priority order; unused cascades to next track same day.
+    // Tracks without a date drop to lowest priority (dated tracks outrank undated).
+    const isTrackDated = (track) => {
+      if (track === 'class') return true;
+      if (track === 'olympiad') return !!olympiadDate;
+      if (track === 'exam') return !!examDate;
+      return false;
+    };
+    const sortByDated = (tracks) => {
+      const dated = tracks.filter(isTrackDated);
+      const undated = tracks.filter(t => !isTrackDated(t));
+      return [...dated, ...undated];
+    };
+    function dateStrDayjs(d) {
+      try { return dateStr(dayjs(d)); } catch { return String(d); }
+    }
+    const getPhaseInfo = (dStr) => {
+      const hasCustomOrder = Array.isArray(prio?.order) && prio.order.length > 0;
+      const customOrder = hasCustomOrder ? prio.order : ['class','olympiad','exam'];
+      const isDefaultOrder = !hasCustomOrder || (customOrder.length === 3 && customOrder[0] === 'class' && customOrder[1] === 'exam' && customOrder[2] === 'olympiad');
+      if (dStr <= cutoff) {
+        const base = customOrder.filter(t => ['class','olympiad','exam'].includes(t) && allocatable.includes(t));
+        const fullBase = base.length ? base : ['class','olympiad','exam'].filter(t => allocatable.includes(t));
+        // Dated-first only for default order; custom order respects user choice (FIX-B)
+        const order = isDefaultOrder ? sortByDated(fullBase) : fullBase;
+        return { phase: 'P1', order };
+      }
+      if (olympiadDate && dStr > cutoff && dStr <= dateStrDayjs(olympiadDate)) {
+        const base = customOrder.filter(t => ['olympiad','exam'].includes(t) && allocatable.includes(t));
+        const fullBase = base.length ? base : ['olympiad','exam'].filter(t => allocatable.includes(t));
+        const order = isDefaultOrder ? sortByDated(fullBase) : fullBase;
+        return { phase: 'P2', order };
+      }
+      if (examDate && olympiadDate && dStr > dateStrDayjs(olympiadDate) && dStr <= dateStrDayjs(examDate)) {
+        const base = ['exam'].filter(t => allocatable.includes(t));
+        return { phase: 'P3', order: base };
+      }
+      if (examDate && !olympiadDate && dStr > cutoff && dStr <= dateStrDayjs(examDate)) {
+        const base = ['exam'].filter(t => allocatable.includes(t));
+        return { phase: 'P3-undated-olympiad', order: base };
+      }
+      return { phase: 'none', order: [] };
+    };
+
+    const phaseInfo = getPhaseInfo(date);
+    const priorityOrder = phaseInfo.order;
+
+    // Sort queues by urgency
+    for (const t of allocatable) if (queues[t]) sortQueue(t);
+
+    // ---- Phase 1a: budgets based on timeSplit (keeps FIX-B tests green) ----
     const budgets = {};
     for (const t of allocatable) budgets[t] = Math.round((dayStart * num(prio.timeSplit[t], 0)) / 100);
     const working = allocatable.filter((t) => (queues[t] || []).length);
-    for (const t of working) sortQueue(t);
     const alloc = {};
     for (const t of allocatable) alloc[t] = working.includes(t) ? num(budgets[t], 0) + num(leftover[t], 0) : 0;
-    // free pool = the day's minutes that no working track claimed as its floor
     let freePool = Math.max(0, dayStart - working.reduce((a, t) => a + alloc[t], 0));
     let free = freePool;
 
-    // Phase 1b: deadline-driven top-up (earliest-deadline-first). A track whose
-    // due work cannot fit in its floor gets the free pool first, and may then
-    // borrow from LESS urgent tracks — but never below one viable block, so
-    // borrowing raises urgency without starving anybody to zero.
+    // ---- Phase 1b: deadline-driven top-up (kept for urgency, but respects phase) ----
+    const deadlineNeed = (track) => {
+      const q = queues[track];
+      if (!q || !q.length) return 0;
+      let need = 0;
+      for (const it of q) {
+        if (!isDateStr(it.deadline)) continue;
+        const days = dayjs(it.deadline).diff(dayjs(date), 'day');
+        if (days > URGENT_LEAD_DAYS) continue;
+        need += num(it.remainingMinutes, 0) / Math.max(1, days);
+      }
+      return Math.ceil(need);
+    };
     const needy = working
       .map((t) => ({ t, need: Math.min(deadlineNeed(t), dayStart) }))
       .filter((x) => x.need > alloc[x.t])
@@ -1151,7 +1197,7 @@ export function planSchedule(input) {
       if (deficit <= 0) continue;
       const lenders = working
         .filter((o) => o !== t && alloc[o] > 0 && compareUrgency(queues[t][0], queues[o][0], ctx) < 0)
-        .sort((a, b) => compareUrgency(queues[b][0], queues[a][0], ctx)); // least urgent lends first
+        .sort((a, b) => compareUrgency(queues[b][0], queues[a][0], ctx));
       for (const o of lenders) {
         if (deficit <= 0) break;
         const canTake = Math.max(0, alloc[o] - Math.min(alloc[o], MIN_BLOCK_MIN));
@@ -1163,44 +1209,68 @@ export function planSchedule(input) {
       }
     }
 
-    // Phase 1c: spend each track's allocation. A class day is spent on the day's
-    // subject PAIR (FIX-S S1): the lead subject takes the bigger share when it has
-    // a deadline breathing down its neck, but the second subject is never removed
-    // from the day — it keeps at least one real block whenever the day can hold two.
-    for (const track of allocatable) {
+    // ---- Phase 1c: cascade-overflow within phase priority ----
+    // Unused alloc from higher priority cascades to next track same day.
+    // Tracks without date are already deprioritized via sortByDated.
+    // For phase hard-stops, class alloc in P2/P3 cascades to remaining tracks.
+    const cascadeOrder = priorityOrder.length ? priorityOrder : allocatable; // fallback to allocatable if no phase
+    // First, zero out alloc for tracks not in phase (hard-stop) and collect their budget as freePool
+    for (const t of allocatable) {
+      if (!cascadeOrder.includes(t)) {
+        if (alloc[t] > 0) {
+          freePool += alloc[t];
+          alloc[t] = 0;
+        }
+      }
+    }
+    // Now spend in cascade order, allowing unused to cascade
+    let cascadeFree = 0;
+    for (const track of cascadeOrder) {
+      if (capacity < MIN_BLOCK_MIN) break;
+      if (track === 'class' && classOff) continue;
       const q = queues[track];
-      if (!q || !q.length) { leftover[track] = 0; continue; }
-      const quota = num(alloc[track], 0);
+      if (!q || !q.length) {
+        // no work → cascade its alloc to next
+        cascadeFree += alloc[track];
+        alloc[track] = 0;
+        continue;
+      }
+      const quota = num(alloc[track], 0) + cascadeFree;
+      cascadeFree = 0;
       if (quota < MIN_BLOCK_MIN) {
-        // too small for a real block today — bank it rather than inflate it
         leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, quota);
         continue;
       }
-      if (track === 'class' && classOff) { leftover[track] = 0; continue; } // FIX-S S4 cutoff + FIX-S S5 pause
       const pair = track === 'class' ? classPair : null;
       const lead = pair && pair.length ? pair[0] : null;
       const second = pair && pair.length > 1 ? pair[1] : null;
       const leadHasWork = !!lead && q.some((it) => it.subject === lead);
       const secondHasWork = !!second && q.some((it) => it.subject === second);
       let spent = 0;
-      if (leadHasWork && secondHasWork && quota >= 2 * MIN_BLOCK_MIN) {
-        const leadUrgent = q.some((it) => it.subject === lead && isUrgentNow(it));
-        const secondQuota = clampNum(
-          leadUrgent ? PAIR_URGENT_SECONDARY_MIN : Math.round(quota * PAIR_SECONDARY_SHARE),
-          MIN_BLOCK_MIN,
-          Math.max(MIN_BLOCK_MIN, quota - MIN_BLOCK_MIN)
-        );
-        spent += spendQuota(track, quota - secondQuota, [lead]);
-        spent += spendQuota(track, secondQuota, [second]);
-      } else if (leadHasWork || secondHasWork) {
-        // one half of the pair is finished -> that subject takes the day (S1b)
-        spent += spendQuota(track, quota, [leadHasWork ? lead : second]);
+      if (track === 'class' && (leadHasWork || secondHasWork) && quota >= MIN_BLOCK_MIN) {
+        if (leadHasWork && secondHasWork && quota >= 2 * MIN_BLOCK_MIN) {
+          const leadUrgent = q.some((it) => it.subject === lead && isUrgentNow(it));
+          const secondQuota = clampNum(
+            leadUrgent ? PAIR_URGENT_SECONDARY_MIN : Math.round(quota * PAIR_SECONDARY_SHARE),
+            MIN_BLOCK_MIN,
+            Math.max(MIN_BLOCK_MIN, quota - MIN_BLOCK_MIN)
+          );
+          spent += spendQuota(track, quota - secondQuota, [lead]);
+          spent += spendQuota(track, secondQuota, [second]);
+        } else {
+          spent += spendQuota(track, quota, [leadHasWork ? lead : second]);
+        }
       } else {
-        // pair exhausted (or a non-class track): plain urgency order, as before
         spent += spendQuota(track, quota, null);
       }
+      const unused = Math.max(0, quota - spent);
+      if (unused > 0) cascadeFree += unused;
       leftover[track] = isDayOff ? 0 : Math.min(LEFTOVER_CAP_MIN, Math.max(0, quota - spent));
     }
+    // Any cascadeFree left becomes part of freePool for Phase 2
+    freePool += cascadeFree;
+
+    // Any remaining freePool after cascade goes to most at-risk work (Phase 2 fallback)
 
     // revision cycle every 3rd day (revisit the last topics)
     if (d % REVISION_CYCLE_DAYS === REVISION_CYCLE_DAYS - 1 && studied.length && capacity >= 20) {
@@ -1229,12 +1299,19 @@ export function planSchedule(input) {
     }
 
     // Phase 2 — minutes that no track claimed flow to the most at-risk REAL work.
-    // A track that has work keeps its declared share; only unclaimed time moves.
+    // FIX-SCHED4 D4: respect phase priority order for cascade, then urgency.
     while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
       for (const t of allocatable) sortQueue(t);
       const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
       if (!cands.length) break;
-      cands.sort((a, b) => compareUrgency(queues[a][0], queues[b][0], ctx));
+      cands.sort((a, b) => {
+        const ai = priorityOrder.indexOf(a);
+        const bi = priorityOrder.indexOf(b);
+        if (ai !== -1 && bi !== -1 && ai !== bi) return ai - bi;
+        if (ai !== -1 && bi === -1) return -1;
+        if (ai === -1 && bi !== -1) return 1;
+        return compareUrgency(queues[a][0], queues[b][0], ctx);
+      });
       const winner = cands[0];
       // FIX-S S1: unclaimed minutes stay inside the day's class pair as well, so a
       // top-up can never undo the interleave; if that pair is finished, the minutes
