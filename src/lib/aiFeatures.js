@@ -16,6 +16,7 @@ import {
   enforceAnswerWindows, answerWindow, answerWordCount, answerTextOf, stemOf,
   ensureMindMapSize, mindMapContentInstruction, mindMapMinNodes, isHeavyChapter,
 } from './testGenKit.js';
+import { normalizeTestQuestion } from './testQuestionNormalizer.js';
 
 export { AIUnavailableError };
 
@@ -442,6 +443,52 @@ Return JSON: {"rows":[{"subject":"...","chapter":"...","weightage":4,"estimated_
   }));
 }
 
+// ---------- FIX-SCHED8 D6: AI weightage estimator — batches ≤10, schema {results:[{subject,chapter,weightage 1-5, reason}]} ----------
+export async function aiEstimateWeightage({ syllabusRows = [], profile = {}, _askJSON = null }) {
+  const ask = _askJSON || askAIJSON;
+  const rows = Array.isArray(syllabusRows) ? syllabusRows.filter(r => r && r.subject && r.chapter) : [];
+  if (!rows.length) return [];
+  // Collect chapters with default/missing weightage: missing, null, or exactly 3 (default)
+  const toEstimate = rows.filter(r => {
+    const w = r.weightage;
+    return w == null || w === '' || Number(w) === 3;
+  });
+  const targetRows = toEstimate.length ? toEstimate : rows; // if none default, estimate all (allows manual trigger)
+  const batches = [];
+  for (let i = 0; i < targetRows.length; i += QB_BATCH_SIZE) {
+    batches.push(targetRows.slice(i, i + QB_BATCH_SIZE));
+  }
+  const allResults = [];
+  const ctx = buildProfileContext(profile);
+  for (const batch of batches) {
+    const list = batch.map(c => `${c.subject} — ${c.chapter}`).join('; ');
+    const data = await ask({
+      prompt: `Estimate exam weightage (1-5) for these chapters for an Indian student.
+Student: ${ctx || 'Class 10 student'}.
+Chapters: ${list}.
+Return JSON: {"results":[{"subject":"...","chapter":"...","weightage":4,"reason":"one-line why this weightage"}]}
+Rules: weightage 1=low, 5=very high exam importance; base on board exam patterns; reason one-line; simple English.`,
+      system: `${AI_PERSONA}\nYou are a weightage estimator. Output ONLY the JSON object.`,
+      schemaHint: '{"results":[{"subject":"...","chapter":"...","weightage":4,"reason":"one-line"}]}',
+      temperature: 0.3,
+      noCache: true,
+    });
+    const results = Array.isArray(data?.results) ? data.results : [];
+    for (const r of results) {
+      if (!r || !r.subject || !r.chapter) continue;
+      const w = Math.max(1, Math.min(5, Math.round(Number(r.weightage) || 3)));
+      allResults.push({
+        subject: String(r.subject),
+        chapter: String(r.chapter),
+        weightage: w,
+        reason: String(r.reason || '').slice(0, 200),
+      });
+    }
+  }
+  if (!allResults.length) throw new AIUnavailableError("The AI couldn't estimate weightage.");
+  return allResults;
+}
+
 // ---------- mood-aware reply ----------
 export async function aiMoodReply({ mood, note = '' }) {
   return askAI({
@@ -462,8 +509,7 @@ export async function aiMoodReply({ mood, note = '' }) {
 // - Read answers from answer → answer_text → ans → solution → model_answer
 // - MCQ answer that can't be resolved → answer: null (never invent A)
 // - Reject blank questions trim().length < 3
-import { normalizeTestQuestion } from './testQuestionNormalizer.js';
-// NEW X R5: normalizer imported from pure file for testability
+// NEW X R5: normalizer imported from pure file for testability (import at top)
 
 export async function aiGenerateTest({ profile = {}, chapters = [], breakdown = {}, totalMarks = 80, totalQuestions = 30, difficultyPct = 100, timeMinutes = 180 }) {
   const ctx = buildProfileContext(profile);

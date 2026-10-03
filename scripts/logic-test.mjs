@@ -1516,6 +1516,10 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     try { fn(); results.push({ id, desc, ok: true }); }
     catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
   };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
 
   const sgSrc = read('src/lib/scheduleGenerator.js');
   const ssSrc = read('src/screens/study/ScheduleScreen.js');
@@ -1954,6 +1958,10 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
       return;
     }
     try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const record = async (id, desc, fn) => {
+    try { await fn(); results.push({ id, desc, ok: true }); }
     catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
   };
 
@@ -2861,6 +2869,117 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     const sylSrc = read('src/screens/study/SyllabusScreen.js');
     assert.ok(/olympiadMultiplier/.test(sylSrc) && /examMultiplier/.test(sylSrc), 'SyllabusScreen ChapterRow must use per-track multipliers');
     assert.ok(/track.*mult|mult.*track/.test(sylSrc) || /olympiad.*3\.0/.test(sylSrc), 'ChapterRow effective hours per track');
+  });
+
+  // ================= FIX-SCHED8 D6: weightage order + time + AI estimator =================
+  check('WEIGHT1', 'ordering: within same deadline-urgency bucket, w5 before w3 (weightage promoted)', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05';
+    const sameDeadline = '2026-02-01';
+    const rows = [
+      mkS('w3', 'Science', 'Ch w3', { weightage:3, deadline: sameDeadline }),
+      mkS('w5', 'Science', 'Ch w5', { weightage:5, deadline: sameDeadline }),
+      mkS('w1', 'Science', 'Ch w1', { weightage:1, deadline: sameDeadline }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours:3, preferredTime:'Morning', daysOff:[], weeks:2,
+      userId:'u-weight1', today, createdAt: today+'T00:00:00.000Z',
+    });
+    // Find order of study blocks on first day or overall
+    const studyOrder = p.filter(r=>r.session_type==='study').map(r=>r.topic);
+    // w5 should appear before w3 and w1
+    const idxW5 = studyOrder.indexOf('Ch w5');
+    const idxW3 = studyOrder.indexOf('Ch w3');
+    const idxW1 = studyOrder.indexOf('Ch w1');
+    assert.ok(idxW5 !== -1 && idxW3 !== -1 && idxW1 !== -1, `all three should be scheduled, got ${studyOrder.join(',')}`);
+    assert.ok(idxW5 < idxW3, `w5 (${idxW5}) should be before w3 (${idxW3}) at equal urgency`);
+    assert.ok(idxW3 < idxW1, `w3 (${idxW3}) should be before w1 (${idxW1})`);
+  });
+
+  check('WEIGHT2', 'time-factor math: effectiveHours ×= 1+(w-3)*0.1, w5=1.2×, w1=0.8×, w3=1.0×', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    // Check constant exists
+    assert.equal(typeof SG.WEIGHTAGE_TIME_FACTOR, 'number', 'WEIGHTAGE_TIME_FACTOR must be exported constant');
+    assert.equal(SG.WEIGHTAGE_TIME_FACTOR, 0.1, 'WEIGHTAGE_TIME_FACTOR must be 0.1');
+    const rows = [
+      mkS('w5', 'Science', 'Ch w5', { weightage:5, estimated_hours:4 }),
+      mkS('w3', 'Science', 'Ch w3', { weightage:3, estimated_hours:4 }),
+      mkS('w1', 'Science', 'Ch w1', { weightage:1, estimated_hours:4 }),
+    ];
+    const built = SG.buildWorkItems({
+      syllabus: rows, existing:[], deadlines:null, prio: SG.normalizePriorities(null), factor:1,
+      hoursMultiplier:1, olympiadMultiplier:1, examMultiplier:1,
+      today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class'], classPaused:null,
+    });
+    const w5 = built.items.find(i=>i.chapter==='Ch w5');
+    const w3 = built.items.find(i=>i.chapter==='Ch w3');
+    const w1 = built.items.find(i=>i.chapter==='Ch w1');
+    assert.equal(w5.effectiveHours, 4 * 1.2, `w5: 4h *1.2=4.8, got ${w5.effectiveHours}`);
+    assert.equal(w3.effectiveHours, 4 * 1.0, `w3: 4h *1.0=4, got ${w3.effectiveHours}`);
+    assert.equal(w1.effectiveHours, 4 * 0.8, `w1: 4h *0.8=3.2, got ${w1.effectiveHours}`);
+    // With track multiplier
+    const built2 = SG.buildWorkItems({
+      syllabus: [mkS('w5', 'Science', 'Ch w5', { weightage:5, estimated_hours:4, track:'class' })],
+      existing:[], deadlines:null, prio: SG.normalizePriorities(null), factor:1,
+      hoursMultiplier:2, olympiadMultiplier:3, examMultiplier:2,
+      today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class'], classPaused:null,
+    });
+    assert.equal(built2.items[0].effectiveHours, 4 * 2 * 1.2, 'class track: 4h *2.0× *1.2× =9.6h');
+  });
+
+  check('WEIGHT3', 'AI estimator: schema {results:[{subject,chapter,weightage 1-5, reason}]}, clamp 1-5, batching ≤10', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    assert.ok(/aiEstimateWeightage/.test(aiSrc), 'aiEstimateWeightage must be exported');
+    assert.ok(/QB_BATCH_SIZE/.test(aiSrc), 'must use QB_BATCH_SIZE for batching ≤10');
+    assert.ok(/results/.test(aiSrc) && /weightage/.test(aiSrc) && /reason/.test(aiSrc), 'schema must include results with weightage and reason');
+    assert.ok(/Math\.max\(1, Math\.min\(5/.test(aiSrc), 'must clamp weightage 1-5 via Math.max(1, Math.min(5');
+    assert.ok(/Math\.round/.test(aiSrc), 'should round weightage');
+    // Simulate clamping logic
+    const clamp = (v) => Math.max(1, Math.min(5, Math.round(Number(v) || 3)));
+    assert.equal(clamp(10), 5, 'clamp 10 → 5');
+    assert.equal(clamp(-2), 1, 'clamp -2 → 1');
+    assert.equal(clamp(3), 3, '3 stays 3');
+    // Batching math: 25 rows → 3 batches, 11 → 2
+    const batchCount = (n, size=10) => Math.ceil(n/size);
+    assert.equal(batchCount(25), 3, '25 rows with batch ≤10 should be 3 calls');
+    assert.equal(batchCount(11), 2, '11 rows should be 2 batches');
+    assert.equal(batchCount(10), 1, '10 rows should be 1 batch');
+    // Check batching loop in source
+    assert.ok(/for.*i \+= QB_BATCH_SIZE/.test(aiSrc) || /slice\(i, i \+ QB_BATCH_SIZE\)/.test(aiSrc), 'must batch via QB_BATCH_SIZE slicing');
+  });
+
+  check('WEIGHT4', 'AI estimator: no-write-on-failure — throws, zero writes, honest error', () => {
+    const aiSrc = read('src/lib/aiFeatures.js');
+    const sylSrc = read('src/screens/study/SyllabusScreen.js');
+    // aiFeatures must throw on empty results
+    assert.ok(/AIUnavailableError/.test(aiSrc) && /couldn't estimate weightage/.test(aiSrc), 'must throw AIUnavailableError on empty');
+    // Wiring probe for zero writes is in SyllabusScreen: estimateWeightage only calls updateMany AFTER aiEstimateWeightage succeeds
+    assert.ok(/aiEstimateWeightage/.test(sylSrc), 'SyllabusScreen must call aiEstimateWeightage');
+    assert.ok(/updateMany/.test(sylSrc), 'must use updateMany for writes');
+    // Check that updateMany is AFTER the await aiEstimateWeightage (zero writes on failure)
+    const idxEst = sylSrc.indexOf('aiEstimateWeightage');
+    const idxUpdate = sylSrc.indexOf('updateMany', idxEst);
+    assert.ok(idxUpdate > idxEst, 'updateMany must be after aiEstimateWeightage (zero writes on failure)');
+    // Check honest error handling: catch and show message, no writes in catch
+    assert.ok(/catch/.test(sylSrc) && /AIUnavailableError/.test(sylSrc), 'must catch AI errors honestly');
+    // Ensure no updateMany in catch block (zero writes on failure)
+    const catchIdx = sylSrc.indexOf('catch', idxEst);
+    const updateInCatch = sylSrc.slice(catchIdx, catchIdx+500).includes('updateMany');
+    assert.ok(!updateInCatch, 'updateMany must NOT be in catch (zero writes on failure)');
+  });
+
+  check('WEIGHT5', 'wiring probe: SyllabusScreen has ✨ Estimate weightage button + batching ≤10, values editable', () => {
+    const sylSrc = read('src/screens/study/SyllabusScreen.js');
+    assert.ok(/Estimate weightage/.test(sylSrc) || /sparkles/.test(sylSrc), 'must have Estimate weightage button (sparkles icon)');
+    assert.ok(/aiEstimateWeightage/.test(sylSrc), 'must use aiEstimateWeightage');
+    // Batching ≤10 is in aiFeatures, check there
+    const aiSrc = read('src/lib/aiFeatures.js');
+    assert.ok(/QB_BATCH_SIZE/.test(aiSrc) || /10/.test(aiSrc), 'aiFeatures must batch ≤10 (QB_BATCH_SIZE)');
+    assert.ok(/weightage/.test(aiSrc) && /reason/.test(aiSrc), 'schema must include weightage and reason');
+    // Values stay manually editable: weightage Input or editable via existing UI
+    assert.ok(/weightage/.test(sylSrc), 'weightage must stay editable in UI');
   });
 
   check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {

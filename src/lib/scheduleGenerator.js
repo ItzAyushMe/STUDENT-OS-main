@@ -257,6 +257,8 @@ const PAIR_URGENT_SECONDARY_MIN = 2 * 15; // …shrinks to this floor when the l
 // S3 — a conquered chapter is tested once, then revisited on a spaced ladder
 const CHAPTER_TEST_OFFSET_DAYS = 2;
 const SPACED_REVISION_OFFSETS = [3, 7, 14];
+// FIX-SCHED8 D6: weightage drives order+time
+export const WEIGHTAGE_TIME_FACTOR = 0.1; // w5=1.2×, w1=0.8×, w3=1.0×
 const CHAPTER_TEST_MIN = 60;     // one full-chapter test (uses the existing 'mock' session type)
 const SPACED_REVISION_MIN = 25;  // 20–30 min per spaced revision
 
@@ -300,16 +302,13 @@ export function daysUntilDeadline(item, today, fallbackDays) {
 
 /**
  * Total order for "what is most urgent" — used for every queue and for choosing
- * which track gets unclaimed minutes. Order:
+ * which track gets unclaimed minutes. Order (FIX-SCHED8 D6):
  *   1. overdue work first (its deadline already passed)
  *   2. nearest deadline first (no deadline => the end of the plan horizon)
- *   3. the student's own track order (priorities)
- *   4. higher weightage first
- *   5. smaller remaining workload first — this also keeps draining the chapter
- *      already started instead of sprinkling minutes over everything, so when
- *      the workload cannot fit, whole chapters are preserved and the rest is
- *      reported as unscheduled rather than silently half-planned
- *   6. id — a stable, deterministic final tie-break
+ *   3. higher weightage first — promoted above track order, within same urgency bucket
+ *   4. the student's own track order (priorities)
+ *   5. smaller remaining workload first — keeps draining started chapter
+ *   6. id — stable deterministic tie-break
  */
 export function compareUrgency(a, b, ctx) {
   const c = ctx || {};
@@ -317,10 +316,11 @@ export function compareUrgency(a, b, ctx) {
   const db = daysUntilDeadline(b, c.today, c.horizonDays);
   if (!!a.overdue !== !!b.overdue) return a.overdue ? -1 : 1;
   if (da !== db) return da - db;
+  // D6: weightage drives order — within same deadline bucket, higher weightage first
+  if (num(b.weightage, 0) !== num(a.weightage, 0)) return num(b.weightage, 0) - num(a.weightage, 0);
   const ta = c.trackIndex && c.trackIndex[a.track] != null ? c.trackIndex[a.track] : 99;
   const tb = c.trackIndex && c.trackIndex[b.track] != null ? c.trackIndex[b.track] : 99;
   if (ta !== tb) return ta - tb;
-  if (num(b.weightage, 0) !== num(a.weightage, 0)) return num(b.weightage, 0) - num(a.weightage, 0);
   if (num(a.remainingMinutes, 0) !== num(b.remainingMinutes, 0)) return num(a.remainingMinutes, 0) - num(b.remainingMinutes, 0);
   return String(a.id).localeCompare(String(b.id));
 }
@@ -512,13 +512,16 @@ export function buildWorkItems(input) {
       continue;
     }
     // FIX-SCHED7 D1: per-track workload multipliers — School 2.0×, Olympiad 3.0×, Competitive 2.0×
+    // FIX-SCHED8 D6: weightage drives time — effectiveHours ×= 1+(w-3)*0.1
     const rawHours = num(row.estimated_hours, 4);
     let mult = 1;
     if (track === 'class') mult = num(hoursMultiplier, 2);
     else if (track === 'olympiad') mult = num(olympiadMultiplier, 3);
     else if (track === 'exam') mult = num(examMultiplier, 2);
     else mult = 1; // custom tracks default 1×
-    const effectiveHours = rawHours * mult;
+    const w = clampNum(row.weightage, 1, 5);
+    const weightageFactor = 1 + (w - 3) * WEIGHTAGE_TIME_FACTOR; // w5=1.2×, w1=0.8×
+    const effectiveHours = rawHours * mult * weightageFactor;
     const baseMin = Math.max(0, Math.round(effectiveHours * 60 * num(factor, 1) * (1 - progress / 100)));
     const key = `${String(row.subject || '').toLowerCase()}|${chapter.toLowerCase()}`;
     const credited = Math.min(baseMin, num(credit.get(key), 0));
@@ -543,16 +546,18 @@ export function buildWorkItems(input) {
       subject: String(row.subject || 'Subject'),
       chapter,
       track,
-      weightage: clampNum(row.weightage, 1, 5),
+      weightage: w,
+      weightageFactor,
       remainingMinutes: remaining,
       plannedMinutes: 0,
       deadline,
       overdue: !!(deadline && deadline < today),
       creditedMinutes: credited,
-      // FIX-SCHED1: show effective hours in UI — base ~4h → planned ~8h
+      // FIX-SCHED1/7/8: show effective hours in UI — base ~4h → effective with track mult + weightage factor
       baseHours: rawHours,
       effectiveHours,
       hoursMultiplier: mult,
+      trackMultiplier: mult,
       // one-shot events: prepping for an olympiad/main exam ON or AFTER its date
       // is an impossible allocation, so such work stops at the date and is reported
       hardStop:

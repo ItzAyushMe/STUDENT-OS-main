@@ -20,7 +20,7 @@ import { Input } from '../../components/ui/Input';
 import { db } from '../../lib/db';
 import { infoAlert } from '../../lib/alert';
 import { seedSyllabusTrack, importPresetRows } from '../../lib/starterData';
-import { aiGenerateSyllabus, AIUnavailableError } from '../../lib/aiFeatures';
+import { aiGenerateSyllabus, aiEstimateWeightage, AIUnavailableError } from '../../lib/aiFeatures';
 import { TRACKS, pickSyllabusSet, CLASS_SYLLABI, EXAM_SYLLABI, OLYMPIAD_SYLLABI } from '../../data/syllabusData';
 import { SUBJECT_COLORS, isArchivedRow, activeSyllabusRows } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
@@ -170,6 +170,51 @@ export function SyllabusScreen({ navigation }) {
     }
   };
 
+  // FIX-SCHED8 D6: AI weightage estimator — batches ≤10, zero writes on failure, reasons briefly shown
+  const estimateWeightage = async () => {
+    if (!profile?.id) return;
+    setAiBusy(true);
+    setAiMsg('');
+    try {
+      const trackRowsForEst = rows.filter(r => rowTrack(r) === activeTrack && !isArchivedRow(r));
+      if (!trackRowsForEst.length) {
+        setAiMsg('No chapters to estimate — import syllabus first');
+        return;
+      }
+      const results = await aiEstimateWeightage({ syllabusRows: trackRowsForEst, profile: profile || {} });
+      if (!results.length) {
+        setAiMsg('AI could not estimate — try again');
+        return;
+      }
+      // Map results to existing rows by subject+chapter
+      const updates = [];
+      const reasons = [];
+      for (const res of results) {
+        const match = trackRowsForEst.find(r => r.subject === res.subject && r.chapter === res.chapter);
+        if (match) {
+          const w = Math.max(1, Math.min(5, Number(res.weightage) || 3));
+          updates.push({ id: match.id, patch: { weightage: w } });
+          if (res.reason) reasons.push(`${res.subject} — ${res.chapter}: ${w}★ — ${res.reason}`);
+        }
+      }
+      if (!updates.length) {
+        setAiMsg('No matching chapters found for AI results');
+        return;
+      }
+      // ZERO writes on failure: only write after all batches succeeded (aiEstimateWeightage already succeeded)
+      await db.updateMany('syllabus', updates);
+      await load();
+      setAiMsg(`✨ Weightage updated for ${updates.length} chapters:\n` + reasons.slice(0, 10).join('\n'));
+    } catch (e) {
+      const msg = e instanceof AIUnavailableError ? e.message : e?.message || 'AI weightage estimate fail hua';
+      setAiMsg(msg);
+      infoAlert('AI weightage fail', msg);
+      // ZERO writes on failure — we did not call updateMany yet
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   const generateWithAI = async () => {
     setAiBusy(true);
     setAiMsg('');
@@ -253,6 +298,7 @@ export function SyllabusScreen({ navigation }) {
         onBack={onBack}
         right={
           <View style={{ flexDirection: 'row' }}>
+            <HeaderBtn icon="sparkles-outline" onPress={estimateWeightage} />
             <HeaderBtn icon="download-outline" onPress={() => setPresetOpen(true)} />
             <HeaderBtn icon="add" onPress={() => setAddOpen(true)} />
           </View>
