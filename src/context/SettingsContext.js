@@ -21,6 +21,7 @@ const DEFAULTS = {
   olympiadMultiplier: 3.0, // FIX-SCHED7 D1: olympiad workload default 3.0×
   examMultiplier: 2.0, // FIX-SCHED7 D1: competitive workload default 2.0×
   classSessionEnd: '02-25', // FIX-SCHED3 D7: school session ends MM-DD, editable, default 02-25
+  lightDay: 6, // FIX-SCHED9 D8: light day weekday picker, default Sunday (6=Sun Mon=0), independent of days_off
 };
 
 const SettingsCtx = createContext(null);

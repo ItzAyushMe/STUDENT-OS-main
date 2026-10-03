@@ -654,6 +654,19 @@ export function SettingsScreen({ navigation }) {
           </View>
           <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>Current: {settings.classSessionEnd || '02-25'} — used as classSessionCutoff override. Class blocks never past this date; unfinished reported as shortfall.</Text>
         </View>
+        {/* FIX-SCHED9 D8: Light day weekday picker, default Sunday, independent of days_off */}
+        <View style={{ marginBottom: 12, backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 10, padding: 10 }}>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#166534', marginBottom: 6 }}>🌤️ Light day (1 day/week 50% load — revision/mock/practice only)</Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginBottom: 8, lineHeight: 15 }}>Independent of days_off (which remain full days off). On light day, only revision/mock/practice blocks are scheduled — never new content. Default Sunday.</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+            {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d,i) => (
+              <Pressable key={d} onPress={() => settings.update({ lightDay: i })} style={{ backgroundColor: (settings.lightDay ?? 6) === i ? '#16A34A' : '#FFFFFF', borderWidth: 1, borderColor: (settings.lightDay ?? 6) === i ? '#16A34A' : '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10, marginRight: 6, marginBottom: 6 }}>
+                <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: (settings.lightDay ?? 6) === i ? '#FFFFFF' : '#334155' }}>{d}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#166534', marginTop: 4 }}>Current: {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only</Text>
+        </View>
         <Input
           label="Competitive exam date (YYYY-MM-DD)"
           value={examDate}

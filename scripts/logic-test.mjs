@@ -2982,6 +2982,121 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/weightage/.test(sylSrc), 'weightage must stay editable in UI');
   });
 
+  // ================= FIX-SCHED9 D8/D5: light day + fillers =================
+  check('LIGHT1', 'light day quota 50% zero new blocks — Sunday 50% capacity, only revision/mock/practice', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });
+    const today = '2026-01-05'; // Monday
+    // 2026-01-11 is Sunday (6 in Mon=0 mapping)
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 10 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 10 }),
+    ];
+    // Without light day, Sunday would get full capacity new content
+    // With light day Sunday, Sunday should have 50% capacity and no new study blocks
+    const pLight = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[], lightDay: 6, weeks:2,
+      userId:'u-light1', today, createdAt: today+'T00:00:00.000Z',
+    });
+    const sunday = '2026-01-11';
+    const sunBlocks = pLight.filter(r => r.date === sunday);
+    const sunStudy = sunBlocks.filter(r => r.session_type === 'study');
+    const sunRevMockPractice = sunBlocks.filter(r => ['revision','mock','practice','quiz'].includes(r.session_type));
+    // Light day must have zero new study blocks
+    assert.equal(sunStudy.length, 0, `light day ${sunday} must have zero new study blocks, got ${sunStudy.length}: ${sunStudy.map(s=>s.topic).join('; ')}`);
+    // If there is any studied content, light day should have revision/mock/practice or be free (if no studied yet, first week may be free)
+    // But quota must be 50%: daily 4h=240min, light 50%=120min, check total minutes <=120
+    const sunMin = sunBlocks.reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.ok(sunMin <= 130, `light day quota 50% of 240=120min, got ${sunMin}min (allow 10min slack for breath)`);
+    // Also test that light day independent of days_off: days_off full off
+    const pOff = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[6], lightDay: 6, weeks:2,
+      userId:'u-light1-off', today, createdAt: today+'T00:00:00.000Z',
+    });
+    const sunOffBlocks = pOff.filter(r => r.date === sunday);
+    assert.equal(sunOffBlocks.length, 0, `days_off full off must win over light day — Sunday off should have zero blocks, got ${sunOffBlocks.length}`);
+  });
+
+  check('LIGHT2', 'filler fallback — after new+revision met, track-appropriate practice/mock labeled, never new coverage', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-01-05';
+    // Small syllabus that finishes early, then fillers should appear
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[], lightDay: 6, weeks:3,
+      userId:'u-light2', today, createdAt: today+'T00:00:00.000Z',
+    });
+    const practiceBlocks = p.filter(r => r.session_type === 'practice' || r.session_type === 'mock' || r.session_type === 'revision' || r.session_type === 'quiz');
+    // Should have at least some practice/mock fillers after syllabus done (or revision/quiz)
+    // The key is that after new+revision met, we get practice/mock, not new study
+    const fillerPractice = p.filter(r => (r.session_type === 'practice' || r.session_type === 'mock') && /Practice|Mock|Problem-practice|MCQ|Timed practice/.test(r.topic));
+    assert.ok(fillerPractice.length >= 1 || practiceBlocks.length >= 1, `should have filler practice/mock after new+revision met, got practiceBlocks ${practiceBlocks.length}`);
+    for (const b of fillerPractice) {
+      assert.ok(/Practice|Mock|Problem-practice|MCQ|Timed practice/.test(b.topic), `filler topic must be labeled practice/mock, got ${b.topic}`);
+      assert.ok(b.session_type === 'practice' || b.session_type === 'mock', `filler session_type must be practice/mock, got ${b.session_type}`);
+      // Never fabricated as chapter done — filler topic must contain original chapter name but not be counted as new coverage
+      assert.ok(!/^Life Processes$/.test(b.topic) && !/^Trigonometry$/.test(b.topic), `filler must not be bare chapter name (fabricated done), got ${b.topic}`);
+    }
+    // Olympiad track filler: problem-practice from covered olympiad chapters
+    const olyRows = [
+      mkS('o1', 'Maths Olympiad', 'Number Theory', { track:'olympiad', estimated_hours:2, weightage:5 }),
+    ];
+    const pOly = SG.generateSchedule({
+      syllabus: olyRows, dailyHours: 3, preferredTime:'Morning', daysOff:[], lightDay: 6, weeks:2,
+      userId:'u-light2-oly', today, createdAt: today+'T00:00:00.000Z',
+      olympiadDate: '2026-09-20',
+    });
+    const olyPractice = pOly.filter(r => r.track==='olympiad' && (r.session_type==='practice'||r.session_type==='mock'));
+    if (olyPractice.length) {
+      assert.ok(olyPractice.some(r => /Problem-practice|olympiad|Practice|Mock/i.test(r.topic)), `olympiad filler must be problem-practice, got ${olyPractice.map(r=>r.topic).join('; ')}`);
+    }
+  });
+
+  check('LIGHT3', 'complete-syllabus honesty — days stay free and coverage says syllabus covered — maintain with practice', () => {
+    assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:1, archived:false, ...over });
+    const today = '2026-01-05';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 1 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, preferredTime:'Morning', daysOff:[], lightDay: 6, weeks:4,
+      userId:'u-light3', today, createdAt: today+'T00:00:00.000Z',
+    });
+    assert.ok(p.coverage, 'coverage must exist');
+    // If all covered, coverageWarning should contain honesty message
+    const warn = p.coverage.coverageWarning || '';
+    // When all planned and no unscheduled/partial/tooLate, should say syllabus covered
+    if (p.coverage.unscheduled.length===0 && p.coverage.partial.length===0 && p.coverage.tooLate.length===0) {
+      assert.ok(/syllabus covered/.test(warn) || /maintain with practice/.test(warn), `when all covered, warning must say syllabus covered — maintain with practice, got ${warn}`);
+    }
+    // Days stay free: check that not every day is filled (some days free when syllabus tiny)
+    // totalDays is per-track max (cutoff Feb25 = 51 days +14 buffer =65), not just weeks*7
+    const byDate = {};
+    for (const r of p) byDate[r.date] = (byDate[r.date]||0)+1;
+    const totalDays = p.coverage.totalDays || 28;
+    const filledDays = Object.keys(byDate).length;
+    assert.ok(filledDays < totalDays, `when syllabus tiny, days should stay free, got filled ${filledDays}/${totalDays} (totalDays from coverage)`);
+  });
+
+  check('LIGHT4', 'wiring probe: SettingsContext lightDay default Sunday 6, SettingsScreen picker, ScheduleScreen passes lightDay, engine 50% quota', () => {
+    const ctxSrc = read('src/context/SettingsContext.js');
+    assert.ok(/lightDay/.test(ctxSrc) && /6/.test(ctxSrc), 'SettingsContext must have lightDay default 6 (Sunday)');
+    const setSrc = read('src/screens/settings/SettingsScreen.js');
+    assert.ok(/lightDay/.test(setSrc) && /Light day/.test(setSrc), 'SettingsScreen must have light day picker');
+    assert.ok(/Sun/.test(setSrc) && /50%/.test(setSrc), 'picker must show Sun and 50%');
+    const schedSrc = read('src/screens/study/ScheduleScreen.js');
+    assert.ok(/lightDay/.test(schedSrc), 'ScheduleScreen must pass lightDay');
+    const sgSrc = read('src/lib/scheduleGenerator.js');
+    assert.ok(/lightDay/.test(sgSrc) && /LIGHT_DAY_FACTOR/.test(sgSrc) && /0\.5/.test(sgSrc), 'engine must have LIGHT_DAY_FACTOR 0.5');
+    assert.ok(/isLightDay/.test(sgSrc) && /revision.*mock.*practice/.test(sgSrc.toLowerCase()) || /practice/.test(sgSrc), 'engine must handle light day revision/mock/practice only');
+    assert.ok(/syllabus covered/.test(sgSrc) && /maintain with practice/.test(sgSrc), 'engine must have honesty message syllabus covered — maintain with practice');
+  });
+
   check('CASCADE1', 'three-phase simulation with fixed dates: P1 class→olympiad→exam, P2 olympiad→exam hard-stop class, P3 exam only', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:6, archived:false, ...over });

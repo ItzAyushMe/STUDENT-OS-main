@@ -261,6 +261,7 @@ export function ScheduleScreen({ navigation, route }) {
         dailyHours: effectiveDailyHours(profile),
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
+        lightDay: settings.lightDay ?? 6,
         prepLevel: profile.prep_level,
         hoursMultiplier: settings.hoursMultiplier ?? 2.0,
         olympiadMultiplier: settings.olympiadMultiplier ?? 3.0,
@@ -619,7 +620,8 @@ export function ScheduleScreen({ navigation, route }) {
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
         <InfoRow label="Chapter workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
-        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week` : 'None'} />
+        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (full off)` : 'None'} />
+        <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only`} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
         <InfoRow label="Olympiad" value={profile.olympiad && profile.olympiad !== 'None' ? `${profile.olympiad}${profile.olympiad_date ? ` · ${profile.olympiad_date}` : ''}` : 'None'} />
         <InfoRow

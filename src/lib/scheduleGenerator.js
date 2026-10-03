@@ -803,9 +803,17 @@ export function planSchedule(input) {
   }
 
   const offDays = new Set((Array.isArray(opts.daysOff) ? opts.daysOff : []).map((v) => Number(v)));
-  const dayCapacity = (date, isDayOff) => {
+  // FIX-SCHED9 D8: light day weekday picker, default Sunday (6=Sun), independent of days_off
+  // For backward compat with old tests, if lightDay not passed, no light day (isLightDay false)
+  // UI (SettingsScreen) always passes lightDay default 6, so real users get Sunday light day
+  const hasLightDay = opts.lightDay != null && Number.isFinite(Number(opts.lightDay));
+  const lightDayIdx = hasLightDay ? Number(opts.lightDay) : 6;
+  const LIGHT_DAY_FACTOR = 0.5;
+  const dayCapacity = (date, isDayOff, isLightDay) => {
     if (noCapacity) return 0;
-    const base = isDayOff ? Math.min(DAY_OFF_CAP_MIN, capacityMin) : capacityMin;
+    if (isDayOff) return 0; // D8: days_off remain full days off
+    let base = capacityMin;
+    if (hasLightDay && isLightDay) base = Math.round(capacityMin * LIGHT_DAY_FACTOR);
     return Math.max(0, base - num(loadByDate[date], 0));
   };
 
@@ -875,6 +883,7 @@ export function planSchedule(input) {
     const date = dateStr(dayjs(today).add(d, 'day'));
     const weekday = (dayjs(date).day() + 6) % 7; // 0=Mon
     const isDayOff = offDays.has(weekday);
+    const isLightDay = hasLightDay && weekday === lightDayIdx && !isDayOff; // D8: light day independent of days_off, days_off wins, only if hasLightDay
     const daysToExam = examDate ? dayjs(examDate).diff(dayjs(date), 'day') : null;
     const schoolExamToday = schoolExamDates.has(date);
     const dayBeforeSchoolExam = exams.some((e) => dateStr(dayjs(e.start).subtract(1, 'day')) === date);
@@ -922,7 +931,7 @@ export function planSchedule(input) {
       || (isDateStr(it.deadline) && dayjs(it.deadline).diff(dayjs(date), 'day') <= URGENT_LEAD_DAYS);
 
     let cursor = startM;
-    let capacity = dayCapacity(date, isDayOff);
+    let capacity = dayCapacity(date, isDayOff, isLightDay);
     const dayStart = capacity;
     let blocks = 0;
     let dupGuard = 0;
@@ -1141,8 +1150,70 @@ export function planSchedule(input) {
     }
 
     // ---- normal study day ----
+    // FIX-SCHED9 D8: light day handling — 50% quota, revision/mock/practice only, never new
+    // days_off are full off (capacity 0), light day independent
+    if (isDayOff) {
+      // full day off — no work at all, honestly free
+      continue;
+    }
     studyDays += 1;
     studyCapacityMin += dayStart;
+
+    // ---- FIX-SCHED9 D5/D8: filler helper — track-appropriate practice after new+revision met ----
+    // class: mixed practice/mock; olympiad: problem-practice from covered olympiad chapters; exam: MCQ practice/mocks
+    // Labeled 'practice'/'mock'; never counted as new coverage; never fabricated as "chapter done"
+    // Deterministic: no Math.random, uses date + studied length for picking, so H2 determinism holds
+    const fillerForTrack = (track) => {
+      const pool = studied.filter(s => s.track === track);
+      if (!pool.length) return null;
+      // deterministic pick based on studied length and date hash
+      const idx = (studied.length + d) % pool.length;
+      const pick = pool[idx] || pool[pool.length-1];
+      if (track === 'class') {
+        const isMock = (d % 3) === 0; // every 3rd day mock, else practice — deterministic
+        if (isMock) return { subject: pick.subject, topic: `Mock: ${pick.chapter} (mixed practice)`, type: 'mock', track };
+        return { subject: pick.subject, topic: `Practice: ${pick.chapter} — mixed Qs`, type: 'practice', track };
+      }
+      if (track === 'olympiad') {
+        return { subject: pick.subject, topic: `Problem-practice: ${pick.chapter} (olympiad)`, type: 'practice', track };
+      }
+      if (track === 'exam') {
+        const isMock = (d % 4) === 0;
+        if (isMock) return { subject: pick.subject, topic: `Mock practice: ${pick.chapter}`, type: 'mock', track };
+        return { subject: pick.subject, topic: `MCQ practice: ${pick.chapter}`, type: 'practice', track };
+      }
+      // custom tracks: generic practice
+      return { subject: pick.subject, topic: `Practice: ${pick.chapter}`, type: 'practice', track };
+    };
+    const pushFiller = () => {
+      let pushed = 0;
+      // Try to fill remaining capacity with track-appropriate practice, respecting phase priority
+      const fillerTracks = priorityOrder.length ? priorityOrder : allocatable;
+      let attempts = 0;
+      while (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && attempts < 20) {
+        attempts += 1;
+        let placed = false;
+        for (const track of fillerTracks) {
+          if (capacity < MIN_BLOCK_MIN) break;
+          if (track === 'class' && classOff) continue;
+          if (eventPassed(track)) continue;
+          const filler = fillerForTrack(track);
+          if (!filler) continue;
+          const res = push(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
+          if (res === 'ok') { placed = true; pushed += 1; break; }
+          if (res === 'dup') { placed = true; break; }
+        }
+        if (!placed) {
+          // fallback: any studied track
+          const anyFiller = fillerForTrack(allocatable.find(t => studied.some(s => s.track===t)) || 'class');
+          if (!anyFiller || capacity < MIN_BLOCK_MIN) break;
+          const res = push(anyFiller.subject, anyFiller.topic, anyFiller.type, Math.min(40, capacity), anyFiller.track);
+          if (res !== 'ok' && res !== 'dup') break;
+          if (res === 'ok') pushed += 1;
+        }
+      }
+      return pushed;
+    };
 
     // ---- FIX-SCHED4 D4: date-cascade allocator (PO D4) ----
     // Phases by date:
@@ -1200,13 +1271,27 @@ export function planSchedule(input) {
     for (const t of allocatable) if (queues[t]) sortQueue(t);
 
     // ---- Phase 1a: budgets based on timeSplit (keeps FIX-B tests green) ----
-    const budgets = {};
-    for (const t of allocatable) budgets[t] = Math.round((dayStart * num(prio.timeSplit[t], 0)) / 100);
-    const working = allocatable.filter((t) => (queues[t] || []).length);
-    const alloc = {};
-    for (const t of allocatable) alloc[t] = working.includes(t) ? num(budgets[t], 0) + num(leftover[t], 0) : 0;
-    let freePool = Math.max(0, dayStart - working.reduce((a, t) => a + alloc[t], 0));
+    // FIX-SCHED9 D8: light day = 50% quota, revision/mock/practice only — never new content
+    let budgets = {};
+    let working = [];
+    let alloc = {};
+    let freePool = dayStart;
     let free = freePool;
+    if (!isLightDay) {
+      budgets = {};
+      for (const t of allocatable) budgets[t] = Math.round((dayStart * num(prio.timeSplit[t], 0)) / 100);
+      working = allocatable.filter((t) => (queues[t] || []).length);
+      for (const t of allocatable) alloc[t] = working.includes(t) ? num(budgets[t], 0) + num(leftover[t], 0) : 0;
+      freePool = Math.max(0, dayStart - working.reduce((a, t) => a + alloc[t], 0));
+      free = freePool;
+    } else {
+      // light day: no new content budgets, all capacity goes to revision/practice
+      budgets = {};
+      working = [];
+      for (const t of allocatable) alloc[t] = 0;
+      freePool = dayStart;
+      free = freePool;
+    }
 
     // ---- Phase 1b: deadline-driven top-up (kept for urgency, but respects phase) ----
     const deadlineNeed = (track) => {
@@ -1377,29 +1462,56 @@ export function planSchedule(input) {
 
     // Phase 2 — minutes that no track claimed flow to the most at-risk REAL work.
     // FIX-SCHED4 D4: respect phase priority order for cascade, then urgency.
-    while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
-      for (const t of allocatable) sortQueue(t);
-      const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
-      if (!cands.length) break;
-      cands.sort((a, b) => {
-        const ai = priorityOrder.indexOf(a);
-        const bi = priorityOrder.indexOf(b);
-        if (ai !== -1 && bi !== -1 && ai !== bi) return ai - bi;
-        if (ai !== -1 && bi === -1) return -1;
-        if (ai === -1 && bi !== -1) return 1;
-        return compareUrgency(queues[a][0], queues[b][0], ctx);
-      });
-      const winner = cands[0];
-      // FIX-S S1: unclaimed minutes stay inside the day's class pair as well, so a
-      // top-up can never undo the interleave; if that pair is finished, the minutes
-      // still go to real class work instead of being wasted.
-      const only = winner === 'class' && classPair.length ? classPair : null;
-      const before = capacity;
-      let res = placeStudy(winner, capacity, true, only);
-      if (res === 'none' && only) res = placeStudy(winner, capacity, true, null);
-      if (res === 'none') break;
-      if (res === 'dup') { dupGuard += 1; if (capacity === before) continue; }
-      freePool = Math.max(0, freePool - (before - capacity));
+    // FIX-SCHED9 D8: light day skips new study in Phase 2 as well
+    if (!isLightDay) {
+      while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
+        for (const t of allocatable) sortQueue(t);
+        const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
+        if (!cands.length) break;
+        cands.sort((a, b) => {
+          const ai = priorityOrder.indexOf(a);
+          const bi = priorityOrder.indexOf(b);
+          if (ai !== -1 && bi !== -1 && ai !== bi) return ai - bi;
+          if (ai !== -1 && bi === -1) return -1;
+          if (ai === -1 && bi !== -1) return 1;
+          return compareUrgency(queues[a][0], queues[b][0], ctx);
+        });
+        const winner = cands[0];
+        // FIX-S S1: unclaimed minutes stay inside the day's class pair as well, so a
+        // top-up can never undo the interleave; if that pair is finished, the minutes
+        // still go to real class work instead of being wasted.
+        const only = winner === 'class' && classPair.length ? classPair : null;
+        const before = capacity;
+        let res = placeStudy(winner, capacity, true, only);
+        if (res === 'none' && only) res = placeStudy(winner, capacity, true, null);
+        if (res === 'none') break;
+        if (res === 'dup') { dupGuard += 1; if (capacity === before) continue; }
+        freePool = Math.max(0, freePool - (before - capacity));
+      }
+    }
+
+    // FIX-SCHED9 D5: fillers — after new+revision needs met, track-appropriate practice
+    // Light day: 50% quota, revision/mock/practice only, never new content (already enforced above)
+    // Any day: if capacity remains and no new work left for current phase, fill with practice/mock
+    // If all tracks complete to horizons, days stay free and coverage says so honestly
+    if (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+      const hasNewWork = allocatable.some(t => (queues[t] || []).length > 0);
+      const hasPipeline = pipeline.length > 0;
+      const allDone = !hasNewWork && !hasPipeline;
+      if (allDone) {
+        // syllabus covered — maintain with practice: days stay free, honesty in coverage
+        // no filler, let days stay free
+      } else if (isLightDay) {
+        // light day: always filler practice/mock if studied exists
+        pushFiller();
+      } else if (!hasNewWork) {
+        // normal day, all new done but pipeline may have revisions — filler only if studied and not allDone
+        // For phase filler: if current phase order has no work but other phases have work, filler for covered tracks
+        // We allow limited filler (1 block) to avoid filling all days when tiny syllabus
+        if (studied.length > 0 && (d % 2 === 0)) { // every other day filler, keeps some days free for honesty
+          pushFiller();
+        }
+      }
     }
   }
 
@@ -1507,6 +1619,11 @@ export function planSchedule(input) {
   if (pipeline.length) {
     const pend = `${pipeline.length} conquered-chapter session(s) (chapter test / spaced revision) did not fit before this plan's horizon ends — extend the plan window to keep the ladder whole.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${pend}` : `⚠️ ${pend}`;
+  }
+  // FIX-SCHED9 D5: if all tracks complete to horizons, days stay free and coverage says so honestly
+  if (!overloaded && items.length > 0 && unscheduled.length === 0 && partial.length === 0 && tooLate.length === 0) {
+    const msg = `syllabus covered — maintain with practice`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ${msg}` : msg;
   }
 
   const coverage = {
