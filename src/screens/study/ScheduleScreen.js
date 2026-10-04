@@ -20,6 +20,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
+import { chunkRows, isRunStale, saveWithWorkers } from '../../lib/scheduleSave';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
@@ -54,7 +55,10 @@ export function ScheduleScreen({ navigation, route }) {
   const [coverageExpanded, setCoverageExpanded] = useState(false); // FIX-QA-UI
   const [genError, setGenError] = useState('');
   const [autoRollMsg, setAutoRollMsg] = useState('');
-  const autoRolledRef = useRef(false); // FIX-E: guard to auto-roll only once per screen load session
+  const autoRolledRef = useRef(false);
+  const genRunRef = useRef(0);
+  const genBusyRef = useRef(false);
+  const lastTickRef = useRef(Date.now()); // FIX-E: guard to auto-roll only once per screen load session
 
   // human-readable priority line for the generate modal (reads the
   // student's own priority settings — FIX B)
@@ -206,43 +210,64 @@ export function ScheduleScreen({ navigation, route }) {
   // FIX-SCHED2: reliability — timeouts, batch writes, progress, 60s watchdog.
   // FIX-SCHED1: horizon till 25 Feb (classSessionCutoff) + hoursMultiplier 2.0× default.
   const generate = async (mode = 'keep-completed') => {
+    if (genBusyRef.current) return;
+    genRunRef.current += 1;
+    const myRun = genRunRef.current;
+    genBusyRef.current = true;
     setGenBusy(true);
     setGenError('');
-    setGenProgress('Loading your data…');
-    let watchdog = null;
-    const clearWatchdog = () => { if (watchdog) { clearTimeout(watchdog); watchdog = null; } };
-    try {
-      // 60s watchdog — never-again-spinner guarantee
-      watchdog = setTimeout(() => {
+    lastTickRef.current = Date.now();
+    const tick = (msg) => {
+      setGenProgress(msg);
+      lastTickRef.current = Date.now();
+    };
+    const yieldPaint = () => new Promise((r) => setTimeout(r, 0));
+    const isStale = () => isRunStale(genRunRef.current, myRun);
+
+    let watchdogInterval = null;
+    const clearWatchdog = () => {
+      if (watchdogInterval) { clearInterval(watchdogInterval); watchdogInterval = null; }
+    };
+    watchdogInterval = setInterval(() => {
+      if (Date.now() - lastTickRef.current > 60000) {
+        genRunRef.current += 1;
         setGenError('Generate 60s se zyada le raha hai — network slow ya data bada hai. Dobara try karo.');
         setGenBusy(false);
         setGenProgress('');
-      }, 60000);
+        genBusyRef.current = false;
+        clearWatchdog();
+      }
+    }, 10000);
 
-      setGenProgress('Loading syllabus…');
+    try {
+      tick('Loading syllabus…');
+      if (isStale()) return;
       const syllabus = await db.list('syllabus', { eq: { user_id: profile.id } });
-      setGenProgress('Loading existing schedule…');
+      if (isStale()) return;
+
+      tick('Loading existing schedule…');
+      if (isStale()) return;
       const planToday = todayStr();
       const allExisting = await db.list('schedule', {
         eq: { user_id: profile.id },
         gte: { date: dateStr(dayjs(planToday).subtract(30, 'day')) },
         lte: { date: dateStr(dayjs(planToday).add(1100, 'day')) },
         order: { col: 'date', asc: true },
-        limit: 1000,
+        limit: 5000,
       });
-      // FIX-SLOW: chunked delete with honest keep-old-on-fail + yield for progress paint
-      const yieldPaint = () => new Promise((r) => setTimeout(r, 0));
+      if (isStale()) return;
+
       const chunkedRemove = async (rowsToDelete, label) => {
         if (!rowsToDelete.length) return;
         const CHUNK = 100;
         for (let i = 0; i < rowsToDelete.length; i += CHUNK) {
+          if (isStale()) return;
           const chunk = rowsToDelete.slice(i, i + CHUNK);
-          setGenProgress(`${label} (${Math.floor(i/CHUNK)+1}/${Math.ceil(rowsToDelete.length/CHUNK)})…`);
+          tick(`${label} (${Math.floor(i/CHUNK)+1}/${Math.ceil(rowsToDelete.length/CHUNK)})…`);
           await yieldPaint();
+          if (isStale()) return;
           try {
-            // Try bulk removeWhere by ids if available, else individual
             if (typeof db.removeWhere === 'function' && chunk.length === rowsToDelete.length) {
-              // first attempt giant delete for speed, fallback to chunked ids
               if (label.includes('old schedule')) {
                 await db.removeWhere('schedule', { user_id: profile.id });
                 break;
@@ -251,10 +276,8 @@ export function ScheduleScreen({ navigation, route }) {
                 break;
               }
             }
-            // chunked by id
             await Promise.all(chunk.map((r) => db.remove('schedule', r.id)));
           } catch (e) {
-            // honest keep-old-on-fail: if chunk delete fails, keep old schedule and throw
             throw new Error(`Delete failed at chunk ${Math.floor(i/CHUNK)+1} — old schedule kept. ${e?.message || ''}`);
           }
         }
@@ -262,24 +285,24 @@ export function ScheduleScreen({ navigation, route }) {
 
       let kept = [];
       if (mode === 'fresh') {
-        setGenProgress('Clearing old schedule…');
+        tick('Clearing old schedule…');
         await yieldPaint();
+        if (isStale()) return;
         try {
-          // Attempt giant delete first for speed, with honest keep-old-on-fail
           await db.removeWhere('schedule', { user_id: profile.id });
         } catch (e) {
-          // Fallback chunked delete by ids from allExisting (honest)
           if (allExisting.length) {
             await chunkedRemove(allExisting, 'Clearing old schedule');
           } else {
-            // If list failed, try giant again and if fails, keep old
             throw new Error(`Old schedule delete failed — keeping old plan. ${e?.message || ''}`);
           }
         }
+        if (isStale()) return;
         kept = [];
       } else {
-        setGenProgress('Clearing pending slots…');
+        tick('Clearing pending slots…');
         await yieldPaint();
+        if (isStale()) return;
         const pendingRows = allExisting.filter((r) => r.status === 'pending');
         try {
           await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
@@ -290,11 +313,13 @@ export function ScheduleScreen({ navigation, route }) {
             throw new Error(`Pending delete failed — keeping existing. ${e?.message || ''}`);
           }
         }
+        if (isStale()) return;
         kept = allExisting.filter((r) => r.status !== 'pending');
       }
 
-      setGenProgress('Computing deadlines…');
-      await new Promise((r) => setTimeout(r, 0));
+      tick('Computing deadlines…');
+      await yieldPaint();
+      if (isStale()) return;
       const planSchoolExams = promo.schoolExamsForPlanning();
       const computedDeadlines = syllabus.length
         ? autoSetDeadlines(syllabus, profile.exam_date, profile.daily_study_hours, planSchoolExams)
@@ -303,8 +328,9 @@ export function ScheduleScreen({ navigation, route }) {
         !r.deadline && computedDeadlines[r.id] ? { ...r, deadline: computedDeadlines[r.id] } : r
       );
 
-      setGenProgress('Planning till 25 Feb…');
-      await new Promise((r) => setTimeout(r, 0));
+      tick('Planning till 25 Feb…');
+      await yieldPaint();
+      if (isStale()) return;
       const rows = generateSchedule({
         syllabus: plannedSyllabus,
         deadlines: computedDeadlines,
@@ -340,14 +366,12 @@ export function ScheduleScreen({ navigation, route }) {
               }
             }
           }
-          // FIX-SCHED3: horizon must reach classSessionCutoff (editable via D7) + 14-day buffer, cap 160 weeks
           try {
             const override = settings.classSessionEnd || '02-25';
             const cutoffStr = classSessionCutoff(todayStr(), override);
             const cutoffDay = dayjs(cutoffStr);
             if (cutoffDay.isValid() && cutoffDay.isAfter(maxDate)) maxDate = cutoffDay;
           } catch {}
-          // +14-day post-exam buffer so wind-down days exist
           maxDate = maxDate.add(14, 'day');
           const diffDays = Math.max(42, maxDate.diff(today, 'day'));
           const weeksNeeded = Math.ceil(diffDays / 7);
@@ -355,48 +379,98 @@ export function ScheduleScreen({ navigation, route }) {
         })(),
         userId: profile.id,
       });
+      if (isStale()) return;
       setCoverage(rows.coverage || null);
+
       if (rows.length) {
-        const totalChunks = Math.ceil(rows.length / 100);
-        for (let i = 0; i < rows.length; i += 100) {
-          const chunkIdx = Math.floor(i / 100) + 1;
-          setGenProgress(`Saving schedule (${chunkIdx}/${totalChunks})…`);
-          await new Promise((r) => setTimeout(r, 0)); // FIX-SLOW: yield for progress paint
-          await db.insertMany('schedule', rows.slice(i, i + 100));
+        const chunks = chunkRows(rows, 500);
+        const totalChunks = chunks.length;
+        const insertFn = async (chunk) => {
+          if (isStale()) throw new Error('stale run aborted');
+          await db.insertMany('schedule', chunk);
+        };
+        const onProgress = (completed, total) => {
+          tick(`Saving schedule (${completed}/${total})…`);
+        };
+
+        let savedCount = 0;
+        const failed = [];
+        let nextIdx = 0;
+        const CONCURRENCY = 2;
+
+        const worker = async () => {
+          while (true) {
+            if (isStale()) break;
+            const cur = nextIdx++;
+            if (cur >= totalChunks) break;
+            const chunk = chunks[cur];
+            try {
+              await insertFn(chunk);
+              savedCount += chunk.length;
+            } catch (e) {
+              try {
+                await yieldPaint();
+                if (isStale()) break;
+                await insertFn(chunk);
+                savedCount += chunk.length;
+              } catch (e2) {
+                failed.push(cur);
+              }
+            }
+            onProgress(cur + 1, totalChunks);
+            await yieldPaint();
+            if (isStale()) break;
+          }
+        };
+
+        const workers = Array.from({ length: Math.min(CONCURRENCY, totalChunks) }, () => worker());
+        await Promise.all(workers);
+
+        if (isStale()) return;
+
+        if (failed.length) {
+          throw new Error(`Schedule saved ${savedCount}/${rows.length} — tap Generate again to rebuild. Old completed days are kept. Failed chunks: ${failed.map(i=>i+1).join(',')}`);
         }
       }
+
       if (syllabus.length && Object.keys(computedDeadlines).length) {
-        setGenProgress('Saving deadlines…');
-        await new Promise((r) => setTimeout(r, 0));
+        tick('Saving deadlines…');
+        await yieldPaint();
+        if (isStale()) return;
         const deadlineUpdates = Object.entries(computedDeadlines).map(([id, deadline]) => ({
           id,
           patch: { deadline },
         }));
-        // FIX-SCHED2: batch deadline writes — was ~118 sequential, now chunked updateMany
         if (typeof db.updateMany === 'function') {
           await db.updateMany('syllabus', deadlineUpdates);
         } else {
-          // fallback chunked parallel
           const chunkSize = 20;
           for (let i = 0; i < deadlineUpdates.length; i += chunkSize) {
+            if (isStale()) return;
             const chunk = deadlineUpdates.slice(i, i + chunkSize);
             await Promise.all(chunk.map(({ id, patch }) => db.update('syllabus', id, patch)));
           }
         }
       }
-      setGenProgress('Reloading…');
-      await new Promise((r) => setTimeout(r, 0));
+
+      tick('Reloading…');
+      await yieldPaint();
+      if (isStale()) return;
       await load();
       setGenOpen(false);
       setRegenChoiceOpen(false);
       clearWatchdog();
     } catch (e) {
       clearWatchdog();
+      if (isStale()) return;
       setGenError(e?.message || 'Schedule generate nahi ho paya. Dobara try karo.');
     } finally {
       clearWatchdog();
-      setGenBusy(false);
-      setGenProgress('');
+      if (!isStale()) {
+        setGenBusy(false);
+        setGenProgress('');
+        genBusyRef.current = false;
+      }
     }
   };
 

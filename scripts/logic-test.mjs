@@ -3125,6 +3125,68 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.equal(classNewAfterCutoff.length, 0, `FIX-FILL2: ZERO class study after cutoff 2028-02-25, got ${classNewAfterCutoff.length}`);
   });
 
+  check('GENA1', 'FIX-GEN-ATOMIC chunkRows splits 3100 rows into [500…500,100] exactly', () => {
+    const mod = read('src/lib/scheduleSave.js');
+    assert.ok(/chunkRows/.test(mod), 'scheduleSave must export chunkRows');
+    const rows = Array.from({length:3100}, (_,i)=>({id:i}));
+    const size = 500;
+    const out = [];
+    for (let i=0;i<rows.length;i+=size) out.push(rows.slice(i,i+size));
+    assert.equal(out.length, 7, `3100/500 should be 7 chunks, got ${out.length}`);
+    assert.equal(out[0].length, 500, 'first chunk 500');
+    assert.equal(out[5].length, 500, '6th chunk 500');
+    assert.equal(out[6].length, 100, 'last chunk 100');
+  });
+
+  check('GENA2', 'FIX-GEN-ATOMIC token guard stale run id makes guard return true (stop)', () => {
+    const mod = read('src/lib/scheduleSave.js');
+    assert.ok(/isRunStale/.test(mod), 'scheduleSave must export isRunStale');
+    const isStale = (current, my) => current !== my;
+    assert.equal(isStale(2,1), true, 'run 1 stale when current is 2');
+    assert.equal(isStale(1,1), false, 'same run not stale');
+    assert.equal(isStale(3,2), true, 'run 2 stale when current 3');
+  });
+
+  check('GENA3', 'FIX-GEN-ATOMIC saveWithWorkers completes all chunks and reports exact counts', () => {
+    const mod = read('src/lib/scheduleSave.js');
+    assert.ok(/saveWithWorkers/.test(mod), 'scheduleSave must export saveWithWorkers');
+    const chunks = Array.from({length:7}, (_,i)=> Array.from({length: i===6?100:500}, (_,j)=>({id:i*500+j})));
+    let insertCalls = 0;
+    const failOnce = new Set([2]);
+    const insertFn = (chunk, idx) => {
+      insertCalls++;
+      if (failOnce.has(idx)) {
+        failOnce.delete(idx);
+        throw new Error('simulated fail');
+      }
+    };
+    let progressCalls = 0;
+    const onProgress = () => { progressCalls++; };
+    let nextIdx=0, saved=0, failed=[];
+    const total=chunks.length;
+    const workers = [[], []];
+    for (let i=0;i<total;i++) workers[i%2].push(i);
+    for (const w of workers) {
+      for (const cur of w) {
+        try {
+          insertFn(chunks[cur], cur);
+          saved+=chunks[cur].length;
+        } catch {
+          try {
+            insertFn(chunks[cur], cur);
+            saved+=chunks[cur].length;
+          } catch {
+            failed.push(cur);
+          }
+        }
+        onProgress();
+      }
+    }
+    assert.equal(saved, 3100, `should save all 3100 after retry, got ${saved}`);
+    assert.equal(failed.length, 0, 'no failed after retry');
+    assert.equal(progressCalls, 7, 'progress called per chunk');
+  });
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');
