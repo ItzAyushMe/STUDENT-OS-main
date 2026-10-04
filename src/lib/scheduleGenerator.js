@@ -1138,6 +1138,8 @@ export function planSchedule(input) {
     let dupGuard = 0;
     // FIX-FILLDUP: per-day topic counts to cap identical topics at 2
     const dayTopicCounts = new Map();
+    // FIX-PROPORT1: shared same-chapter cap across ALL emitters (mock, timed-practice, etc.)
+    const dayChapterCounts = new Map(); // key: subject|chapter -> count, cap 2 per day
     // FIX-VARIETY D19: track last pick of today for prev-day avoidance
     let lastPickKeyToday = null;
     // FIX-VARIETY D19: track day's type sequence for variety enforcement
@@ -1151,6 +1153,23 @@ export function planSchedule(input) {
       // FIX-FILLDUP: cap same-topic blocks per day at 2 (for all types)
       const cnt = dayTopicCounts.get(topic) || 0;
       if (cnt >= 2) return 'cap'; // over cap, try next
+      // FIX-PROPORT1: shared same-chapter cap 2/day across ALL emitters (mock, timed-practice, buffer, etc.)
+      // Extract chapter from topic: try inside parens at end, else after colon
+      let chapForCapRaw = String(topic || '');
+      const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if (parenMatch) {
+        chapForCapRaw = parenMatch[1].trim();
+      } else {
+        const colonMatch = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+        if (colonMatch) chapForCapRaw = colonMatch[1].trim();
+      }
+      const subjForCap = String(subject || '').trim();
+      // Only apply cap when we have a real subject and chapter (skip generic like Buffer, Mock Test, etc.)
+      if (subjForCap && chapForCapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw) && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(subjForCap)) {
+        const chapterCapKey = `${subjForCap}|${chapForCapRaw}`;
+        const chapCnt = dayChapterCounts.get(chapterCapKey) || 0;
+        if (chapCnt >= 2) return 'cap';
+      }
       const start_time = minutesToTime(cursor);
       const end_time = minutesToTime(cursor + m);
       const key = dedupeKey({ date, start_time, subject: String(subject || ''), topic: String(topic || ''), session_type: type });
@@ -1162,6 +1181,21 @@ export function planSchedule(input) {
       }
       existingKeys.add(key);
       dayTopicCounts.set(topic, cnt + 1);
+      // FIX-PROPORT1: increment chapter cap counter
+      {
+        let chapForCapRaw2 = String(topic || '');
+        const parenMatch2 = chapForCapRaw2.match(/\(\s*([^)]+?)\s*\)\s*$/);
+        if (parenMatch2) chapForCapRaw2 = parenMatch2[1].trim();
+        else {
+          const colonMatch2 = chapForCapRaw2.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+          if (colonMatch2) chapForCapRaw2 = colonMatch2[1].trim();
+        }
+        const subjForCap2 = String(subject || '').trim();
+        if (subjForCap2 && chapForCapRaw2 && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw2) && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(subjForCap2)) {
+          const chapterCapKey2 = `${subjForCap2}|${chapForCapRaw2}`;
+          dayChapterCounts.set(chapterCapKey2, (dayChapterCounts.get(chapterCapKey2) || 0) + 1);
+        }
+      }
       rows.push({
         user_id: userId,
         date,
@@ -1438,6 +1472,15 @@ export function planSchedule(input) {
         }
       }
       // FIX-MAINT D19b: LRU + same-day avoidance for final stretch
+      // FIX-PROPORT1: shared cap 2 per chapter per day across ALL emitters — filter out capped chapters when pool allows
+      if (pool.length) {
+        const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
+        if (notCapped.length >= 2) {
+          pool = notCapped;
+        } else if (notCapped.length === 1 && pool.length >= 3) {
+          pool = notCapped;
+        }
+      }
       if (pool.length >= 3) {
         // same-day avoidance
         const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
@@ -1994,9 +2037,9 @@ export function planSchedule(input) {
       }
     }
 
-    // FIX-MAINT D19b DEFECT1: when class study queue drains early but date<=cutoff, reserve class maintenance BEFORE other tracks overflow
+    // FIX-PROPORT1: remove !isReducedDay gate so class maintenance also fires on light-day Sundays/weekends while window open
     // Guarantee at least 2 class maintenance blocks/day, cap oly/exam pipeline to proportional share
-    if (!isReducedDay && !classOff && date <= cutoff) {
+    if (!classOff && date <= cutoff) {
       const classQueueEmpty = !(queues['class'] && queues['class'].length) || !hasWorkableClass;
       if (classQueueEmpty && studied.some(s=>s.track==='class')) {
         // Check if we have class maintenance possible

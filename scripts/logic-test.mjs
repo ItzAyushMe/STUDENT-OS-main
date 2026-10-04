@@ -3721,6 +3721,95 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/classQueueEmpty/.test(src) || /reserve.*class.*maintenance/.test(src) || /Guarantee.*class maintenance/.test(src), 'MAINT reserve class maintenance must be present');
   });
 
+  // ================= FIX-PROPORT1: remove !isReducedDay gate + shared chapter cap =================
+  check('PROPORT1a', 'FIX-PROPORT1a: class-queue-drained, date≤cutoff: Sundays/weekends each get ≥2 class maintenance blocks (PO device proof Jan 10/16/17/23/24)', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-10-01';
+    // Tiny syllabus that drains early, then many filler days until cutoff
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, weekdayHours: 4, weekendHours: 4, preferredTime:'Morning', daysOff:[], lightDay: 0, weeks:20,
+      userId:'u-proport1a', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    const cutoff = '2027-02-25';
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date]=[];
+      byDate[r.date].push(r);
+    }
+    // Check Sundays and Saturdays (weekends) between today and cutoff
+    let weekendDaysChecked = 0;
+    let weekendDaysWith2Class = 0;
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      if (date < today || date > cutoff) continue;
+      const d = new Date(date);
+      const day = d.getUTCDay(); // 0=Sun, 6=Sat
+      const isWeekend = day===0 || day===6;
+      // lightDay 0 = Sunday is light day per test, but also check weekends
+      if (!isWeekend) continue;
+      // Only count days after queue drained (after first week)
+      if (date < '2026-10-10') continue;
+      weekendDaysChecked++;
+      const classMaint = dayRows.filter(r=>r.track==='class' && r.session_type!=='study');
+      if (classMaint.length >= 2) weekendDaysWith2Class++;
+    }
+    assert.ok(weekendDaysChecked>0, `PROPORT1a: expected weekend days between today and cutoff, got ${weekendDaysChecked}`);
+    const ratio = weekendDaysChecked ? weekendDaysWith2Class/weekendDaysChecked : 0;
+    assert.ok(ratio >= 0.8, `PROPORT1a: Sundays/weekends should have ≥2 class maint on ≥80% days after drain, got ${weekendDaysWith2Class}/${weekendDaysChecked}=${ratio.toFixed(2)} (PO bug Jan 10/16/17/23/24 had zero)`);
+    // Also check that reservation works on reduced days (50% quota) - should still have class blocks
+    const sundayRows = p.filter(r=>r.date==='2026-10-04'); // 2026-10-04 is Sunday
+    if (sundayRows.length) {
+      const classOnSun = sundayRows.filter(r=>r.track==='class');
+      assert.ok(classOnSun.length >= 2, `PROPORT1a: Sunday 2026-10-04 should have ≥2 class blocks (50% quota proportional), got ${classOnSun.length}`);
+    }
+  });
+
+  check('PROPORT1b', 'FIX-PROPORT1b: worst-case fixture no chapter >2 blocks/day through ANY emitter (mock+practice+revision)', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-10-01';
+    // One chapter repeated many times to trigger 5 blocks of same chapter on Sunday (PO device proof)
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, weekdayHours: 6, weekendHours: 6, preferredTime:'Morning', daysOff:[], lightDay: 0, weeks:4,
+      userId:'u-proport1b', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    // Group by date and check chapter counts across ALL emitters (mock, practice, revision, quiz, study)
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date]=[];
+      byDate[r.date].push(r);
+    }
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      const chapCount = {};
+      for (const r of dayRows) {
+        if (/Backlog|Buffer/.test(r.topic)) continue;
+        // Extract chapter: try parens, else after colon
+        let chap = String(r.topic);
+        const paren = chap.match(/\(\s*([^)]+?)\s*\)\s*$/);
+        if (paren) chap = paren[1].trim();
+        else {
+          const colon = chap.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+          if (colon) chap = colon[1].trim();
+        }
+        const key = `${r.subject}|${chap}`;
+        chapCount[key] = (chapCount[key]||0)+1;
+      }
+      for (const [k,cnt] of Object.entries(chapCount)) {
+        assert.ok(cnt <= 2, `PROPORT1b: date ${date} chapter ${k} appears ${cnt} times >2 across ALL emitters (mock+practice+revision) — must be ≤2 (PO Sunday had 5)`);
+      }
+    }
+  });
+
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');
