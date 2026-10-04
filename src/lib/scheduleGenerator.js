@@ -658,9 +658,14 @@ export function planSchedule(input) {
   const trackIndex = {};
   prio.order.forEach((t, i) => { trackIndex[t] = i; });
 
+  // FIX-WEEKSPLIT D17: weekday/weekend split, migration both default to daily_study_hours
   const dailyHours = Math.max(0, num(opts.dailyHours, 3));
+  const weekdayHours = Math.max(0, num(opts.weekdayHours ?? opts.dailyHours, 3));
+  const weekendHours = Math.max(0, num(opts.weekendHours ?? opts.dailyHours, 3));
   const capacityMin = planCapacityMinutes(dailyHours);
-  const noCapacity = capacityMin < MIN_BLOCK_MIN;
+  const weekdayCapacityMin = planCapacityMinutes(weekdayHours);
+  const weekendCapacityMin = planCapacityMinutes(weekendHours);
+  const noCapacity = weekdayCapacityMin < MIN_BLOCK_MIN && weekendCapacityMin < MIN_BLOCK_MIN;
 
   const examDate = opts.examDate || null;
   const olympiadDate = opts.olympiadDate || null;
@@ -745,8 +750,17 @@ export function planSchedule(input) {
   // FIX-STUDY-FIRST D16 + FIX-MULT D15: compute shortage = unplacedChapters>0 per plan (total required > available)
   // D15: with emphasis not scaling hours, required drops, so threshold must stay 0.85, but only when examDate present
   // to avoid breaking priority tests that have examDate null and ratio 1.68 (tight capacity)
+  // D17: weekly blend for available
   const totalRequiredMin = items.reduce((a, it) => a + (it.remainingMinutes || 0), 0);
-  const totalAvailableMin = totalDays * capacityMin;
+  // D17: compute totalAvailableMin as blend of weekday/weekend across horizon
+  let totalAvailableMinBlend = 0;
+  for (let d = 0; d < totalDays; d++) {
+    const dDate = dateStr(dayjs(today).add(d, 'day'));
+    const wd = (dayjs(dDate).day() + 6) % 7; // 0=Mon
+    const isWeekend = wd === 5 || wd === 6;
+    totalAvailableMinBlend += isWeekend ? weekendCapacityMin : weekdayCapacityMin;
+  }
+  const totalAvailableMin = totalAvailableMinBlend || totalDays * capacityMin;
   const rawShortage = totalRequiredMin > totalAvailableMin * 0.85;
   const shortage = rawShortage && !!examDate; // only when exam-driven, so priority tests (examDate null) not flagged
 
@@ -904,11 +918,21 @@ export function planSchedule(input) {
   const hasLightDay = opts.lightDay != null && Number.isFinite(Number(opts.lightDay));
   const lightDayIdx = hasLightDay ? Number(opts.lightDay) : 6;
   const LIGHT_DAY_FACTOR = 0.5;
-  const dayCapacity = (date, isDayOff, isLightDay) => {
+  // FIX-WEEKSPLIT D17: dayCapacity uses day-type value (Sat+Sun weekend), days off =0, light day =50% of own day-type
+  const dayCapacity = (date, isDayOff, isLightDay, weekdayIdx) => {
     if (noCapacity) return 0;
-    let base = capacityMin;
-    // FIX-FILL: days_off → 50% light day revision/mock/practice only, never free
-    if (isDayOff || (hasLightDay && isLightDay)) base = Math.round(capacityMin * LIGHT_DAY_FACTOR);
+    // days off stay 0
+    if (isDayOff) return 0;
+    // determine base by day-type
+    let wd = weekdayIdx;
+    if (wd == null) {
+      try { wd = (dayjs(date).day() + 6) % 7; } catch { wd = 0; }
+    }
+    const isWeekend = wd === 5 || wd === 6;
+    let base = isWeekend ? weekendCapacityMin : weekdayCapacityMin;
+    // fallback to legacy capacityMin if both new are 0 but legacy has value (migration)
+    if (base === 0 && capacityMin > 0) base = capacityMin;
+    if (hasLightDay && isLightDay) base = Math.round(base * LIGHT_DAY_FACTOR);
     return Math.max(0, base - num(loadByDate[date], 0));
   };
 
@@ -1038,7 +1062,7 @@ export function planSchedule(input) {
       || (isDateStr(it.deadline) && dayjs(it.deadline).diff(dayjs(date), 'day') <= URGENT_LEAD_DAYS);
 
     let cursor = startM;
-    let capacity = dayCapacity(date, isDayOff, isLightDay);
+    let capacity = dayCapacity(date, isDayOff, isLightDay, weekday);
     const dayStart = capacity;
     let blocks = 0;
     let dupGuard = 0;
@@ -1725,10 +1749,13 @@ export function planSchedule(input) {
   const requiredMinutes = items.reduce((a, it) => a + it.plannedMinutes + it.remainingMinutes, 0);
   const plannedMinutes = items.reduce((a, it) => a + it.plannedMinutes, 0);
   const totalRequiredHours = Math.round(requiredMinutes / 60);
-  const totalAvailableHours = Math.round(totalDays * dailyHours);
+  // D17: weekly blend math for coverage
+  const totalAvailableHoursBlend = Math.round(totalAvailableMinBlend / 60);
+  const totalAvailableHours = totalAvailableHoursBlend || Math.round(totalDays * dailyHours);
+  const weeklyAvgHours = totalDays > 0 ? round1(totalAvailableHours / totalDays) : dailyHours;
   const requiredPerDay = totalDays > 0 ? round1(requiredMinutes / 60 / totalDays) : 0;
   const overdueCount = items.filter((it) => it.overdue).length;
-  const overloaded = unscheduled.length > 0 || partial.length > 0 || tooLate.length > 0 || requiredPerDay > dailyHours;
+  const overloaded = unscheduled.length > 0 || partial.length > 0 || tooLate.length > 0 || requiredPerDay > weeklyAvgHours;
   const shortfallHours = Math.max(0, round1((requiredMinutes - plannedMinutes) / 60));
   // FIX-S S2: the nearest exam run-up that overlaps this plan window (else null)
   const horizonEnd = dateStr(horizon);
@@ -1738,9 +1765,9 @@ export function planSchedule(input) {
 
   let coverageWarning = null;
   if (noCapacity) {
-    coverageWarning = `⚠️ No study time available (${dailyHours} hrs/day) — nothing was scheduled. Set your real daily hours in Profile; no time was invented.`;
-  } else if (requiredPerDay > dailyHours) {
-    coverageWarning = `⚠️ Need ${requiredPerDay.toFixed(1)} hrs/day but you have ${dailyHours} hrs/day — ${(requiredPerDay - dailyHours).toFixed(1)} hrs short. Increase daily hours or extend exam date.`;
+    coverageWarning = `⚠️ No study time available (weekday ${weekdayHours}h / weekend ${weekendHours}h, avg ${weeklyAvgHours}h) — nothing was scheduled. Set your real hours in Profile; no time was invented. [D17]`;
+  } else if (requiredPerDay > weeklyAvgHours) {
+    coverageWarning = `⚠️ Need ${requiredPerDay.toFixed(1)} hrs/day but you have ${weeklyAvgHours} hrs/day avg (weekday ${weekdayHours}h / weekend ${weekendHours}h) — ${(requiredPerDay - weeklyAvgHours).toFixed(1)} hrs short. Increase hours or extend exam date. [D17]`;
   }
   if (overloaded && (unscheduled.length || partial.length)) {
     const extra = `${unscheduled.length} chapter(s) got no time and ${partial.length} could not be finished in this plan — listed, not hidden.`;
@@ -1825,6 +1852,10 @@ export function planSchedule(input) {
     totalRequiredHours,
     totalAvailableHours,
     requiredPerDay,
+    weekdayHours,
+    weekendHours,
+    weeklyAvgHours,
+    dailyHours, // legacy for backward compat
     coverageWarning,
     // FIX-H honesty fields
     plannedMinutes,

@@ -24,7 +24,7 @@ import { chunkRows, isRunStale, saveWithWorkers } from '../../lib/scheduleSave';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
-import { SESSION_TYPES, TRACK_PRIORITY, arcOf, effectiveDailyHours } from '../../config/constants';
+import { SESSION_TYPES, TRACK_PRIORITY, arcOf, effectiveDailyHours, effectiveWeekdayHours, effectiveWeekendHours, effectiveWeeklyAverageHours } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { dayjs, todayStr, dateStr, subjectColor, fmtDuration, mondayOf, nowIso } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
@@ -344,6 +344,8 @@ export function ScheduleScreen({ navigation, route }) {
         class_level: profile.class_level || null,
         priorities: profile.priorities || null,
         dailyHours: effectiveDailyHours(profile),
+        weekdayHours: effectiveWeekdayHours(profile),
+        weekendHours: effectiveWeekendHours(profile),
         preferredTime: profile.preferred_time,
         daysOff: profile.days_off || [],
         lightDay: settings.lightDay ?? 6,
@@ -739,7 +741,7 @@ export function ScheduleScreen({ navigation, route }) {
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
-                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15)
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Weekday {coverage.weekdayHours ?? effectiveWeekdayHours(profile)}h / Weekend {coverage.weekendHours ?? effectiveWeekendHours(profile)}h · Avg {coverage.weeklyAvgHours ?? effectiveWeeklyAverageHours(profile)}h · Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15) · Blend [D17]
               </Text>
             ) : null}
           </Card>
@@ -799,11 +801,11 @@ export function ScheduleScreen({ navigation, route }) {
           Ye engine tumhare syllabus ke weightage + estimated hours (× weightage factor) + available time se ek day-by-day plan banayegi —
           revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15). Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
         </Text>
-        <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
+        <InfoRow label="Study hours" value={`Weekday ${effectiveWeekdayHours(profile)}h / Weekend ${effectiveWeekendHours(profile)}h · Avg ${effectiveWeeklyAverageHours(profile)}h/day · Blend [D17]`} />
         <InfoRow label="Emphasis" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — affects order, not size (D15)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
-        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (50% light — revision/mock/practice only)` : 'None'} />
-        <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only`} />
+        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week = 0 hrs [D17]` : 'None (Sat+Sun = weekend)'} />
+        <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% of its own day-type [D17]`} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
         <InfoRow label="Olympiad" value={profile.olympiad && profile.olympiad !== 'None' ? `${profile.olympiad}${profile.olympiad_date ? ` · ${profile.olympiad_date}` : ''}` : 'None'} />
         <InfoRow

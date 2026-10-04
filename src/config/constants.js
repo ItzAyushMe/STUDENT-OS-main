@@ -130,6 +130,38 @@ export function effectiveDailyHours(profile) {
   return Math.min(14, Math.round(base * arc.hoursBoost * 10) / 10);
 }
 
+// FIX-WEEKSPLIT D17: weekday/weekend split, migration both default to daily_study_hours
+function effectiveHoursBase(raw, fallback) {
+  const parsed = Number(raw);
+  if (raw === null || raw === undefined || raw === '' || !Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(0, parsed);
+}
+export function effectiveWeekdayHours(profile) {
+  const fallback = effectiveDailyHours(profile); // migration uses daily
+  const raw = profile?.weekday_study_hours;
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const base = effectiveHoursBase(raw, fallback);
+  const arc = arcOf(profile);
+  if (!arc) return base;
+  return Math.min(14, Math.round(base * arc.hoursBoost * 10) / 10);
+}
+export function effectiveWeekendHours(profile) {
+  const fallback = effectiveDailyHours(profile); // migration uses daily
+  const raw = profile?.weekend_study_hours;
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const base = effectiveHoursBase(raw, fallback);
+  const arc = arcOf(profile);
+  if (!arc) return base;
+  return Math.min(14, Math.round(base * arc.hoursBoost * 10) / 10);
+}
+export function effectiveWeeklyAverageHours(profile) {
+  const wd = effectiveWeekdayHours(profile);
+  const we = effectiveWeekendHours(profile);
+  return Math.round(((wd * 5 + we * 2) / 7) * 10) / 10;
+}
+
 export const CLOUD_ONLY = ['1', 'true', 'yes'].includes(
   String(process.env.EXPO_PUBLIC_CLOUD_ONLY || '').toLowerCase()
 );

@@ -46,6 +46,9 @@ export function SettingsScreen({ navigation }) {
   const [examDate, setExamDate] = useState(profile?.exam_date || '');
   const [olympiadDate, setOlympiadDate] = useState(profile?.olympiad_date || '');
   const [dailyHours, setDailyHours] = useState(Number(profile?.daily_study_hours) || 3);
+  // FIX-WEEKSPLIT D17: weekday/weekend split, migration both default to daily_study_hours
+  const [weekdayHours, setWeekdayHours] = useState(Number(profile?.weekday_study_hours ?? profile?.daily_study_hours) || 3);
+  const [weekendHours, setWeekendHours] = useState(Number(profile?.weekend_study_hours ?? profile?.daily_study_hours) || 3);
   const [classSessionEnd, setClassSessionEnd] = useState(settings.classSessionEnd || '02-25'); // FIX-SCHED3 D7
   const [schoolExams, setSchoolExams] = useState(
     Array.isArray(profile?.school_exams)
@@ -557,13 +560,21 @@ export function SettingsScreen({ navigation }) {
       <SectionTitle mode="light">🎯 Exam & Study Setup</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
         <View style={{ marginBottom: 12 }}>
-          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Daily study hours</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Pressable onPress={() => setDailyHours(h => Math.max(0.5, Math.round((h-0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
-            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{dailyHours} hrs</Text>
-            <Pressable onPress={() => setDailyHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 6 }}>Study hours — weekday / weekend split [D17]</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#334155', width: 70 }}>Weekday</Text>
+            <Pressable onPress={() => setWeekdayHours(h => Math.max(0.5, Math.round((h-0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{weekdayHours} hrs</Text>
+            <Pressable onPress={() => setWeekdayHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
           </View>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#334155', width: 70 }}>Weekend</Text>
+            <Pressable onPress={() => setWeekendHours(h => Math.max(0.5, Math.round((h-0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>−</Text></Pressable>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{weekendHours} hrs</Text>
+            <Pressable onPress={() => setWeekendHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
+          </View>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — Mon-Fri = weekday, Sat-Sun = weekend (default). Days off = 0 hrs. Light day = 50% of its own day-type [D17]. Migration: both default to daily_study_hours {dailyHours}h.</Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 4 }}>Weekly avg: {(((weekdayHours*5 + weekendHours*2)/7).toFixed(1))} hrs/day · Blend math for coverage [D17]</Text>
         </View>
         {/* FIX-MULT D15: per-track EMPHASIS multipliers — order, not size (PO-locked 2026-10-04) */}
         <View style={{ marginBottom: 12 }}>
@@ -811,6 +822,8 @@ export function SettingsScreen({ navigation }) {
                 exam_date: examDate || null,
                 olympiad_date: olympiadDate || null,
                 daily_study_hours: dailyHours,
+                weekday_study_hours: weekdayHours,
+                weekend_study_hours: weekendHours,
                 school_exams: clean,
                 priorities: normalizePriorities(priorities),
               });
