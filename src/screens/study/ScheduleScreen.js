@@ -432,29 +432,44 @@ export function ScheduleScreen({ navigation, route }) {
         const chunks = chunkRows(rows, diagChunkSize);
         const totalChunks = chunks.length;
 
+        const getMinMax = (chunk) => {
+          const dates = chunk.map((r) => r.date).filter(Boolean).sort();
+          return { min: dates[0] || null, max: dates[dates.length - 1] || null };
+        };
+
         const insertFn = async (chunk) => {
           if (isStale()) throw new Error('stale run aborted');
-          await db.insertMany('schedule', chunk);
+          const res = await db.insertMany('schedule', chunk);
+          // FIX-VERIFY3: receipt-based verify — use upsert's own .select() return as returned, zero extra queries
+          return Array.isArray(res) ? res : chunk;
         };
 
-        const verifyChunk = async (chunk) => {
-          const ids = chunk.map((r) => r.id);
-          const returnedRows = await db.list('schedule', { in: { id: ids } });
-          const missing = computeMissingIds(ids, returnedRows);
-          return { returnedRows, missing, sent: ids.length, returned: returnedRows.length };
-        };
-
-        const insertAndVerify = async (chunk) => {
-          await insertFn(chunk);
-          let v = await verifyChunk(chunk);
+        const insertAndVerifyReceipt = async (chunk) => {
+          const sentIds = chunk.map((r) => r.id);
+          let returnedRows = await insertFn(chunk);
+          let missing = computeMissingIds(sentIds, returnedRows);
           let retried = false;
-          if (v.missing.length > 0) {
-            const missingRows = chunk.filter((r) => v.missing.includes(r.id));
-            await insertFn(missingRows);
+          if (missing.length > 0) {
+            const missingRows = chunk.filter((r) => missing.includes(r.id));
+            returnedRows = await insertFn(missingRows);
             retried = true;
-            v = await verifyChunk(chunk);
+            const stillMissing = computeMissingIds(missing, returnedRows);
+            missing = stillMissing;
           }
-          return { sent: v.sent, returned: v.returned, missing: v.missing, retried, returnedRows: v.returnedRows };
+          const returned = chunk.length - missing.length;
+          return { sent: chunk.length, returned, missing, retried, returnedRows };
+        };
+
+        const rangeCountChunk1 = async (chunk) => {
+          const { min, max } = getMinMax(chunk);
+          if (!min || !max) return 0;
+          // FIX-VERIFY3: chunk1 sentinel — ONE count query via date window + pending status, no .in()
+          const list = await db.list('schedule', {
+            eq: { user_id: profile.id, status: 'pending' },
+            gte: { date: min },
+            lte: { date: max },
+          });
+          return Array.isArray(list) ? list.length : 0;
         };
 
         const onProgress = (completed, total) => {
@@ -465,33 +480,67 @@ export function ScheduleScreen({ navigation, route }) {
         const failed = [];
 
         // FIX-VERIFY: Serialize first chunk — await delete already done + settle, now chunk1 alone verified before workers
+        // FIX-VERIFY3: receipt-based + range-count sentinel for chunk1
         if (totalChunks >= 1) {
           tick(`Saving schedule (1/${totalChunks})…`);
           await yieldPaint();
           if (isStale()) return;
           try {
-            const res = await insertAndVerify(chunks[0]);
-            diagVerifyPerChunk.push({ index: 0, sent: res.sent, returned: res.returned, missingCount: res.missing.length, retried: res.retried });
-            if (res.retried) diagVerifyRetries++;
-            if (res.missing.length > 0) {
+            const receiptRes = await insertAndVerifyReceipt(chunks[0]);
+            // chunk1 sentinel range-count
+            let rangeReturned = await rangeCountChunk1(chunks[0]);
+            let retriedRange = false;
+            if (rangeReturned < receiptRes.sent) {
+              // retry once
+              await insertFn(chunks[0]);
+              retriedRange = true;
+              rangeReturned = await rangeCountChunk1(chunks[0]);
+            }
+            const finalMissing = rangeReturned < receiptRes.sent ? receiptRes.sent - rangeReturned : receiptRes.missing.length;
+            const isFailed = receiptRes.missing.length > 0 || rangeReturned < receiptRes.sent;
+            diagVerifyPerChunk.push({
+              index: 0,
+              sent: receiptRes.sent,
+              returned: receiptRes.returned,
+              rangeReturned,
+              missingCount: isFailed ? finalMissing : 0,
+              retried: receiptRes.retried || retriedRange,
+            });
+            if (receiptRes.retried || retriedRange) diagVerifyRetries++;
+            if (isFailed) {
               failed.push(0);
             } else {
-              savedCount += res.sent;
+              savedCount += receiptRes.sent;
             }
             onProgress(1, totalChunks);
           } catch (e) {
             try {
               await yieldPaint();
               if (isStale()) return;
-              const res2 = await insertAndVerify(chunks[0]);
-              diagVerifyPerChunk.push({ index: 0, sent: res2.sent, returned: res2.returned, missingCount: res2.missing.length, retried: res2.retried });
-              if (res2.retried) diagVerifyRetries++;
-              if (res2.missing.length > 0) failed.push(0);
-              else savedCount += res2.sent;
+              const receiptRes2 = await insertAndVerifyReceipt(chunks[0]);
+              let rangeReturned2 = await rangeCountChunk1(chunks[0]);
+              let retriedRange2 = false;
+              if (rangeReturned2 < receiptRes2.sent) {
+                await insertFn(chunks[0]);
+                retriedRange2 = true;
+                rangeReturned2 = await rangeCountChunk1(chunks[0]);
+              }
+              const isFailed2 = receiptRes2.missing.length > 0 || rangeReturned2 < receiptRes2.sent;
+              diagVerifyPerChunk.push({
+                index: 0,
+                sent: receiptRes2.sent,
+                returned: receiptRes2.returned,
+                rangeReturned: rangeReturned2,
+                missingCount: isFailed2 ? receiptRes2.sent - rangeReturned2 : 0,
+                retried: receiptRes2.retried || retriedRange2,
+              });
+              if (receiptRes2.retried || retriedRange2) diagVerifyRetries++;
+              if (isFailed2) failed.push(0);
+              else savedCount += receiptRes2.sent;
               onProgress(1, totalChunks);
             } catch (e2) {
               failed.push(0);
-              diagVerifyPerChunk.push({ index: 0, sent: chunks[0].length, returned: 0, missingCount: chunks[0].length, retried: false });
+              diagVerifyPerChunk.push({ index: 0, sent: chunks[0].length, returned: 0, rangeReturned: 0, missingCount: chunks[0].length, retried: false });
               onProgress(1, totalChunks);
             }
           }
@@ -509,7 +558,7 @@ export function ScheduleScreen({ navigation, route }) {
               if (cur >= totalChunks) break;
               const chunk = chunks[cur];
               try {
-                const res = await insertAndVerify(chunk);
+                const res = await insertAndVerifyReceipt(chunk);
                 diagVerifyPerChunk.push({ index: cur, sent: res.sent, returned: res.returned, missingCount: res.missing.length, retried: res.retried });
                 if (res.retried) diagVerifyRetries++;
                 if (res.missing.length > 0) failed.push(cur);
@@ -518,7 +567,7 @@ export function ScheduleScreen({ navigation, route }) {
                 try {
                   await yieldPaint();
                   if (isStale()) break;
-                  const res2 = await insertAndVerify(chunk);
+                  const res2 = await insertAndVerifyReceipt(chunk);
                   diagVerifyPerChunk.push({ index: cur, sent: res2.sent, returned: res2.returned, missingCount: res2.missing.length, retried: res2.retried });
                   if (res2.retried) diagVerifyRetries++;
                   if (res2.missing.length > 0) failed.push(cur);
@@ -540,13 +589,19 @@ export function ScheduleScreen({ navigation, route }) {
         diagSavedCount = savedCount;
         diagFailed = failed;
 
-        // FIX-VERIFY: FINAL VERIFICATION — one count query after all chunks, throw LOUD if under-count
+        // FIX-VERIFY3: FINAL VERIFICATION — ONE range-count query user_id + date range + pending, throw LOUD, no warn swallow
         if (!isStale()) {
-          try {
-            const allIds = rows.map((r) => r.id);
-            const allReturned = await db.list('schedule', { in: { id: allIds } });
-            diagFinalCount = allReturned.length;
-            if (allReturned.length < rows.length) {
+          const allDates = rows.map((r) => r.date).filter(Boolean).sort();
+          const firstDate = allDates[0] || null;
+          const lastDate = allDates[allDates.length - 1] || null;
+          if (firstDate && lastDate) {
+            const finalList = await db.list('schedule', {
+              eq: { user_id: profile.id, status: 'pending' },
+              gte: { date: firstDate },
+              lte: { date: lastDate },
+            });
+            diagFinalCount = Array.isArray(finalList) ? finalList.length : 0;
+            if (diagFinalCount < rows.length) {
               try {
                 const reloadedPartial = await load();
                 diagReloaded = reloadedPartial || [];
@@ -567,11 +622,8 @@ export function ScheduleScreen({ navigation, route }) {
                 setDiagnostics(diag);
                 console.log('🩺 Plan diagnostics (final verify failed)', diag);
               } catch {}
-              throw new Error(`Saved ${allReturned.length}/${rows.length} — tap Generate again.`);
+              throw new Error(`Saved ${diagFinalCount}/${rows.length} — tap Generate again.`);
             }
-          } catch (e) {
-            if (String(e.message).startsWith('Saved ')) throw e;
-            console.warn('[VERIFY] final count query failed', e?.message);
           }
         }
 

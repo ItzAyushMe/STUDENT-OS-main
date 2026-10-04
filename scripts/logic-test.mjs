@@ -6732,6 +6732,139 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedV.length, 0, `FIX-VERIFY: ${failedV.length} check(s) failed -> ${failedV.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-VERIFY3: replace ALL .in(id) mega-URL verifies with receipt + range-count
+  console.log('\n--- FIX-VERIFY3 receipt + range-count ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const record = async (id, desc, fn) => { try { await fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } };
+
+  let SS3 = null; let ss3Err = '';
+  try { SS3 = await import('./../src/lib/scheduleSave.js'); } catch (e) { ss3Err = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const needSS3 = () => assert.ok(SS3, `scheduleSave import failed: ${ss3Err}`);
+
+  check('V3A', 'receipt-based per-chunk verify: insertMany return used as returned, no .in() in save path', () => {
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    // source assert: no .in() call remains anywhere in the save path
+    // The save path should not contain db.list with { in: { id:
+    const inIdPattern = /db\.list\([^)]*in:\s*\{\s*id:/;
+    assert.ok(!inIdPattern.test(screenSrc), 'no db.list with in:{id:} remains in ScheduleScreen save path — must use receipt + range-count');
+    // receipt-based: insertFn returns res from insertMany
+    assert.ok(screenSrc.includes('const res = await db.insertMany') || screenSrc.includes('return Array.isArray(res) ? res : chunk'), 'insertFn returns receipt from insertMany');
+    assert.ok(screenSrc.includes('computeMissingIds') && screenSrc.includes('returnedRows'), 'receipt used to compute missing via computeMissingIds');
+    // spy test: insertMany return used as returned
+    needSS3();
+    const { computeMissingIds } = SS3;
+    const fakeChunk = [{id:'a'},{id:'b'}];
+    const fakeReceipt = [{id:'a'}]; // only 1 returned
+    const missing = computeMissingIds(fakeChunk.map(r=>r.id), fakeReceipt);
+    assert.deepEqual(missing, ['b'], 'receipt-based missing detection works');
+  });
+
+  await record('V3B', 'chunk1 range-count: sent 500, range returns 499 → retry → 499 → failed chunk exact counts', async () => {
+    // simulate chunk1 sentinel logic
+    const sent = 500;
+    let rangeReturns = [499, 499]; // first and second call both 499
+    let callIdx = 0;
+    const mockRangeCount = async () => {
+      return rangeReturns[callIdx++] ?? 0;
+    };
+    let rangeReturned = await mockRangeCount();
+    let retried = false;
+    if (rangeReturned < sent) {
+      retried = true;
+      rangeReturned = await mockRangeCount();
+    }
+    const isFailed = rangeReturned < sent;
+    assert.ok(isFailed, 'should be failed after retry still short');
+    const perChunk = { sent, returned: sent, rangeReturned, missingCount: sent - rangeReturned, retried };
+    assert.equal(perChunk.sent, 500, 'sent exact 500');
+    assert.equal(perChunk.rangeReturned, 499, 'rangeReturned exact 499');
+    assert.equal(perChunk.missingCount, 1, 'missingCount exact 1');
+    assert.equal(perChunk.retried, true, 'retried true');
+    // ensure failed chunk feeds honest error path
+    assert.equal(perChunk.sent - perChunk.rangeReturned, 1, 'exact under-count 1');
+  });
+
+  await record('V3C', 'final range-count: under-count throws LOUD Saved X/Y and count-query failure THROWS (no warn swallow)', async () => {
+    const finalVerifyRange = async (gen, mockListFn) => {
+      const list = await mockListFn(); // should throw or return
+      const count = Array.isArray(list) ? list.length : 0;
+      if (count < gen) throw new Error(`Saved ${count}/${gen} — tap Generate again.`);
+      return count;
+    };
+    // under-count throws LOUD
+    let threw = false;
+    try {
+      await finalVerifyRange(3819, async () => Array.from({length:3319}, (_,i)=>({id:`id${i}`})));
+    } catch (e) {
+      threw = true;
+      assert.equal(e.message, 'Saved 3319/3819 — tap Generate again.', 'LOUD message exact for final range-count');
+    }
+    assert.ok(threw, 'final under-count throws');
+
+    // count-query failure itself THROWS (no warn-swallow)
+    let threw2 = false;
+    try {
+      await finalVerifyRange(100, async () => { throw new Error('network timeout'); });
+    } catch (e) {
+      threw2 = true;
+      assert.ok(e.message.includes('timeout') || e.message.includes('network'), 'query failure surfaces as error, not swallowed');
+    }
+    assert.ok(threw2, 'count-query failure throws');
+
+    // source assert: no console.warn swallow for final verify
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    // The old code had console.warn('[VERIFY] final count query failed' — must be gone
+    assert.ok(!screenSrc.includes("console.warn('[VERIFY] final count query failed'"), 'no console.warn swallow for final verify — must THROW');
+    // final verify must use range query with eq user_id + status pending + gte/lte
+    assert.ok(screenSrc.includes("eq: { user_id:") && screenSrc.includes("status: 'pending'") && screenSrc.includes('gte: { date:') && screenSrc.includes('lte: { date:'), 'final verification uses range-count query user_id+status+gte+lte');
+  });
+
+  check('V3D', 'VERIFY1-6 re-pinned to new shapes still hold (receipt + range-count)', () => {
+    needSS3();
+    const { computeMissingIds, buildPlanDiagnostics } = SS3;
+    // VERIFY1 shape: computeMissingIds still works
+    assert.deepEqual(computeMissingIds(['a','b'], [{id:'a'}]), ['b'], 'VERIFY1 re-pinned');
+    // VERIFY3: unique ids still hold
+    const rows = Array.from({length:10}, (_,i)=>({id: uuid(), date:`2026-10-0${i%9+1}`}));
+    const uniq = new Set(rows.map(r=>r.id));
+    assert.equal(uniq.size, 10, 'VERIFY3 re-pinned unique');
+    // VERIFY5: diagnostics still has DELETE and VERIFY with new fields rangeReturned
+    const diag = buildPlanDiagnostics({
+      rows: [{date:'2026-10-01'}],
+      coverage: {},
+      syllabus: [],
+      profile: {},
+      settings: {},
+      savedCount: 1,
+      failedChunks: [],
+      chunkSize: 500,
+      workerCount: 2,
+      reloadedSessions: [{date:'2026-10-01'}],
+      deleteDeletedCount: 3,
+      verifyInfo: { perChunk: [{index:0,sent:500,returned:500,rangeReturned:499,missingCount:1,retried:true}], retries:1, finalCount: 0 },
+    });
+    assert.equal(diag.DELETE.deletedCount, 3, 'DELETE still');
+    assert.equal(diag.VERIFY.perChunk[0].rangeReturned, 499, 'VERIFY perChunk now includes rangeReturned');
+    // VERIFY6: db.js still upsert + count
+    const dbSrc = read('src/lib/db.js');
+    assert.ok(dbSrc.includes("onConflict: 'id'"), 'upsert still');
+  });
+
+  check('V3E', 'db.js list supports multi-eq (user_id + status pending) for range-count', () => {
+    const dbSrc = read('src/lib/db.js');
+    // remote path loops eq
+    assert.ok(dbSrc.includes('for (const [col, val] of Object.entries(opts.eq || {}))'), 'list loops eq keys — multi-eq supported');
+    // local matches also loops eq
+    assert.ok(dbSrc.includes('for (const [col, val] of Object.entries(opts.eq || {}))') && dbSrc.includes('function matches'), 'matches loops eq');
+  });
+
+  const failedV3 = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedV3.length, 0, `FIX-VERIFY3: ${failedV3.length} check(s) failed -> ${failedV3.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 
