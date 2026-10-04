@@ -913,8 +913,8 @@ export function ScheduleScreen({ navigation, route }) {
         <InfoRow label="Study hours" value={`Weekday ${effectiveWeekdayHours(profile)}h / Weekend ${effectiveWeekendHours(profile)}h · Avg ${effectiveWeeklyAverageHours(profile)}h/day · Blend [D17]`} />
         <InfoRow label="Emphasis" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — affects order, not size (D15)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
-        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week = 0 hrs [D17]` : 'None (Sat+Sun = weekend)'} />
-        <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% of its own day-type [D17]`} />
+        <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week = 50% quota — revision/mock/practice only, never free [D20b]` : 'None (Sat+Sun = weekend)'} />
+        <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% of its own day-type [D17/D20b]`} />
         <InfoRow label="Exam date" value={profile.exam_date || 'Not set'} />
         <InfoRow label="Olympiad" value={profile.olympiad && profile.olympiad !== 'None' ? `${profile.olympiad}${profile.olympiad_date ? ` · ${profile.olympiad_date}` : ''}` : 'None'} />
         <InfoRow

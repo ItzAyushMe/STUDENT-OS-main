@@ -573,7 +573,7 @@ export function SettingsScreen({ navigation }) {
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: '#1E293B', marginHorizontal: 14, minWidth: 50, textAlign: 'center' }}>{weekendHours} hrs</Text>
             <Pressable onPress={() => setWeekendHours(h => Math.min(14, Math.round((h+0.5)*10)/10))} style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12 }}><Text style={{ fontSize: 18, color: '#334155' }}>+</Text></Pressable>
           </View>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — Mon-Fri = weekday, Sat-Sun = weekend (default). Days off = 0 hrs. Light day = 50% of its own day-type [D17]. Migration: both default to daily_study_hours {dailyHours}h.</Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — Mon-Fri = weekday, Sat-Sun = weekend (default). Days off = 50% quota — revision/mock/practice only, never free [D20b]. Light day = 50% of its own day-type [D17/D20b]. Migration: both default to daily_study_hours {dailyHours}h.</Text>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 4 }}>Weekly avg: {(((weekdayHours*5 + weekendHours*2)/7).toFixed(1))} hrs/day · Blend math for coverage [D17]</Text>
         </View>
         {/* FIX-MULT D15: per-track EMPHASIS multipliers — order, not size (PO-locked 2026-10-04) */}
@@ -668,7 +668,7 @@ export function SettingsScreen({ navigation }) {
         {/* FIX-SCHED9 D8: Light day weekday picker, default Sunday, independent of days_off */}
         <View style={{ marginBottom: 12, backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 10, padding: 10 }}>
           <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#166534', marginBottom: 6 }}>🌤️ Light day (1 day/week 50% load — revision/mock/practice only)</Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginBottom: 8, lineHeight: 15 }}>Independent of days_off (which remain full days off). On light day, only revision/mock/practice blocks are scheduled — never new content. Default Sunday.</Text>
+          <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginBottom: 8, lineHeight: 15 }}>Independent of days_off (which are 50% light days [D20b]). On light day and days off, only revision/mock/practice blocks are scheduled — never new content, never free [D20b]. Default Sunday.</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
             {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d,i) => (
               <Pressable key={d} onPress={() => settings.update({ lightDay: i })} style={{ backgroundColor: (settings.lightDay ?? 6) === i ? '#16A34A' : '#FFFFFF', borderWidth: 1, borderColor: (settings.lightDay ?? 6) === i ? '#16A34A' : '#E2E8F0', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10, marginRight: 6, marginBottom: 6 }}>

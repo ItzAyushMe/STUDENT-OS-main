@@ -2091,7 +2091,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(sci > hin, `deadline urgency must enlarge the due subject's share (Science ${sci} vs Hindi ${hin})`);
   });
 
-  check('S1d', 'a declared day off stays 0 and does NOT shift the weekly pair pattern [D17]', () => {
+  check('S1d', 'a declared day off 50% light days never free and does NOT shift weekly pair pattern [D20b]', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const rotA = SG.buildSubjectRotation(sixSubjectRows, S_TODAY, 14);
     const p = generateSchedule({
@@ -2100,8 +2100,10 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     });
     const offDate = sadd(S_TODAY, 5); // Saturday of week 1
     const offMin = minOf(p, (r) => r.date === offDate);
-    // FIX-WEEKSPLIT D17: days off stay 0
-    assert.equal(offMin, 0, `D17: a day off must stay 0 hrs, got ${offMin} min`);
+    // FIX-DAYSOFF D20b: days off 50% light days, never zero, no NEW study
+    assert.ok(offMin > 0, `D20b: a day off must be 50% light days never zero, got ${offMin} min`);
+    const offStudy = p.filter(r=>r.date===offDate && r.session_type==='study');
+    assert.equal(offStudy.length, 0, `D20b: no NEW study on days off, got ${offStudy.length}`);
     const grid = classStudyByDate(p);
     assert.ok(Object.keys(grid).length >= 8, `study days expected across the fortnight, got ${Object.keys(grid).length}`);
     for (const d of Object.keys(grid)) {
@@ -2266,7 +2268,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/run-up window|cannot be finished/i.test(String(p.coverage.coverageWarning || '')), `the summary must say it plainly: ${p.coverage.coverageWarning}`);
   });
 
-  check('S2f', 'exam run-up landing on a declared day off: D17 days_off stay 0, wave moves', () => {
+  check('S2f', 'exam run-up landing on a declared day off: D20b days_off 50% light days wave moves', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const examStart = sadd(S_TODAY, 20);
     const rows = [
@@ -2283,11 +2285,11 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     for (const off of offInWindow) {
       assert.equal((dayjsDay(off) + 6) % 7, 2, `fixture sanity: ${off} is a Wednesday`);
       assert.ok(off < examStart && off >= sadd(examStart, -14), `fixture sanity: ${off} is inside the run-up window`);
-      // FIX-WEEKSPLIT D17: days off stay 0, so off day must have 0 min and no blocks
+      // FIX-DAYSOFF D20b: days off 50% light days, never zero, no NEW study
       const offMin = minOf(p, (r) => r.date === off);
-      assert.equal(offMin, 0, `D17: a day off must stay 0 hrs, got ${offMin} min on ${off}`);
-      const offBlocks = p.filter(r => r.date === off);
-      assert.equal(offBlocks.length, 0, `D17: day off ${off} must have zero blocks, got ${offBlocks.length}`);
+      assert.ok(offMin > 0, `D20b: a day off must be 50% light days never zero, got ${offMin} min on ${off}`);
+      const offStudy = p.filter(r => r.date === off && r.session_type==='study');
+      assert.equal(offStudy.length, 0, `D20b: no NEW study on days off, got ${offStudy.length} on ${off}`);
     }
     // the run-up still prioritises the due-before-exam subject — but wave may move off off-day
     const moved = p.filter((r) => /Revision wave/.test(r.topic));
@@ -3029,15 +3031,17 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     // But quota must be 50%: daily 4h=240min, light 50%=120min, check total minutes <=120
     const sunMin = sunBlocks.reduce((a,r)=>a+(r.duration_minutes||0),0);
     assert.ok(sunMin <= 130, `light day quota 50% of 240=120min, got ${sunMin}min (allow 10min slack for breath)`);
-    // FIX-WEEKSPLIT D17: days_off stay 0, light day 50% of own day-type
+    // FIX-DAYSOFF D20b: days_off 50% light days never zero, light day 50% of own day-type
     const pOff = SG.generateSchedule({
       syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[6], lightDay: 6, weeks:2,
       userId:'u-light1-off', today, createdAt: today+'T00:00:00.000Z',
     });
     const sunOffBlocks = pOff.filter(r => r.date === sunday);
     const sunOffMin = sunOffBlocks.reduce((a,r)=>a+(r.duration_minutes||0),0);
-    assert.equal(sunOffMin, 0, `D17: days_off must stay 0 hrs, got ${sunOffMin}min`);
-    assert.equal(sunOffBlocks.length, 0, `D17: days_off must have zero blocks, got ${sunOffBlocks.length}`);
+    assert.ok(sunOffMin > 0, `D20b: days_off must be 50% light days never zero, got ${sunOffMin}min`);
+    assert.ok(sunOffBlocks.length >= 2, `D20b: days_off must have ≥2 maintenance blocks, got ${sunOffBlocks.length}`);
+    const sunOffStudy = sunOffBlocks.filter(r=>r.session_type==='study');
+    assert.equal(sunOffStudy.length, 0, `D20b: no NEW study on days off, got ${sunOffStudy.length}`);
   });
 
   check('LIGHT2', 'filler fallback — after new+revision met, track-appropriate practice/mock labeled, never new coverage', () => {
@@ -6342,7 +6346,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(satMin <= 190, `light Saturday should be 50% of weekend 6h=180min, got ${satMin}min`);
   });
 
-  check('WEEK3', 'days off stay 0 [D17]', () => {
+  check('WEEK3', 'days off 50% light days never zero [D20b]', () => {
     const syllabus = [mkS('d1', 'Science', 'Ch1', { estimated_hours: 4 })];
     const p = generateSchedule({
       syllabus, weekdayHours: 4, weekendHours: 4, preferredTime: 'Morning', daysOff: [0], lightDay: null, weeks: 2,
@@ -6350,7 +6354,12 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     });
     const monOff = '2026-10-05'; // Monday off
     const monMin = p.filter(r=>r.date===monOff).reduce((a,r)=>a+(r.duration_minutes||0),0);
-    assert.equal(monMin, 0, `D17: days off must stay 0 hrs, got ${monMin}min on ${monOff}`);
+    // D20b: days off become 50% light days, never zero while hours>0
+    assert.ok(monMin > 0, `D20b: days off must be 50% light days never zero, got ${monMin}min on ${monOff}`);
+    assert.ok(monMin <= 0.6*4*60, `D20b: days off should be ~50% of weekday quota (4h=240min), got ${monMin}min`);
+    // No NEW study on days off
+    const monStudy = p.filter(r=>r.date===monOff && r.session_type==='study');
+    assert.equal(monStudy.length, 0, `D20b: no NEW study on days off, got ${monStudy.length} study blocks on ${monOff}`);
   });
 
   check('WEEK4', 'coverage weekly blend math [D17]', () => {
@@ -6383,6 +6392,49 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.equal(p.coverage.weekdayHours, 3, `migration: weekday should default to daily 3, got ${p.coverage.weekdayHours}`);
     assert.equal(p.coverage.weekendHours, 3, `migration: weekend should default to daily 3, got ${p.coverage.weekendHours}`);
     assert.equal(p.coverage.dailyHours, 3, `legacy daily should be 3`);
+  });
+
+  // FIX-DAYSOFF D20b: declared days off become 50% light days, never zero
+  check('DAYSOFF1', 'daysOff [5] Saturdays ~4h maintenance ≥2 blocks ≤50% weekend quota never zero [D20b]', () => {
+    const syllabus = [mkS('d1', 'Science', 'Ch1', { estimated_hours: 4 })];
+    const p = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 8, preferredTime: 'Morning', daysOff: [5], lightDay: null, weeks: 2,
+      userId: 'u-daysoff1', today: '2026-10-01', createdAt: CREATED, examDate: '2028-04-15',
+    });
+    // Saturday is weekday 5 (Mon=0)
+    const sat = '2026-10-03'; // Saturday
+    const satRows = p.filter(r=>r.date===sat);
+    const satMin = satRows.reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.ok(satMin > 0, `D20b: Saturday off should have >0 maintenance, got ${satMin}min`);
+    assert.ok(satRows.length >= 2, `D20b: Saturday off should have ≥2 blocks, got ${satRows.length}`);
+    assert.ok(satMin <= 0.6*8*60, `D20b: Saturday off should be ≤50% of weekend quota 8h=480min, got ${satMin}min`);
+    // No NEW study on days off
+    const satStudy = p.filter(r=>r.date===sat && r.session_type==='study');
+    assert.equal(satStudy.length, 0, `D20b: no NEW study on days off, got ${satStudy.length} study blocks on ${sat}`);
+  });
+
+  check('DAYSOFF2', 'no NEW study on days-off dates, weekday capacity untouched, light-day still 50% [D20b]', () => {
+    const syllabus = [mkS('d1', 'Science', 'Ch1', { estimated_hours: 4 }), mkS('d2', 'Maths', 'Ch2', { estimated_hours: 4 })];
+    // Weekday capacity untouched: Monday (weekday) with weekdayHours 4 should still be ~4h
+    const pWeekday = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 8, preferredTime: 'Morning', daysOff: [5], lightDay: null, weeks: 2,
+      userId: 'u-daysoff2a', today: '2026-10-01', createdAt: CREATED, examDate: '2028-04-15',
+    });
+    const mon = '2026-10-05'; // Monday weekday
+    const monMin = pWeekday.filter(r=>r.date===mon).reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.ok(monMin > 0, `weekday Monday should still have capacity >0, got ${monMin}`);
+    assert.ok(monMin >= 2*60, `weekday capacity untouched should be ~4h (allow some slack for existing logic), got ${monMin}min`);
+    // Light-day still 50% of own day-type
+    const pLight = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: 0, weeks: 2,
+      userId: 'u-daysoff2b', today: '2026-10-01', createdAt: CREATED, examDate: '2028-04-15',
+    });
+    const monLight = '2026-10-05';
+    const monLightMin = pLight.filter(r=>r.date===monLight).reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.ok(monLightMin > 0, `light-day Monday should have >0, got ${monLightMin}`);
+    assert.ok(monLightMin <= 0.6*4*60, `light-day should be 50% of weekday 4h=240min, got ${monLightMin}min`);
+    const monLightStudy = pLight.filter(r=>r.date===monLight && r.session_type==='study');
+    assert.equal(monLightStudy.length, 0, `light-day should have no NEW study, got ${monLightStudy.length}`);
   });
 
   const failed = results.filter(r => !r.ok);

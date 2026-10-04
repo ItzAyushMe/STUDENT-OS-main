@@ -947,11 +947,10 @@ export function planSchedule(input) {
   const hasLightDay = opts.lightDay != null && Number.isFinite(Number(opts.lightDay));
   const lightDayIdx = hasLightDay ? Number(opts.lightDay) : 6;
   const LIGHT_DAY_FACTOR = 0.5;
-  // FIX-WEEKSPLIT D17: dayCapacity uses day-type value (Sat+Sun weekend), days off =0, light day =50% of own day-type
+  // FIX-DAYSOFF D20b: declared days_off become 50% light days, never zero (PO law: never EVER keep any day free)
+  // FIX-WEEKSPLIT D17 updated: dayCapacity uses day-type value (Sat+Sun weekend), days off =50% of own day-type, light day =50% of own day-type
   const dayCapacity = (date, isDayOff, isLightDay, weekdayIdx) => {
     if (noCapacity) return 0;
-    // days off stay 0
-    if (isDayOff) return 0;
     // determine base by day-type
     let wd = weekdayIdx;
     if (wd == null) {
@@ -961,7 +960,8 @@ export function planSchedule(input) {
     let base = isWeekend ? weekendCapacityMin : weekdayCapacityMin;
     // fallback to legacy capacityMin if both new are 0 but legacy has value (migration)
     if (base === 0 && capacityMin > 0) base = capacityMin;
-    if (hasLightDay && isLightDay) base = Math.round(base * LIGHT_DAY_FACTOR);
+    // D20b: days off 50% of own day-type quota, same factor as light day, never zero while hours>0
+    if (isDayOff || (hasLightDay && isLightDay)) base = Math.round(base * LIGHT_DAY_FACTOR);
     return Math.max(0, base - num(loadByDate[date], 0));
   };
 
