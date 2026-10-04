@@ -6865,6 +6865,107 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedV3.length, 0, `FIX-VERIFY3: ${failedV3.length} check(s) failed -> ${failedV3.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-VERIFY4: probe only — measure, don't fix — 2613/3114 case needs one instrument reading
+  console.log('\n--- FIX-VERIFY4 probes ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const record = async (id, desc, fn) => { try { await fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } };
+
+  let SS4 = null; let ss4Err = '';
+  try { SS4 = await import('./../src/lib/scheduleSave.js'); } catch (e) { ss4Err = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const needSS4 = () => assert.ok(SS4, `scheduleSave import failed: ${ss4Err}`);
+
+  check('V4A', 'pure helper summarizeVerifyProbes summarizes probe counts (pre-delete + final)', () => {
+    needSS4();
+    const { summarizeVerifyProbes } = SS4;
+    assert.equal(typeof summarizeVerifyProbes, 'function', 'summarizeVerifyProbes exists');
+    const summary = summarizeVerifyProbes({
+      totalAnyBefore: 4000,
+      totalMineBefore: 3113,
+      deletedCount: 3113,
+      finalCountScoped: 2613,
+      finalCountAnyUser: 3113,
+      finalCountAnyStatus: 2613,
+      chunkWindows: [{index:0,min:'2026-10-05',max:'2026-12-04',count:0},{index:1,min:'2026-12-05',max:'2026-12-20',count:500}],
+      sampleOrphans: [{user_id:'other', status:'pending', date:'2026-10-10', subject:'Maths'}],
+    });
+    assert.equal(summary.preDelete.totalAnyBefore, 4000, 'totalAnyBefore');
+    assert.equal(summary.preDelete.totalMineBefore, 3113, 'totalMineBefore');
+    assert.equal(summary.preDelete.deletedCount, 3113, 'deletedCount');
+    assert.equal(summary.preDelete.remainingAnyAfterDelete, 887, 'remainingAny = 4000-3113');
+    assert.equal(summary.final.finalCountScoped, 2613, 'final scoped');
+    assert.equal(summary.final.finalCountAnyUser, 3113, 'final anyUser');
+    assert.equal(summary.final.orphanDelta, 500, 'orphanDelta 3113-2613=500');
+    assert.equal(summary.isWrongOwner, true, 'isWrongOwner when orphanDelta>0');
+    assert.equal(summary.chunkWindows.length, 2, 'chunkWindows count');
+    assert.equal(summary.sampleOrphans.length, 1, 'sampleOrphans count');
+  });
+
+  check('V4B', 'buildPlanDiagnostics emits new fields DELETE.totalAnyBefore/totalMineBefore and FINAL_PROBES finalCountAnyUser/finalCountAnyStatus/sampleOrphans/chunkWindows', () => {
+    needSS4();
+    const { buildPlanDiagnostics } = SS4;
+    const diag = buildPlanDiagnostics({
+      rows: [{date:'2026-10-05'},{date:'2026-12-04'}],
+      coverage: {},
+      syllabus: [],
+      profile: {},
+      settings: {},
+      savedCount: 1,
+      failedChunks: [],
+      chunkSize: 500,
+      workerCount: 2,
+      reloadedSessions: [{date:'2026-10-05'}],
+      deleteDeletedCount: 3113,
+      totalAnyBefore: 4000,
+      totalMineBefore: 3113,
+      verifyInfo: { perChunk: [], retries:0, finalCount: 2613 },
+      finalCountAnyUser: 3113,
+      finalCountAnyStatus: 2613,
+      sampleOrphans: [{user_id:'other', status:'pending', date:'2026-10-10', subject:'Maths'}],
+      chunkWindows: [{index:0,min:'2026-10-05',max:'2026-12-04',count:0}],
+    });
+    assert.equal(diag.DELETE.deletedCount, 3113, 'DELETE.deletedCount');
+    assert.equal(diag.DELETE.totalAnyBefore, 4000, 'DELETE.totalAnyBefore');
+    assert.equal(diag.DELETE.totalMineBefore, 3113, 'DELETE.totalMineBefore');
+    assert.equal(diag.finalCountAnyUser, 3113, 'diag.finalCountAnyUser');
+    assert.equal(diag.finalCountAnyStatus, 2613, 'diag.finalCountAnyStatus');
+    assert.equal(diag.sampleOrphans.length, 1, 'sampleOrphans');
+    assert.equal(diag.chunkWindows[0].count, 0, 'chunkWindows[0] count 0 proves chunk1 missing');
+    assert.ok(diag.FINAL_PROBES, 'FINAL_PROBES exists');
+    assert.equal(diag.FINAL_PROBES.finalCountAnyUser, 3113, 'FINAL_PROBES finalCountAnyUser');
+  });
+
+  check('V4C', 'ScheduleScreen probe reads exist — pre-delete totalAnyBefore/totalMineBefore + final any-user/any-status + sampleOrphans + chunkWindows', () => {
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    // pre-delete probe
+    assert.ok(screenSrc.includes('totalAnyBefore') && screenSrc.includes("db.list('schedule', {})"), 'pre-delete totalAnyBefore via db.list({})');
+    assert.ok(screenSrc.includes('totalMineBefore') && screenSrc.includes('eq: { user_id: profile.id }'), 'pre-delete totalMineBefore via eq user_id');
+    // final probes
+    assert.ok(screenSrc.includes('finalCountAnyUser') && screenSrc.includes("eq: { status: 'pending' }"), 'finalCountAnyUser no user filter');
+    assert.ok(screenSrc.includes('finalCountAnyStatus') && screenSrc.includes('eq: { user_id: profile.id }') && screenSrc.includes('gte: { date:'), 'finalCountAnyStatus user_id only no status');
+    assert.ok(screenSrc.includes('sampleOrphans') && screenSrc.includes('user_id !== profile.id'), 'sampleOrphans where user_id !== profile.id');
+    assert.ok(screenSrc.includes('chunkWindows') && screenSrc.includes('per-chunk scoped counts'), 'chunkWindows per-chunk scoped counts');
+    // ensure save order, retries, upserts not changed — still has serialize first chunk comment
+    assert.ok(screenSrc.includes('Serialize first chunk') && screenSrc.includes('upsert') || screenSrc.includes('insertMany'), 'save order preserved');
+    // diagnostics wiring includes new fields
+    assert.ok(screenSrc.includes('totalAnyBefore') && screenSrc.includes('totalMineBefore') && screenSrc.includes('finalCountAnyUser'), 'diag wiring includes new probe fields');
+  });
+
+  check('V4D', 'prior pins hold — no .in() in save path, receipt-based, range-count, LOUD error', () => {
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    const inIdPattern = /db\.list\([^)]*in:\s*\{\s*id:/;
+    assert.ok(!inIdPattern.test(screenSrc), 'still no .in(id) mega-URL in save path');
+    assert.ok(screenSrc.includes('return Array.isArray(res) ? res : chunk'), 'receipt-based still');
+    assert.ok(screenSrc.includes("throw new Error(`Saved ${"), 'LOUD error still throws');
+    assert.ok(!screenSrc.includes("console.warn('[VERIFY] final count query failed'"), 'no warn swallow still');
+  });
+
+  const failedV4 = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedV4.length, 0, `FIX-VERIFY4: ${failedV4.length} check(s) failed -> ${failedV4.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 

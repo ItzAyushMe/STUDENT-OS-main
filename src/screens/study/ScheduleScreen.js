@@ -262,6 +262,18 @@ export function ScheduleScreen({ navigation, route }) {
       if (isStale()) return;
 
       let diagDeleteCount = null;
+      let diagTotalAnyBefore = null;
+      let diagTotalMineBefore = null;
+      const probePreDelete = async () => {
+        try {
+          const anyList = await db.list('schedule', {});
+          diagTotalAnyBefore = Array.isArray(anyList) ? anyList.length : 0;
+        } catch {}
+        try {
+          const mineList = await db.list('schedule', { eq: { user_id: profile.id } });
+          diagTotalMineBefore = Array.isArray(mineList) ? mineList.length : 0;
+        } catch {}
+      };
       const chunkedRemove = async (rowsToDelete, label) => {
         if (!rowsToDelete.length) { diagDeleteCount = 0; return 0; }
         const CHUNK = 100;
@@ -275,11 +287,13 @@ export function ScheduleScreen({ navigation, route }) {
           try {
             if (typeof db.removeWhere === 'function' && chunk.length === rowsToDelete.length) {
               if (label.includes('old schedule')) {
+                await probePreDelete();
                 const del = await db.removeWhere('schedule', { user_id: profile.id });
                 totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
                 diagDeleteCount = totalDeleted;
                 break;
               } else {
+                await probePreDelete();
                 const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
                 totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
                 diagDeleteCount = totalDeleted;
@@ -302,6 +316,7 @@ export function ScheduleScreen({ navigation, route }) {
         await yieldPaint();
         if (isStale()) return;
         try {
+          await probePreDelete();
           const del = await db.removeWhere('schedule', { user_id: profile.id });
           diagDeleteCount = typeof del === 'number' ? del : null;
           // FIX-VERIFY: small settle after delete — ensure delete fully completed before any insert
@@ -322,6 +337,7 @@ export function ScheduleScreen({ navigation, route }) {
         if (isStale()) return;
         const pendingRows = allExisting.filter((r) => r.status === 'pending');
         try {
+          await probePreDelete();
           const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
           diagDeleteCount = typeof del === 'number' ? del : null;
           await new Promise((r) => setTimeout(r, 350));
@@ -589,7 +605,14 @@ export function ScheduleScreen({ navigation, route }) {
         diagSavedCount = savedCount;
         diagFailed = failed;
 
+        // FIX-VERIFY4: additional probe holders (measurement only)
+        let diagFinalCountAnyUser = null;
+        let diagFinalCountAnyStatus = null;
+        let diagSampleOrphans = [];
+        let diagChunkWindows = [];
+
         // FIX-VERIFY3: FINAL VERIFICATION — ONE range-count query user_id + date range + pending, throw LOUD, no warn swallow
+        // FIX-VERIFY4: additions — finalCountAnyUser (no user filter), finalCountAnyStatus (no status filter), sampleOrphans, chunkWindows
         if (!isStale()) {
           const allDates = rows.map((r) => r.date).filter(Boolean).sort();
           const firstDate = allDates[0] || null;
@@ -601,6 +624,58 @@ export function ScheduleScreen({ navigation, route }) {
               lte: { date: lastDate },
             });
             diagFinalCount = Array.isArray(finalList) ? finalList.length : 0;
+
+            // FIX-VERIFY4: finalCountAnyUser — NO user filter, pending + date range
+            try {
+              const anyUserList = await db.list('schedule', {
+                eq: { status: 'pending' },
+                gte: { date: firstDate },
+                lte: { date: lastDate },
+              });
+              diagFinalCountAnyUser = Array.isArray(anyUserList) ? anyUserList.length : 0;
+              if (diagFinalCountAnyUser > diagFinalCount) {
+                const orphans = anyUserList.filter((r) => r.user_id !== profile.id).slice(0, 5).map((r) => ({
+                  user_id: r.user_id,
+                  status: r.status,
+                  date: r.date,
+                  subject: r.subject,
+                }));
+                diagSampleOrphans = orphans;
+              }
+            } catch {}
+
+            // FIX-VERIFY4: finalCountAnyStatus — user_id only, NO status filter, same date range
+            try {
+              const anyStatusList = await db.list('schedule', {
+                eq: { user_id: profile.id },
+                gte: { date: firstDate },
+                lte: { date: lastDate },
+              });
+              diagFinalCountAnyStatus = Array.isArray(anyStatusList) ? anyStatusList.length : 0;
+            } catch {}
+
+            // FIX-VERIFY4: chunkWindows — per-chunk scoped counts if still short
+            if (diagFinalCount < rows.length) {
+              try {
+                const windows = [];
+                for (let i = 0; i < chunks.length; i++) {
+                  const { min, max } = getMinMax(chunks[i]);
+                  if (!min || !max) continue;
+                  try {
+                    const wList = await db.list('schedule', {
+                      eq: { user_id: profile.id, status: 'pending' },
+                      gte: { date: min },
+                      lte: { date: max },
+                    });
+                    windows.push({ index: i, min, max, count: Array.isArray(wList) ? wList.length : 0 });
+                  } catch {
+                    windows.push({ index: i, min, max, count: null });
+                  }
+                }
+                diagChunkWindows = windows;
+              } catch {}
+            }
+
             if (diagFinalCount < rows.length) {
               try {
                 const reloadedPartial = await load();
@@ -617,7 +692,13 @@ export function ScheduleScreen({ navigation, route }) {
                   workerCount: diagWorkerCount,
                   reloadedSessions: diagReloaded,
                   deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+                  totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
+                  totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
                   verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+                  finalCountAnyUser: diagFinalCountAnyUser,
+                  finalCountAnyStatus: diagFinalCountAnyStatus,
+                  sampleOrphans: diagSampleOrphans,
+                  chunkWindows: diagChunkWindows,
                 });
                 setDiagnostics(diag);
                 console.log('🩺 Plan diagnostics (final verify failed)', diag);
@@ -645,7 +726,13 @@ export function ScheduleScreen({ navigation, route }) {
               workerCount: diagWorkerCount,
               reloadedSessions: diagReloaded,
               deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+              totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
+              totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
               verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+              finalCountAnyUser: diagFinalCountAnyUser,
+              finalCountAnyStatus: diagFinalCountAnyStatus,
+              sampleOrphans: diagSampleOrphans,
+              chunkWindows: diagChunkWindows,
             });
             setDiagnostics(diag);
             console.log('🩺 Plan diagnostics (partial save)', diag);
@@ -678,7 +765,7 @@ export function ScheduleScreen({ navigation, route }) {
       await yieldPaint();
       if (isStale()) return;
       const reloaded = await load();
-      // FIX-SCOPE + FIX-VERIFY: build diagnostics object (success path) — from values already in scope + post-save readback
+      // FIX-SCOPE + FIX-VERIFY + FIX-VERIFY4: build diagnostics object (success path) — from values already in scope + post-save readback
       try {
         const diag = buildPlanDiagnostics({
           rows,
@@ -692,11 +779,17 @@ export function ScheduleScreen({ navigation, route }) {
           workerCount: typeof diagWorkerCount !== 'undefined' ? diagWorkerCount : 2,
           reloadedSessions: reloaded || [],
           deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+          totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
+          totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
           verifyInfo: {
             perChunk: typeof diagVerifyPerChunk !== 'undefined' ? diagVerifyPerChunk : [],
             retries: typeof diagVerifyRetries !== 'undefined' ? diagVerifyRetries : 0,
             finalCount: typeof diagFinalCount !== 'undefined' ? diagFinalCount : (reloaded ? reloaded.length : null),
           },
+          finalCountAnyUser: typeof diagFinalCountAnyUser !== 'undefined' ? diagFinalCountAnyUser : null,
+          finalCountAnyStatus: typeof diagFinalCountAnyStatus !== 'undefined' ? diagFinalCountAnyStatus : null,
+          sampleOrphans: typeof diagSampleOrphans !== 'undefined' ? diagSampleOrphans : [],
+          chunkWindows: typeof diagChunkWindows !== 'undefined' ? diagChunkWindows : [],
         });
         setDiagnostics(diag);
         console.log('🩺 Plan diagnostics', diag);

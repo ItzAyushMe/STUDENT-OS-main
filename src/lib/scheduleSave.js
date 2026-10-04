@@ -29,6 +29,40 @@ export function computeMissingIds(sentIds, returnedRowsOrIds) {
   return sentIds.filter((id) => !returnedSet.has(id));
 }
 
+// FIX-VERIFY4: pure helper to summarize probe counts — measurement only
+export function summarizeVerifyProbes({
+  totalAnyBefore = null,
+  totalMineBefore = null,
+  deletedCount = null,
+  finalCountScoped = null,
+  finalCountAnyUser = null,
+  finalCountAnyStatus = null,
+  chunkWindows = [],
+  sampleOrphans = [],
+} = {}) {
+  const preDelete = {
+    totalAnyBefore,
+    totalMineBefore,
+    deletedCount,
+    remainingAnyAfterDelete: typeof totalAnyBefore === 'number' && typeof deletedCount === 'number' ? totalAnyBefore - deletedCount : null,
+    remainingMineAfterDelete: typeof totalMineBefore === 'number' && typeof deletedCount === 'number' ? totalMineBefore - deletedCount : null,
+  };
+  const final = {
+    finalCountScoped,
+    finalCountAnyUser,
+    finalCountAnyStatus,
+    orphanDelta: typeof finalCountAnyUser === 'number' && typeof finalCountScoped === 'number' ? finalCountAnyUser - finalCountScoped : null,
+    statusDelta: typeof finalCountAnyStatus === 'number' && typeof finalCountScoped === 'number' ? finalCountAnyStatus - finalCountScoped : null,
+    missingVsScoped: typeof finalCountScoped === 'number' ? finalCountScoped : null,
+    sampleOrphansCount: Array.isArray(sampleOrphans) ? sampleOrphans.length : 0,
+    chunkWindowsCount: Array.isArray(chunkWindows) ? chunkWindows.length : 0,
+    chunkWindowsMissing: Array.isArray(chunkWindows) ? chunkWindows.filter(w => typeof w.count === 'number' && w.count === 0).length : 0,
+  };
+  const isWrongOwner = final.orphanDelta !== null && final.orphanDelta > 0;
+  const isTrulyAbsent = final.orphanDelta === 0 && typeof finalCountScoped === 'number';
+  return { preDelete, final, isWrongOwner, isTrulyAbsent, chunkWindows, sampleOrphans };
+}
+
 export function buildPlanDiagnostics({
   rows = [],
   coverage = null,
@@ -42,6 +76,12 @@ export function buildPlanDiagnostics({
   reloadedSessions = [],
   deleteDeletedCount = null,
   verifyInfo = null,
+  totalAnyBefore = null,
+  totalMineBefore = null,
+  finalCountAnyUser = null,
+  finalCountAnyStatus = null,
+  sampleOrphans = null,
+  chunkWindows = null,
 }) {
   // PLAN: from generated rows BEFORE save
   const planMonths = {
@@ -157,12 +197,22 @@ export function buildPlanDiagnostics({
 
   const DELETE = {
     deletedCount: deleteDeletedCount,
+    totalAnyBefore: totalAnyBefore,
+    totalMineBefore: totalMineBefore,
   };
 
   const VERIFY = verifyInfo || {
     perChunk: [],
     retries: 0,
     finalCount: null,
+  };
+
+  // FIX-VERIFY4: emit additional probe counts (measurement only)
+  const FINAL_PROBES = {
+    finalCountAnyUser,
+    finalCountAnyStatus,
+    sampleOrphans: Array.isArray(sampleOrphans) ? sampleOrphans : [],
+    chunkWindows: Array.isArray(chunkWindows) ? chunkWindows : [],
   };
 
   return {
@@ -174,6 +224,11 @@ export function buildPlanDiagnostics({
     QUEUES,
     DELETE,
     VERIFY,
+    finalCountAnyUser,
+    finalCountAnyStatus,
+    sampleOrphans: FINAL_PROBES.sampleOrphans,
+    chunkWindows: FINAL_PROBES.chunkWindows,
+    FINAL_PROBES,
     generatedAt: new Date().toISOString(),
   };
 }
