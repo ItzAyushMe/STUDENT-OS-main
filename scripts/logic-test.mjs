@@ -3434,6 +3434,146 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/topicCounts/.test(src) && /cap.*2/.test(src) || /same-topic.*2/.test(src) || /cnt < 2/.test(src), 'must cap same-topic blocks per day at 2');
   });
 
+  // ================= FIX-VARIETY D19: interleaved variety mock→revision→practice, different subjects/types =================
+  check('VARIETY1', 'FIX-VARIETY: maintenance month has zero days with >2 consecutive same-type blocks', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-01-05';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      mkS('c3', 'English', 'Grammar', { estimated_hours: 2 }),
+      mkS('c4', 'Science', 'Acids', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, weekdayHours: 6, weekendHours: 6, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:8,
+      userId:'u-variety1', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    // Group by date, check consecutive same-type ONLY on maintenance days (no study)
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date] = [];
+      byDate[r.date].push(r);
+    }
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      const hasStudy = dayRows.some(r=>r.session_type==='study');
+      if (hasStudy) continue; // only maintenance/filler days
+      // sort by start_time
+      dayRows.sort((a,b)=> String(a.start_time).localeCompare(String(b.start_time)));
+      let consec = 1;
+      for (let i=1;i<dayRows.length;i++) {
+        if (dayRows[i].session_type === dayRows[i-1].session_type) {
+          consec += 1;
+          assert.ok(consec <= 2, `VARIETY1: maintenance date ${date} has ${consec} consecutive blocks of same type ${dayRows[i].session_type} — must be <=2, seq ${dayRows.map(r=>r.session_type).join(',')}`);
+        } else {
+          consec = 1;
+        }
+      }
+    }
+  });
+
+  check('VARIETY2', 'FIX-VARIETY: ≥3 distinct types on ≥80% of days with ≥4 blocks', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-01-05';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      mkS('c3', 'English', 'Grammar', { estimated_hours: 2 }),
+      mkS('c4', 'Science', 'Acids', { estimated_hours: 2 }),
+      mkS('c5', 'Maths', 'Algebra', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, weekdayHours: 6, weekendHours: 6, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:8,
+      userId:'u-variety2', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date] = [];
+      byDate[r.date].push(r);
+    }
+    let daysWith4Plus = 0;
+    let daysWith3Distinct = 0;
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      if (dayRows.length >= 4) {
+        daysWith4Plus += 1;
+        const distinct = new Set(dayRows.map(r=>r.session_type)).size;
+        if (distinct >= 3) daysWith3Distinct += 1;
+      }
+    }
+    assert.ok(daysWith4Plus > 0, `VARIETY2: expected some days with ≥4 blocks, got ${daysWith4Plus}`);
+    const ratio = daysWith3Distinct / daysWith4Plus;
+    assert.ok(ratio >= 0.8, `VARIETY2: ≥3 distinct types on ≥80% of days with ≥4 blocks, got ${daysWith3Distinct}/${daysWith4Plus} = ${ratio.toFixed(2)} <0.8`);
+  });
+
+  check('VARIETY3', 'FIX-VARIETY: no same subject+chapter picked on two consecutive days when pool ≥3 alternatives (maintenance days only)', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-01-05';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      mkS('c3', 'English', 'Grammar', { estimated_hours: 2 }),
+      mkS('c4', 'Science', 'Acids', { estimated_hours: 2 }),
+      mkS('c5', 'Maths', 'Algebra', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, weekdayHours: 4, weekendHours: 4, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:8,
+      userId:'u-variety3', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date] = [];
+      byDate[r.date].push(r);
+    }
+    const dates = Object.keys(byDate).sort();
+    let violations = 0;
+    let checked = 0;
+    for (let i=1;i<dates.length;i++) {
+      const prev = byDate[dates[i-1]];
+      const curr = byDate[dates[i]];
+      if (!prev.length || !curr.length) continue;
+      // only maintenance days (no study) — study days naturally continue same chapter
+      // also exclude Buffer days (exam buffer) which are not part of maintenance variety path
+      const isBufferDay = (arr) => arr.some(r=>/Backlog|Buffer/.test(r.topic));
+      const prevHasStudy = prev.some(r=>r.session_type==='study') || isBufferDay(prev);
+      const currHasStudy = curr.some(r=>r.session_type==='study') || isBufferDay(curr);
+      if (prevHasStudy || currHasStudy) continue;
+      // last pick of prev day
+      prev.sort((a,b)=> String(a.start_time).localeCompare(String(b.start_time)));
+      curr.sort((a,b)=> String(a.start_time).localeCompare(String(b.start_time)));
+      const lastPrev = prev[prev.length-1];
+      // extract chapter: remove prefix like "Mock: " or "Practice: "
+      const extractChap = (topic) => {
+        const m = String(topic).match(/:\s*(.+?)(?:\s*\(|\s*—|$)/);
+        if (m) return m[1].trim();
+        return String(topic).trim();
+      };
+      const lastKey = `${lastPrev.subject}|${extractChap(lastPrev.topic)}`;
+      for (const r of curr) {
+        const curKey = `${r.subject}|${extractChap(r.topic)}`;
+        if (curKey === lastKey) {
+          violations += 1;
+          break;
+        }
+      }
+      checked += 1;
+    }
+    assert.ok(checked > 0, `VARIETY3: expected some maintenance day pairs, got ${checked}`);
+    assert.ok(violations === 0, `VARIETY3: same subject+chapter on consecutive maintenance days found ${violations} times over ${checked} day pairs — must be 0 when pool ≥3`);
+  });
+
+  check('VARIETY4', 'FIX-VARIETY: fillerForTrack uses blockCounter*2 and variety rotation', () => {
+    const src = read('src/lib/scheduleGenerator.js');
+    assert.ok(/blockCounter \* 2/.test(src) || /blockCounter\*2/.test(src), 'must use blockCounter*2 for independent subject rotation');
+    assert.ok(/varietyTypes/.test(src) && /mock.*revision.*practice.*quiz/.test(src), 'must have varietyTypes mock/revision/practice/quiz rotation');
+    assert.ok(/prevDayLastPickKey/.test(src), 'must track prevDayLastPickKey to avoid same chapter consecutive days');
+    assert.ok(/never.*>2 consecutive/.test(src) || /consec/.test(src) || /dayTypeSeq/.test(src), 'must enforce never >2 consecutive same-type');
+  });
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');
