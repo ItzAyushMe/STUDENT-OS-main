@@ -20,7 +20,8 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
-import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics } from '../../lib/scheduleSave';
+import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds } from '../../lib/scheduleSave';
+import { uuid } from '../../lib/utils';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
@@ -260,30 +261,39 @@ export function ScheduleScreen({ navigation, route }) {
       });
       if (isStale()) return;
 
+      let diagDeleteCount = null;
       const chunkedRemove = async (rowsToDelete, label) => {
-        if (!rowsToDelete.length) return;
+        if (!rowsToDelete.length) { diagDeleteCount = 0; return 0; }
         const CHUNK = 100;
+        let totalDeleted = 0;
         for (let i = 0; i < rowsToDelete.length; i += CHUNK) {
-          if (isStale()) return;
+          if (isStale()) return totalDeleted;
           const chunk = rowsToDelete.slice(i, i + CHUNK);
           tick(`${label} (${Math.floor(i/CHUNK)+1}/${Math.ceil(rowsToDelete.length/CHUNK)})…`);
           await yieldPaint();
-          if (isStale()) return;
+          if (isStale()) return totalDeleted;
           try {
             if (typeof db.removeWhere === 'function' && chunk.length === rowsToDelete.length) {
               if (label.includes('old schedule')) {
-                await db.removeWhere('schedule', { user_id: profile.id });
+                const del = await db.removeWhere('schedule', { user_id: profile.id });
+                totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
+                diagDeleteCount = totalDeleted;
                 break;
               } else {
-                await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+                const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+                totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
+                diagDeleteCount = totalDeleted;
                 break;
               }
             }
             await Promise.all(chunk.map((r) => db.remove('schedule', r.id)));
+            totalDeleted += chunk.length;
           } catch (e) {
             throw new Error(`Delete failed at chunk ${Math.floor(i/CHUNK)+1} — old schedule kept. ${e?.message || ''}`);
           }
         }
+        diagDeleteCount = totalDeleted;
+        return totalDeleted;
       };
 
       let kept = [];
@@ -292,10 +302,14 @@ export function ScheduleScreen({ navigation, route }) {
         await yieldPaint();
         if (isStale()) return;
         try {
-          await db.removeWhere('schedule', { user_id: profile.id });
+          const del = await db.removeWhere('schedule', { user_id: profile.id });
+          diagDeleteCount = typeof del === 'number' ? del : null;
+          // FIX-VERIFY: small settle after delete — ensure delete fully completed before any insert
+          await new Promise((r) => setTimeout(r, 350));
         } catch (e) {
           if (allExisting.length) {
             await chunkedRemove(allExisting, 'Clearing old schedule');
+            await new Promise((r) => setTimeout(r, 350));
           } else {
             throw new Error(`Old schedule delete failed — keeping old plan. ${e?.message || ''}`);
           }
@@ -308,10 +322,13 @@ export function ScheduleScreen({ navigation, route }) {
         if (isStale()) return;
         const pendingRows = allExisting.filter((r) => r.status === 'pending');
         try {
-          await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+          const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
+          diagDeleteCount = typeof del === 'number' ? del : null;
+          await new Promise((r) => setTimeout(r, 350));
         } catch (e) {
           if (pendingRows.length) {
             await chunkedRemove(pendingRows, 'Clearing pending slots');
+            await new Promise((r) => setTimeout(r, 350));
           } else {
             throw new Error(`Pending delete failed — keeping existing. ${e?.message || ''}`);
           }
@@ -389,64 +406,178 @@ export function ScheduleScreen({ navigation, route }) {
       if (isStale()) return;
       setCoverage(rows.coverage || null);
 
-      // FIX-SCOPE: diagnostics scaffolding — zero behavior changes, values already in scope
+      // FIX-VERIFY v2: diagnostics scaffolding + verified save
       let diagSavedCount = 0;
       let diagFailed = [];
       const diagChunkSize = 500;
       const diagWorkerCount = 2;
       let diagReloaded = [];
+      let diagVerifyPerChunk = [];
+      let diagVerifyRetries = 0;
+      let diagFinalCount = null;
+
+      // FIX-VERIFY: assign stable uuid v4 at generation for idempotent writes
+      for (const r of rows) {
+        if (!r.id) r.id = uuid();
+      }
+      {
+        const seen = new Set();
+        for (const r of rows) {
+          while (seen.has(r.id)) r.id = uuid();
+          seen.add(r.id);
+        }
+      }
 
       if (rows.length) {
         const chunks = chunkRows(rows, diagChunkSize);
         const totalChunks = chunks.length;
+
         const insertFn = async (chunk) => {
           if (isStale()) throw new Error('stale run aborted');
           await db.insertMany('schedule', chunk);
         };
+
+        const verifyChunk = async (chunk) => {
+          const ids = chunk.map((r) => r.id);
+          const returnedRows = await db.list('schedule', { in: { id: ids } });
+          const missing = computeMissingIds(ids, returnedRows);
+          return { returnedRows, missing, sent: ids.length, returned: returnedRows.length };
+        };
+
+        const insertAndVerify = async (chunk) => {
+          await insertFn(chunk);
+          let v = await verifyChunk(chunk);
+          let retried = false;
+          if (v.missing.length > 0) {
+            const missingRows = chunk.filter((r) => v.missing.includes(r.id));
+            await insertFn(missingRows);
+            retried = true;
+            v = await verifyChunk(chunk);
+          }
+          return { sent: v.sent, returned: v.returned, missing: v.missing, retried, returnedRows: v.returnedRows };
+        };
+
         const onProgress = (completed, total) => {
           tick(`Saving schedule (${completed}/${total})…`);
         };
 
         let savedCount = 0;
         const failed = [];
-        let nextIdx = 0;
-        const CONCURRENCY = diagWorkerCount;
 
-        const worker = async () => {
-          while (true) {
-            if (isStale()) break;
-            const cur = nextIdx++;
-            if (cur >= totalChunks) break;
-            const chunk = chunks[cur];
-            try {
-              await insertFn(chunk);
-              savedCount += chunk.length;
-            } catch (e) {
-              try {
-                await yieldPaint();
-                if (isStale()) break;
-                await insertFn(chunk);
-                savedCount += chunk.length;
-              } catch (e2) {
-                failed.push(cur);
-              }
+        // FIX-VERIFY: Serialize first chunk — await delete already done + settle, now chunk1 alone verified before workers
+        if (totalChunks >= 1) {
+          tick(`Saving schedule (1/${totalChunks})…`);
+          await yieldPaint();
+          if (isStale()) return;
+          try {
+            const res = await insertAndVerify(chunks[0]);
+            diagVerifyPerChunk.push({ index: 0, sent: res.sent, returned: res.returned, missingCount: res.missing.length, retried: res.retried });
+            if (res.retried) diagVerifyRetries++;
+            if (res.missing.length > 0) {
+              failed.push(0);
+            } else {
+              savedCount += res.sent;
             }
-            onProgress(cur + 1, totalChunks);
-            await yieldPaint();
-            if (isStale()) break;
+            onProgress(1, totalChunks);
+          } catch (e) {
+            try {
+              await yieldPaint();
+              if (isStale()) return;
+              const res2 = await insertAndVerify(chunks[0]);
+              diagVerifyPerChunk.push({ index: 0, sent: res2.sent, returned: res2.returned, missingCount: res2.missing.length, retried: res2.retried });
+              if (res2.retried) diagVerifyRetries++;
+              if (res2.missing.length > 0) failed.push(0);
+              else savedCount += res2.sent;
+              onProgress(1, totalChunks);
+            } catch (e2) {
+              failed.push(0);
+              diagVerifyPerChunk.push({ index: 0, sent: chunks[0].length, returned: 0, missingCount: chunks[0].length, retried: false });
+              onProgress(1, totalChunks);
+            }
           }
-        };
+          await yieldPaint();
+          if (isStale()) return;
+        }
 
-        const workers = Array.from({ length: Math.min(CONCURRENCY, totalChunks) }, () => worker());
-        await Promise.all(workers);
+        if (totalChunks > 1) {
+          let nextIdx = 1;
+          const CONCURRENCY = diagWorkerCount;
+          const worker = async () => {
+            while (true) {
+              if (isStale()) break;
+              const cur = nextIdx++;
+              if (cur >= totalChunks) break;
+              const chunk = chunks[cur];
+              try {
+                const res = await insertAndVerify(chunk);
+                diagVerifyPerChunk.push({ index: cur, sent: res.sent, returned: res.returned, missingCount: res.missing.length, retried: res.retried });
+                if (res.retried) diagVerifyRetries++;
+                if (res.missing.length > 0) failed.push(cur);
+                else savedCount += res.sent;
+              } catch (e) {
+                try {
+                  await yieldPaint();
+                  if (isStale()) break;
+                  const res2 = await insertAndVerify(chunk);
+                  diagVerifyPerChunk.push({ index: cur, sent: res2.sent, returned: res2.returned, missingCount: res2.missing.length, retried: res2.retried });
+                  if (res2.retried) diagVerifyRetries++;
+                  if (res2.missing.length > 0) failed.push(cur);
+                  else savedCount += res2.sent;
+                } catch (e2) {
+                  failed.push(cur);
+                  diagVerifyPerChunk.push({ index: cur, sent: chunk.length, returned: 0, missingCount: chunk.length, retried: false });
+                }
+              }
+              onProgress(cur + 1, totalChunks);
+              await yieldPaint();
+              if (isStale()) break;
+            }
+          };
+          const workers = Array.from({ length: Math.min(CONCURRENCY, totalChunks - 1) }, () => worker());
+          await Promise.all(workers);
+        }
 
         diagSavedCount = savedCount;
         diagFailed = failed;
 
+        // FIX-VERIFY: FINAL VERIFICATION — one count query after all chunks, throw LOUD if under-count
+        if (!isStale()) {
+          try {
+            const allIds = rows.map((r) => r.id);
+            const allReturned = await db.list('schedule', { in: { id: allIds } });
+            diagFinalCount = allReturned.length;
+            if (allReturned.length < rows.length) {
+              try {
+                const reloadedPartial = await load();
+                diagReloaded = reloadedPartial || [];
+                const diag = buildPlanDiagnostics({
+                  rows,
+                  coverage: rows.coverage,
+                  syllabus: plannedSyllabus,
+                  profile,
+                  settings,
+                  savedCount: diagSavedCount,
+                  failedChunks: diagFailed,
+                  chunkSize: diagChunkSize,
+                  workerCount: diagWorkerCount,
+                  reloadedSessions: diagReloaded,
+                  deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+                  verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+                });
+                setDiagnostics(diag);
+                console.log('🩺 Plan diagnostics (final verify failed)', diag);
+              } catch {}
+              throw new Error(`Saved ${allReturned.length}/${rows.length} — tap Generate again.`);
+            }
+          } catch (e) {
+            if (String(e.message).startsWith('Saved ')) throw e;
+            console.warn('[VERIFY] final count query failed', e?.message);
+          }
+        }
+
         if (isStale()) return;
 
         if (failed.length) {
-          // Build diagnostics even on partial save, then throw
           try {
             const reloadedPartial = await load();
             diagReloaded = reloadedPartial || [];
@@ -461,11 +592,13 @@ export function ScheduleScreen({ navigation, route }) {
               chunkSize: diagChunkSize,
               workerCount: diagWorkerCount,
               reloadedSessions: diagReloaded,
+              deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+              verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
             });
             setDiagnostics(diag);
             console.log('🩺 Plan diagnostics (partial save)', diag);
           } catch {}
-          throw new Error(`Schedule saved ${savedCount}/${rows.length} — tap Generate again to rebuild. Old completed days are kept. Failed chunks: ${failed.map(i=>i+1).join(',')}`);
+          throw new Error(`Schedule saved ${savedCount}/${rows.length} — tap Generate again to rebuild. Old completed days are kept. Failed chunks: ${failed.map((i)=>i+1).join(',')}`);
         }
       }
 
@@ -493,7 +626,7 @@ export function ScheduleScreen({ navigation, route }) {
       await yieldPaint();
       if (isStale()) return;
       const reloaded = await load();
-      // FIX-SCOPE: build diagnostics object (success path) — from values already in scope + post-save readback
+      // FIX-SCOPE + FIX-VERIFY: build diagnostics object (success path) — from values already in scope + post-save readback
       try {
         const diag = buildPlanDiagnostics({
           rows,
@@ -506,6 +639,12 @@ export function ScheduleScreen({ navigation, route }) {
           chunkSize: typeof diagChunkSize !== 'undefined' ? diagChunkSize : 500,
           workerCount: typeof diagWorkerCount !== 'undefined' ? diagWorkerCount : 2,
           reloadedSessions: reloaded || [],
+          deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+          verifyInfo: {
+            perChunk: typeof diagVerifyPerChunk !== 'undefined' ? diagVerifyPerChunk : [],
+            retries: typeof diagVerifyRetries !== 'undefined' ? diagVerifyRetries : 0,
+            finalCount: typeof diagFinalCount !== 'undefined' ? diagFinalCount : (reloaded ? reloaded.length : null),
+          },
         });
         setDiagnostics(diag);
         console.log('🩺 Plan diagnostics', diag);

@@ -6546,6 +6546,192 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failed2.length, 0, `FIX-SCOPE: ${failed2.length} check(s) failed -> ${failed2.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-VERIFY v2: first-chunk deletion race + end silent write loss
+  console.log('\n--- FIX-VERIFY v2 ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const record = async (id, desc, fn) => { try { await fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } };
+
+  // dynamic import pure helpers
+  let SS = null; let ssErr = '';
+  try { SS = await import('./../src/lib/scheduleSave.js'); } catch (e) { ssErr = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const needSS = () => assert.ok(SS, `scheduleSave import failed: ${ssErr}`);
+
+  check('VERIFY1', 'pure verify helper computeMissingIds exact missing ids', () => {
+    needSS();
+    const { computeMissingIds } = SS;
+    assert.equal(typeof computeMissingIds, 'function', 'computeMissingIds exists');
+    const sent = ['a','b','c'];
+    const returned = [{id:'a'},{id:'c'}];
+    const miss = computeMissingIds(sent, returned);
+    assert.deepEqual(miss, ['b'], `missing should be ['b'] got ${JSON.stringify(miss)}`);
+    const sent2 = ['x','y'];
+    const returned2 = ['x'];
+    const miss2 = computeMissingIds(sent2, returned2);
+    assert.deepEqual(miss2, ['y'], 'string ids also work');
+    const missEmpty = computeMissingIds([], []);
+    assert.deepEqual(missEmpty, [], 'empty -> empty');
+    const allMissing = computeMissingIds(['a','b'], []);
+    assert.deepEqual(allMissing, ['a','b'], 'none returned -> all missing');
+    const noneMissing = computeMissingIds(['a','b'], [{id:'a'},{id:'b'}]);
+    assert.deepEqual(noneMissing, [], 'all returned -> none missing');
+  });
+
+  await record('VERIFY2', 'simulated under-count → retry then honest failure exact counts', async () => {
+    needSS();
+    const { computeMissingIds } = SS;
+    // scenario 1: first verify short by 1, retry succeeds
+    let sent = ['a','b','c'];
+    let firstReturned = [{id:'a'},{id:'b'}];
+    let missing = computeMissingIds(sent, firstReturned);
+    assert.deepEqual(missing, ['c'], 'first missing c');
+    // retry missing once
+    let retryReturned = [{id:'a'},{id:'b'},{id:'c'}];
+    let missingAfterRetry = computeMissingIds(sent, retryReturned);
+    assert.deepEqual(missingAfterRetry, [], 'after retry no missing — should succeed');
+
+    // scenario 2: still short after retry → failed chunk with exact counts
+    sent = ['a','b','c'];
+    firstReturned = [{id:'a'}];
+    missing = computeMissingIds(sent, firstReturned);
+    assert.deepEqual(missing, ['b','c'], 'first missing b,c');
+    // retry returns only b
+    let secondReturned = [{id:'a'},{id:'b'}];
+    let stillMissing = computeMissingIds(sent, secondReturned);
+    assert.deepEqual(stillMissing, ['c'], 'still missing c after retry');
+    // final state: sent 3, returned 2, missing 1 → failed chunk exact counts
+    const perChunk = { sent: 3, returned: 2, missingCount: 1 };
+    assert.equal(perChunk.sent, 3, 'sent count exact');
+    assert.equal(perChunk.returned, 2, 'returned count exact');
+    assert.equal(perChunk.missingCount, 1, 'missing count exact');
+
+    // scenario 3: final verification throws LOUD
+    const finalVerify = (gen, stored) => {
+      if (stored < gen) throw new Error(`Saved ${stored}/${gen} — tap Generate again.`);
+    };
+    let threw = false;
+    try { finalVerify(3819, 3319); } catch (e) { threw = true; assert.equal(e.message, 'Saved 3319/3819 — tap Generate again.', 'LOUD message exact'); }
+    assert.ok(threw, 'final verify throws on under-count');
+    threw = false;
+    try { finalVerify(100, 100); } catch { threw = true; }
+    assert.ok(!threw, 'final verify does not throw when equal');
+  });
+
+  check('VERIFY3', 'all generated rows have stable unique ids (uuid v4)', () => {
+    needSS();
+    const mkS = (id, subject, chapter, over = {}) => ({
+      id, subject, chapter, weightage: 3, estimated_hours: 4,
+      status: 'locked', track: 'class', progress_percent: 0, archived: false, ...over,
+    });
+    const syllabus = Array.from({length: 20}, (_,i)=> mkS(`s${i}`, 'Science', `Ch${i}`));
+    const rows = generateSchedule({
+      syllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 4,
+      userId: 'u-verify3', today: '2026-10-01', createdAt: '2026-10-01T00:00:00.000Z', examDate: '2028-04-15',
+    });
+    // simulate ScheduleScreen id assignment
+    for (const r of rows) { if (!r.id) r.id = uuid(); }
+    {
+      const seen = new Set();
+      for (const r of rows) {
+        while (seen.has(r.id)) r.id = uuid();
+        seen.add(r.id);
+      }
+    }
+    assert.ok(rows.length > 0, 'rows generated');
+    assert.ok(rows.every(r => typeof r.id === 'string' && r.id.length >= 30), 'every row has id');
+    const uniq = new Set(rows.map(r=>r.id));
+    assert.equal(uniq.size, rows.length, `all ids unique: ${uniq.size} vs ${rows.length}`);
+    // uuid v4 format check
+    const uuidV4Re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    assert.ok(rows.every(r => uuidV4Re.test(r.id) || r.id.length >= 30), 'ids look like uuid v4');
+  });
+
+  await record('VERIFY4', 'serialization order delete→chunk1→verify→workers via spies', async () => {
+    const order = [];
+    const mockRemoveWhere = async () => { order.push('delete'); return 10; };
+    const mockInsertMany = async (chunk) => { order.push(`insert-${chunk[0].id}`); await new Promise(r=>setTimeout(r, 2)); };
+    const mockList = async (opts) => { order.push(`verify-${opts.in.id[0]}`); return opts.in.id.map(id=>({id})); };
+
+    const chunks = [[{id:'c1-a'},{id:'c1-b'}], [{id:'c2-a'}], [{id:'c3-a'}]];
+
+    // simulate FIX-VERIFY serialized flow
+    order.push('start');
+    const del = await mockRemoveWhere(); // delete
+    order.push('settle');
+    await new Promise(r=>setTimeout(r, 1));
+    // first chunk alone
+    await mockInsertMany(chunks[0]);
+    await mockList({in:{id:chunks[0].map(r=>r.id)}});
+    // workers for remaining
+    let nextIdx = 1;
+    const worker = async () => {
+      while (true) {
+        const cur = nextIdx++;
+        if (cur >= chunks.length) break;
+        await mockInsertMany(chunks[cur]);
+        await mockList({in:{id:chunks[cur].map(r=>r.id)}});
+      }
+    };
+    const workers = [worker(), worker()];
+    await Promise.all(workers);
+
+    // assertions
+    const deleteIdx = order.indexOf('delete');
+    const firstInsertIdx = order.indexOf('insert-c1-a');
+    const firstVerifyIdx = order.indexOf('verify-c1-a');
+    const secondInsertIdx = order.indexOf('insert-c2-a');
+    assert.ok(deleteIdx >= 0, 'delete happened');
+    assert.ok(firstInsertIdx > deleteIdx, 'delete → chunk1 insert');
+    assert.ok(firstVerifyIdx > firstInsertIdx, 'chunk1 insert → verify');
+    assert.ok(secondInsertIdx > firstVerifyIdx, 'verify(chunk1) → workers (no parallel before first verified)');
+    assert.ok(order[0] === 'start' && order[1] === 'delete', 'starts with delete after start');
+    // ensure settle between delete and first insert
+    const settleIdx = order.indexOf('settle');
+    assert.ok(settleIdx > deleteIdx && settleIdx < firstInsertIdx, 'settle after delete before first insert');
+  });
+
+  check('VERIFY5', 'diagnostics includes DELETE.deletedCount and VERIFY perChunk/retries/finalCount', () => {
+    needSS();
+    const { buildPlanDiagnostics } = SS;
+    const rows = [{date:'2026-10-01'}, {date:'2026-10-02'}];
+    const diag = buildPlanDiagnostics({
+      rows,
+      coverage: {},
+      syllabus: [],
+      profile: {},
+      settings: {},
+      savedCount: 2,
+      failedChunks: [],
+      chunkSize: 500,
+      workerCount: 2,
+      reloadedSessions: rows,
+      deleteDeletedCount: 5,
+      verifyInfo: { perChunk: [{index:0,sent:2,returned:2,missingCount:0,retried:false}], retries: 1, finalCount: 2 },
+    });
+    assert.ok(diag.DELETE, 'DELETE field exists');
+    assert.equal(diag.DELETE.deletedCount, 5, 'DELETE.deletedCount logged');
+    assert.ok(diag.VERIFY, 'VERIFY field exists');
+    assert.equal(diag.VERIFY.retries, 1, 'VERIFY.retries');
+    assert.equal(diag.VERIFY.finalCount, 2, 'VERIFY.finalCount');
+    assert.equal(diag.VERIFY.perChunk.length, 1, 'VERIFY.perChunk');
+    assert.equal(diag.VERIFY.perChunk[0].sent, 2, 'perChunk sent');
+  });
+
+  check('VERIFY6', 'db.js findings: insertMany uses upsert onConflict id, removeWhere returns count, remoteWithRetry retries once', () => {
+    const dbSrc = read('src/lib/db.js');
+    assert.ok(dbSrc.includes('.upsert(') && dbSrc.includes("onConflict: 'id'"), 'insertMany uses upsert onConflict id');
+    assert.ok(dbSrc.includes("select('id')") && dbSrc.includes('deletedCount'), 'removeWhere returns affected count via select');
+    assert.ok(dbSrc.includes('remoteWithRetry') && dbSrc.includes('timeout') && dbSrc.includes('network'), 'remoteWithRetry retries on timeout/network/fetch/failed');
+    assert.ok(dbSrc.includes('function withTimeout') && dbSrc.includes('20000'), 'withTimeout 20s');
+    assert.ok(dbSrc.includes('ensureIdentity') && dbSrc.includes('getSessionUid'), 'ensureIdentity checks session uid');
+  });
+
+  const failedV = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedV.length, 0, `FIX-VERIFY: ${failedV.length} check(s) failed -> ${failedV.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 

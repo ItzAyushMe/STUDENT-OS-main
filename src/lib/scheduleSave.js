@@ -19,6 +19,16 @@ function maxDate(rows) {
   return dates[dates.length-1] || null;
 }
 
+// FIX-VERIFY v2: pure verify helper — returns exact missing ids
+export function computeMissingIds(sentIds, returnedRowsOrIds) {
+  if (!Array.isArray(sentIds) || !sentIds.length) return [];
+  const returned = Array.isArray(returnedRowsOrIds) ? returnedRowsOrIds : [];
+  const returnedSet = new Set(
+    returned.map((r) => (typeof r === 'string' ? r : r?.id)).filter(Boolean)
+  );
+  return sentIds.filter((id) => !returnedSet.has(id));
+}
+
 export function buildPlanDiagnostics({
   rows = [],
   coverage = null,
@@ -30,6 +40,8 @@ export function buildPlanDiagnostics({
   chunkSize = 500,
   workerCount = 2,
   reloadedSessions = [],
+  deleteDeletedCount = null,
+  verifyInfo = null,
 }) {
   // PLAN: from generated rows BEFORE save
   const planMonths = {
@@ -143,6 +155,16 @@ export function buildPlanDiagnostics({
     classQueueEmptiesDate,
   };
 
+  const DELETE = {
+    deletedCount: deleteDeletedCount,
+  };
+
+  const VERIFY = verifyInfo || {
+    perChunk: [],
+    retries: 0,
+    finalCount: null,
+  };
+
   return {
     PLAN,
     SAVE,
@@ -150,6 +172,8 @@ export function buildPlanDiagnostics({
     PROFILE,
     SYLLABUS,
     QUEUES,
+    DELETE,
+    VERIFY,
     generatedAt: new Date().toISOString(),
   };
 }

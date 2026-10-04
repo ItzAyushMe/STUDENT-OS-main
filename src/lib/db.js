@@ -314,20 +314,20 @@ export const db = {
       const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
       const run = async () => {
         try {
-          const { data, error } = await supabase.from(table).insert(full).select();
+          const { data, error } = await supabase.from(table).upsert(full, { onConflict: 'id' }).select();
           if (error) throw error;
           return data || full;
         } catch (e) {
           const msg = String(e?.message || '').toLowerCase();
           if (msg.includes('updated_at')) {
             const without = full.map(({ updated_at: _u, ...r }) => r);
-            const { data, error } = await supabase.from(table).insert(without).select();
+            const { data, error } = await supabase.from(table).upsert(without, { onConflict: 'id' }).select();
             if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
             return data || without;
           }
           if (msg.includes('created_at')) {
             const without = full.map(({ created_at: _c, ...r }) => r);
-            const { data, error } = await supabase.from(table).insert(without).select();
+            const { data, error } = await supabase.from(table).upsert(without, { onConflict: 'id' }).select();
             if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
             return data || without;
           }
@@ -338,7 +338,11 @@ export const db = {
     }
     const rows = await localAll(table);
     const full = list.map((row) => ({ id: row.id || uuid(), created_at: row.created_at || nowIso(), ...row }));
-    await localSave(table, rows.concat(full));
+    // FIX-VERIFY: local upsert onConflict id — replace existing, never duplicate
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const r of full) byId.set(r.id, { ...(byId.get(r.id) || {}), ...r });
+    const merged = Array.from(byId.values());
+    await localSave(table, merged);
     return full;
   },
 
@@ -462,15 +466,20 @@ export const db = {
         }
         let q = supabase.from(table).delete();
         for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
-        const { error } = await q;
+        // FIX-VERIFY: return affected count via select('id')
+        q = q.select('id');
+        const { data, error } = await q;
         if (error) throw new Error(`[db.removeWhere ${table}] ${error.message}`);
-        return true;
+        const deletedCount = Array.isArray(data) ? data.length : 0;
+        return deletedCount;
       };
       return await remoteWithRetry(run, `db.removeWhere ${table}`);
     }
     const rows = await localAll(table);
-    await localSave(table, rows.filter((r) => !matches(r, { eq })));
-    return true;
+    const kept = rows.filter((r) => !matches(r, { eq }));
+    const deletedCount = rows.length - kept.length;
+    await localSave(table, kept);
+    return deletedCount;
   },
 
   async count(table, eq) {
