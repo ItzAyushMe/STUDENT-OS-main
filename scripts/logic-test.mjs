@@ -3574,6 +3574,152 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/never.*>2 consecutive/.test(src) || /consec/.test(src) || /dayTypeSeq/.test(src), 'must enforce never >2 consecutive same-type');
   });
 
+  // ================= FIX-MAINT D19b: class maintenance reserve + LRU final stretch =================
+  check('MAINT1', 'FIX-MAINT D19b DEFECT1: class-queue-drained before cutoff => >=2 class maintenance blocks/day until cutoff, zero after', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-10-01';
+    // Small class syllabus that finishes early (4 chapters *2h =8h, 6h/day -> done in 2 days)
+    // plus olympiad/exam to create leftover pressure that previously starved class maintenance
+    // D14b: with known signup, untagged = at-or-below => base cutoff absolute, zero after
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      mkS('c3', 'English', 'Grammar', { estimated_hours: 2 }),
+      mkS('c4', 'Science', 'Acids', { estimated_hours: 2 }),
+      { id: 'o1', subject: 'Maths Olympiad', chapter: 'Number Theory', track:'olympiad', status:'locked', progress_percent:0, weightage:3, estimated_hours:10, archived:false },
+      { id: 'e1', subject: 'JEE', chapter: 'Kinematics', track:'exam', status:'locked', progress_percent:0, weightage:3, estimated_hours:10, archived:false },
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, weekdayHours: 6, weekendHours: 6, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:30,
+      userId:'u-maint1', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15', olympiadDate: '2027-09-20',
+      class_level: 'Class 10', profile: { class_level: 'Class 10' },
+    });
+    // Group by date
+    const byDate = {};
+    for (const r of p) {
+      if (!byDate[r.date]) byDate[r.date]=[];
+      byDate[r.date].push(r);
+    }
+    // Find cutoff: base is 2027-02-25 (since today 2026-10-01)
+    const cutoff = '2027-02-25';
+    // Check dates between Jan 13 2027 and cutoff: should have >=2 class maintenance blocks/day
+    const checkStart = '2027-01-13';
+    let daysChecked = 0;
+    let daysWith2ClassMaint = 0;
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      if (date < checkStart || date > cutoff) continue;
+      // class maintenance = track class, session_type != study, date <= cutoff
+      const classMaint = dayRows.filter(r=>r.track==='class' && r.session_type!=='study');
+      daysChecked++;
+      if (classMaint.length >= 2) daysWith2ClassMaint++;
+    }
+    assert.ok(daysChecked>0, `MAINT1: expected days between ${checkStart} and ${cutoff}, got ${daysChecked}`);
+    const ratio = daysWith2ClassMaint / daysChecked;
+    assert.ok(ratio >= 0.8, `MAINT1: class-queue-drained before cutoff should have >=2 class maint blocks on >=80% days, got ${daysWith2ClassMaint}/${daysChecked}=${ratio.toFixed(2)} (PO proof Jan-13 vanishes)`);
+    // Zero after cutoff for at-or-below signup (no above)
+    const afterCutoffClass = p.filter(r=>r.date > cutoff && r.track==='class');
+    assert.equal(afterCutoffClass.length, 0, `MAINT1: zero class after cutoff ${cutoff}, got ${afterCutoffClass.length} (D14b absolute)`);
+  });
+
+  check('MAINT2', 'FIX-MAINT D19b: other tracks still place (no starvation of oly/exam)', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-10-01';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      { id: 'o1', subject: 'Maths Olympiad', chapter: 'Number Theory', track:'olympiad', status:'locked', progress_percent:0, weightage:3, estimated_hours:20, archived:false },
+      { id: 'e1', subject: 'JEE', chapter: 'Kinematics', track:'exam', status:'locked', progress_percent:0, weightage:3, estimated_hours:20, archived:false },
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, weekdayHours: 4, weekendHours: 4, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:30,
+      userId:'u-maint2', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15', olympiadDate: '2027-09-20',
+    });
+    const oly = p.filter(r=>r.track==='olympiad' && r.session_type==='study');
+    const exam = p.filter(r=>r.track==='exam' && r.session_type==='study');
+    assert.ok(oly.length>0, `MAINT2: olympiad should still place, got ${oly.length}`);
+    assert.ok(exam.length>0, `MAINT2: exam should still place, got ${exam.length}`);
+    // Check they finish by their dates
+    const olyAfter = p.filter(r=>r.track==='olympiad' && r.date > '2027-09-20');
+    assert.equal(olyAfter.length, 0, `olympiad must hard-stop at its date, got ${olyAfter.length} after`);
+  });
+
+  check('MAINT3', 'FIX-MAINT D19b DEFECT2: final-stretch month no chapter >2 blocks/day, week set >=3x daily count', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:2, archived:false, ...over });
+    const today = '2026-01-05';
+    const rows = [
+      mkS('c1', 'Science', 'Life Processes', { estimated_hours: 2 }),
+      mkS('c2', 'Maths', 'Trigonometry', { estimated_hours: 2 }),
+      mkS('c3', 'English', 'Grammar', { estimated_hours: 2 }),
+      mkS('c4', 'Science', 'Acids', { estimated_hours: 2 }),
+      mkS('c5', 'Maths', 'Algebra', { estimated_hours: 2 }),
+      mkS('c6', 'Science', 'Motion', { estimated_hours: 2 }),
+      mkS('c7', 'English', 'Writing', { estimated_hours: 2 }),
+      mkS('c8', 'Maths', 'Geometry', { estimated_hours: 2 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 6, weekdayHours: 6, weekendHours: 6, preferredTime:'Morning', daysOff:[], lightDay: null, weeks:60,
+      userId:'u-maint3', today, createdAt: today+'T00:00:00.000Z',
+      examDate: '2028-04-15',
+    });
+    // Final stretch month: Dec 2027 (2027-12-01 to 2027-12-31) — avoid buffer which starts Jan 2028
+    const finalMonth = p.filter(r=>r.date >= '2027-12-01' && r.date <= '2027-12-31' && !/Backlog|Buffer/.test(r.topic));
+    const byDate = {};
+    for (const r of finalMonth) {
+      if (!byDate[r.date]) byDate[r.date]=[];
+      byDate[r.date].push(r);
+    }
+    // (c1) no chapter appears in more than 2 blocks/day across ALL types
+    for (const [date, dayRows] of Object.entries(byDate)) {
+      const chapCount = {};
+      for (const r of dayRows) {
+        if (/Backlog|Buffer/.test(r.topic)) continue;
+        const m = String(r.topic).match(/:\s*(.+?)(?:\s*\(|\s*—|$)/);
+        const chap = m ? m[1].trim() : String(r.topic).trim();
+        const key = `${r.subject}|${chap}`;
+        chapCount[key] = (chapCount[key]||0)+1;
+      }
+      for (const [k,cnt] of Object.entries(chapCount)) {
+        assert.ok(cnt <= 2, `MAINT3 final-stretch ${date} chapter ${k} appears ${cnt} times >2 (must be <=2)`);
+      }
+    }
+    // (c2) set of chapters used across a week >=3x daily-chapter count
+    // Take a week in final stretch, e.g., 2027-12-08 to 2027-12-14 (non-buffer)
+    const weekStart = '2027-12-08';
+    const weekEnd = '2027-12-14';
+    const weekRows = p.filter(r=>r.date >= weekStart && r.date <= weekEnd && !/Backlog|Buffer/.test(r.topic));
+    const weekChapters = new Set();
+    for (const r of weekRows) {
+      const m = String(r.topic).match(/:\s*(.+?)(?:\s*\(|\s*—|$)/);
+      const chap = m ? m[1].trim() : String(r.topic).trim();
+      weekChapters.add(`${r.subject}|${chap}`);
+    }
+    // daily-chapter count average
+    const dailyCounts = Object.values(byDate).map(arr=>{
+      const s = new Set(arr.map(r=>{
+        const m = String(r.topic).match(/:\s*(.+?)(?:\s*\(|\s*—|$)/);
+        const chap = m ? m[1].trim() : String(r.topic).trim();
+        return `${r.subject}|${chap}`;
+      }));
+      return s.size;
+    });
+    const avgDaily = dailyCounts.length ? dailyCounts.reduce((a,b)=>a+b,0)/dailyCounts.length : 0;
+    assert.ok(weekChapters.size >= Math.max(3, Math.ceil(avgDaily*3)), `MAINT3 week ${weekStart} to ${weekEnd} chapters ${weekChapters.size} must be >=3x avg daily ${avgDaily.toFixed(1)} (i.e., >=${Math.ceil(avgDaily*3)})`);
+  });
+
+  check('MAINT4', 'FIX-MAINT: D14b/FILLDUP/VARIETY pins still present', () => {
+    const src = read('src/lib/scheduleGenerator.js');
+    assert.ok(/hasAboveSignupRowsForCoverage/.test(src), 'D14b strict pin must remain');
+    assert.ok(/dayTopicCounts/.test(src) && /cnt < 2/.test(src), 'FILLDUP cap 2 must remain');
+    assert.ok(/varietyTypes/.test(src) && /prevDayLastPickKey/.test(src), 'VARIETY pins must remain');
+    assert.ok(/chapterLastUsed/.test(src) && /dayChaptersUsed/.test(src), 'MAINT LRU pins must be present');
+    assert.ok(/classQueueEmpty/.test(src) || /reserve.*class.*maintenance/.test(src) || /Guarantee.*class maintenance/.test(src), 'MAINT reserve class maintenance must be present');
+  });
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');

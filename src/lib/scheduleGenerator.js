@@ -997,6 +997,8 @@ export function planSchedule(input) {
   const studied = [];              // {subject, chapter, date, track} for revision cycles
   // FIX-VARIETY D19: track previous day's last subject+chapter to avoid repeat
   let prevDayLastPickKey = null; // e.g., "Science|Life Processes"
+  // FIX-MAINT D19b: LRU tracking for revision/quiz final stretch
+  const chapterLastUsed = new Map(); // key: track|subject|chapter -> last date string
   const leftover = {};
   for (const t of allocatable) leftover[t] = 0;
 
@@ -1140,6 +1142,8 @@ export function planSchedule(input) {
     let lastPickKeyToday = null;
     // FIX-VARIETY D19: track day's type sequence for variety enforcement
     const dayTypeSeq = [];
+    // FIX-MAINT D19b: track chapters used today to avoid repeat unless pool<3
+    const dayChaptersUsed = new Set();
 
     const push = (subject, topic, type, minutes, track, priority) => {
       const m = Math.min(Math.floor(num(minutes, 0)), Math.floor(capacity));
@@ -1175,22 +1179,17 @@ export function planSchedule(input) {
       cursor += m + BREATH_MIN;
       capacity = Math.max(0, capacity - (m + BREATH_MIN));
       blocks += 1;
-      // FIX-VARIETY D19: track for prev-day avoidance and type variety
-      lastPickKeyToday = `${String(subject || '')}|${String(topic || '').replace(/^.*?:\s*/, '').split(' ')[0] || String(topic || '')}`;
-      // Actually store subject|chapter for avoidance: try to extract chapter from topic or use topic
-      // Use subject|topic raw for simplicity, but also store subject|chapter via filler
-      // For variety, store type
+      // FIX-VARIETY D19 + FIX-MAINT D19b: track for prev-day avoidance, type variety, LRU and same-day chapter avoidance
+      const chapMatchForPush = String(topic || '').match(/:\s*(.+?)(?:\s*\(|—|$)/);
+      const chapForPush = chapMatchForPush ? chapMatchForPush[1].trim() : String(topic || '').trim();
+      const subjectForPush = String(subject || '');
+      const trackForPush = String(track || 'class');
+      const chapterKey = `${trackForPush}|${subjectForPush}|${chapForPush}`;
+      const subjectChapterKey = `${subjectForPush}|${chapForPush}`;
+      chapterLastUsed.set(chapterKey, date);
+      dayChaptersUsed.add(subjectChapterKey);
+      lastPickKeyToday = subjectChapterKey;
       dayTypeSeq.push(type);
-      // For prev-day avoidance, store subject|chapter if available, else subject|topic
-      // We'll store subject|chapter from filler (chapter field) via a separate var, but for generic push we use subject|topic
-      // The fillerForTrack already handles prevDayLastPickKey via subject|chapter, so we set a more precise key when possible
-      // Here we set a generic key as fallback
-      if (!lastPickKeyToday || lastPickKeyToday.includes('|')) {
-        // keep as is, but also try to store chapter if topic contains chapter
-        const chapMatch = String(topic || '').match(/:\s*(.+?)(?:\s*\(|$)/);
-        const chap = chapMatch ? chapMatch[1].trim() : String(topic || '');
-        lastPickKeyToday = `${String(subject || '')}|${chap}`;
-      }
       return 'ok';
     };
 
@@ -1438,9 +1437,31 @@ export function planSchedule(input) {
           pool = filtered;
         }
       }
+      // FIX-MAINT D19b: LRU + same-day avoidance for final stretch
+      if (pool.length >= 3) {
+        // same-day avoidance
+        const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
+        if (notUsedToday.length >= 2) {
+          pool = notUsedToday;
+        }
+        // LRU sort: least recently used first
+        pool = [...pool].sort((a,b)=>{
+          const ka = `${a.track}|${a.subject}|${a.chapter}`;
+          const kb = `${b.track}|${b.subject}|${b.chapter}`;
+          const da = chapterLastUsed.get(ka) || '';
+          const db = chapterLastUsed.get(kb) || '';
+          if (da !== db) return da < db ? -1 : 1;
+          return 0;
+        });
+      }
       if (!pool.length) return null;
-      // D19: independent subject rotation hash extended: *2
-      let idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
+      // D19: independent subject rotation hash extended: *2, but LRU takes precedence when pool>=3
+      let idx = 0;
+      if (pool.length >= 3) {
+        idx = 0; // LRU already sorted, pick least recent
+      } else {
+        idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
+      }
       let pick = pool[idx] || pool[pool.length-1];
       const resolveType = () => {
         if (forcedType) return forcedType;
@@ -1868,8 +1889,23 @@ export function planSchedule(input) {
     // revision cycle every 3rd day (revisit the last topics)
     // FIX-STUDY-FIRST D16: shortage halves revision cycle quota (light), stops quiz
     // FIX-VARIETY D19: avoid same as prev day's last pick when pool allows
+    // FIX-MAINT D19b: LRU rotation + same-day avoidance
     if (d % REVISION_CYCLE_DAYS === REVISION_CYCLE_DAYS - 1 && studied.length && capacity >= 20) {
-      const recent = studied.slice(-4);
+      let recent = studied.slice(-8);
+      // LRU sort: least recently used first
+      recent.sort((a,b)=>{
+        const ka = `${a.track}|${a.subject}|${a.chapter}`;
+        const kb = `${b.track}|${b.subject}|${b.chapter}`;
+        const da = chapterLastUsed.get(ka) || '';
+        const db = chapterLastUsed.get(kb) || '';
+        if (da !== db) return da < db ? -1 : 1;
+        return 0;
+      });
+      // same-day avoidance if pool>=3
+      if (recent.length >= 3) {
+        const filteredRecent = recent.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
+        if (filteredRecent.length >= 2) recent = filteredRecent;
+      }
       const bySubject = {};
       for (const s of recent) (bySubject[s.subject] = bySubject[s.subject] || new Set()).add(s.chapter);
       let subjects = Object.keys(bySubject);
@@ -1880,8 +1916,37 @@ export function planSchedule(input) {
           const filteredSubs = subjects.filter(sub => sub !== prevSubj);
           if (filteredSubs.length >= 2) subjects = filteredSubs;
         }
-        const subj = subjects[d % subjects.length];
-        const chaptersArr = [...bySubject[subj]];
+        // LRU for subject: pick subject whose chapters have oldest last used
+        subjects.sort((a,b)=>{
+          const aChaps = [...bySubject[a]];
+          const bChaps = [...bySubject[b]];
+          const aOldest = aChaps.map(ch=>{
+            const k = `${recent.find(s=>s.subject===a && s.chapter===ch)?.track || 'class'}|${a}|${ch}`;
+            return chapterLastUsed.get(k) || '';
+          }).sort()[0] || '';
+          const bOldest = bChaps.map(ch=>{
+            const k = `${recent.find(s=>s.subject===b && s.chapter===ch)?.track || 'class'}|${b}|${ch}`;
+            return chapterLastUsed.get(k) || '';
+          }).sort()[0] || '';
+          if (aOldest !== bOldest) return aOldest < bOldest ? -1 : 1;
+          return 0;
+        });
+        const subj = subjects[0];
+        let chaptersArr = [...bySubject[subj]];
+        // LRU for chapters within subject
+        chaptersArr.sort((a,b)=>{
+          const ka = `${recent.find(s=>s.subject===subj && s.chapter===a)?.track || 'class'}|${subj}|${a}`;
+          const kb = `${recent.find(s=>s.subject===subj && s.chapter===b)?.track || 'class'}|${subj}|${b}`;
+          const da = chapterLastUsed.get(ka) || '';
+          const db = chapterLastUsed.get(kb) || '';
+          if (da !== db) return da < db ? -1 : 1;
+          return 0;
+        });
+        // avoid same-day and prev-day chapter
+        if (chaptersArr.length >= 3) {
+          chaptersArr = chaptersArr.filter(c => !dayChaptersUsed.has(`${subj}|${c}`));
+          if (!chaptersArr.length) chaptersArr = [...bySubject[subj]];
+        }
         // D19: avoid same chapter as prev day's last pick
         let chapters = chaptersArr.slice(0, 2).join(', ');
         if (prevDayLastPickKey && chaptersArr.length >= 2) {
@@ -1891,7 +1956,7 @@ export function planSchedule(input) {
             if (alt.length) chapters = alt.slice(0, 2).join(', ');
           }
         }
-        const lastTrack = recent[recent.length - 1].track || 'class';
+        const lastTrack = recent[recent.length - 1]?.track || recent[0]?.track || 'class';
         if (!(lastTrack === 'class' && classOff) && !eventPassed(lastTrack)) {
           const revMin = shortage ? Math.min(20, capacity) : Math.min(40, capacity);
           push(subj, `Revision: ${chapters}`, 'revision', revMin, lastTrack);
@@ -1901,15 +1966,86 @@ export function planSchedule(input) {
 
     // short quiz slot when there's leftover time — FIX-STUDY-FIRST: stop when shortage
     // FIX-VARIETY D19: avoid same as prev day when possible
+    // FIX-MAINT D19b: LRU for quiz — use least-recently-used when pool>=3 and avoid same-day
     if (capacity >= 20 && studied.length && !shortage) {
-      let last = studied[studied.length - 1];
-      if (prevDayLastPickKey && studied.length >= 3) {
+      let candidates = studied.slice(-8);
+      // LRU: sort by last used date ascending (least recent first)
+      candidates.sort((a,b)=>{
+        const ka = `${a.track}|${a.subject}|${a.chapter}`;
+        const kb = `${b.track}|${b.subject}|${b.chapter}`;
+        const da = chapterLastUsed.get(ka) || '';
+        const db = chapterLastUsed.get(kb) || '';
+        if (da !== db) return da < db ? -1 : 1;
+        return 0;
+      });
+      // avoid same-day chapter if pool>=3
+      if (candidates.length >= 3) {
+        candidates = candidates.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
+        if (!candidates.length) candidates = studied.slice(-8);
+      }
+      let last = candidates[0] || studied[studied.length - 1];
+      if (prevDayLastPickKey && candidates.length >= 3) {
         const prevKey = prevDayLastPickKey;
-        const alt = studied.slice(-4).find(s => `${s.subject}|${s.chapter}` !== prevKey);
+        const alt = candidates.find(s => `${s.subject}|${s.chapter}` !== prevKey);
         if (alt) last = alt;
       }
       if (!(last.track === 'class' && classOff) && !eventPassed(last.track)) {
         push(last.subject, `Quick quiz: ${last.chapter}`, 'quiz', Math.min(20, capacity), last.track);
+      }
+    }
+
+    // FIX-MAINT D19b DEFECT1: when class study queue drains early but date<=cutoff, reserve class maintenance BEFORE other tracks overflow
+    // Guarantee at least 2 class maintenance blocks/day, cap oly/exam pipeline to proportional share
+    if (!isReducedDay && !classOff && date <= cutoff) {
+      const classQueueEmpty = !(queues['class'] && queues['class'].length) || !hasWorkableClass;
+      if (classQueueEmpty && studied.some(s=>s.track==='class')) {
+        // Check if we have class maintenance possible
+        const classStudied = studied.filter(s=>s.track==='class');
+        if (classStudied.length) {
+          let reserved = 0;
+          let reserveAttempts = 0;
+          let reserveCounter = 0;
+          // variety rotation for reserved blocks
+          const varietyTypes = ['mock','revision','practice','quiz'];
+          while (reserved < 2 && reserveAttempts < 10 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
+            reserveAttempts++;
+            const desiredType = varietyTypes[reserveCounter % varietyTypes.length];
+            // avoid same-day chapter if pool>=3
+            let filler = fillerForTrack('class', reserveCounter, desiredType);
+            if (!filler) break;
+            // LRU + same-day avoidance already in fillerForTrack via prevDay and dayChaptersUsed filtering
+            // Also avoid same-day chapter reuse
+            if (dayChaptersUsed.has(`${filler.subject}|${filler.chapter}`) && classStudied.length >= 3) {
+              reserveCounter++;
+              continue;
+            }
+            const res = push(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
+            if (res === 'ok') {
+              reserved++;
+              reserveCounter++;
+              // deduct from freePool proportionally to keep oly/exam capped
+              freePool = Math.max(0, freePool - 40);
+            } else if (res === 'cap' || res === 'small') {
+              reserveCounter++;
+            } else if (res === 'dup') {
+              break;
+            }
+          }
+          // Cap oly/exam pipeline take to proportional share + reserved blocks
+          // freePool already reduced by reserved, and we will further cap in Phase2 by limiting alloc to timeSplit
+          // For oly/exam, ensure their alloc doesn't exceed proportional share
+          const dayCap = dayStart;
+          for (const t of ['olympiad','exam']) {
+            if (allocatable.includes(t) && prio.timeSplit[t] != null) {
+              const prop = Math.round((dayCap * num(prio.timeSplit[t],0))/100);
+              if (alloc[t] > prop + reserved*40) {
+                const excess = alloc[t] - (prop + reserved*40);
+                alloc[t] = prop + reserved*40;
+                freePool += excess;
+              }
+            }
+          }
+        }
       }
     }
 
