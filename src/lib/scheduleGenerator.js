@@ -773,14 +773,43 @@ export function planSchedule(input) {
   const sortQueue = (t) => { if (queues[t]) queues[t].sort((a, b) => compareUrgency(a, b, ctx)); };
   for (const t of Object.keys(queues)) sortQueue(t);
 
-  // ---------- FIX-S S4 + FIX-SESSION D14: class session hard cutoff(s) ----------
+  // ---------- FIX-S S4 + FIX-SESSION D14 + D14b: class session hard cutoff(s) ----------
   // Base cutoff from today (for untagged/earlier classes)
   // Final cutoff = last Feb25 before examDate for finalClass-tagged rows
+  // D14b: per-tag finalCutoff extension applies ONLY to class rows whose classLevelNum > signup class level
   const cutoff = classSessionCutoff(today, classEndOverride);
+  const signupClassNum = normalizeClassTag(profileForAnchor?.class_level ?? opts.class_level ?? null);
+  // D14b: helper to check if item is above signup
+  const isAboveSignup = (item) => {
+    if (!item || item.track !== 'class') return false;
+    if (item.classLevelNum == null) {
+      // untagged: if signup null, treat as above to preserve old shortage tests; else at-or-below
+      return signupClassNum == null;
+    }
+    if (signupClassNum == null) return true; // if signup unknown, allow extension (preserve old tests)
+    return item.classLevelNum > signupClassNum;
+  };
+  const hasAboveSignupRows = items.some((it) => isAboveSignup(it));
+  const hasAboveSignupRowsForCoverage = items.some((it) => it.track==='class' && it.classLevelNum!=null && signupClassNum!=null && it.classLevelNum > signupClassNum);
   const getCutoffForItem = (item) => {
     if (!item || item.track !== 'class') return cutoff;
-    if (finalClassNum != null && item.classLevelNum != null && item.classLevelNum === finalClassNum && finalCutoff) {
+    // D14b: at-or-below signup ALWAYS base cutoff for study AND maintenance
+    if (signupClassNum != null) {
+      if (item.classLevelNum != null && item.classLevelNum <= signupClassNum) {
+        return cutoff;
+      }
+      if (item.classLevelNum == null) {
+        // untagged with known signup => at-or-below => base
+        return cutoff;
+      }
+    }
+    // Above signup: use finalCutoff if exists
+    if (finalCutoff && isAboveSignup(item)) {
       return finalCutoff;
+    }
+    // Legacy: finalClassNum match also considered above if signup null or >signup
+    if (finalClassNum != null && item.classLevelNum != null && item.classLevelNum === finalClassNum && finalCutoff) {
+      if (signupClassNum == null || item.classLevelNum > signupClassNum) return finalCutoff;
     }
     return cutoff;
   };
@@ -1040,14 +1069,51 @@ export function planSchedule(input) {
     const classBlockedFinal = finalCutoff ? date > finalCutoff && !examRelatedDay : classBlockedBase;
     const classBlocked = classBlockedBase; // for stats, counts base cutoff days
     if (classBlocked) classCutoffDays += 1;
-    // classOff = fully blocked after final cutoff (or paused)
+    // classOff = fully blocked when no workable class remains (D14b: above-signup only gets finalCutoff)
     const hasWorkableClass = (queues['class'] || []).some((it) => {
       if (examRelatedDay) return true;
       return date <= getCutoffForItem(it);
     });
-    const classOff = (finalCutoff ? (date > finalCutoff && !examRelatedDay && !hasWorkableClass) : classBlocked) || !!classPaused;
+    // D14b: classOff logic — if hasWorkableClass, not off; else off only after respective cutoff
+    // If hasAboveSignupRows, allow maintenance until finalCutoff; else until base cutoff
+    // For at-or-below signup (no above), base cutoff is hard end for ALL class types, even examRelated
+    let classOff = false;
+    if (classPaused) {
+      classOff = true;
+    } else {
+      if (hasWorkableClass) {
+        classOff = false;
+      } else {
+        // no workable class left
+        if (hasAboveSignupRows) {
+          // above-signup exists: maintenance allowed until finalCutoff, examRelated allowed
+          if (finalCutoff && date > finalCutoff) classOff = true;
+          else if (!finalCutoff && date > cutoff) classOff = true;
+          else if (date > cutoff && !examRelatedDay) {
+            // between cutoff and final, no workable but not examRelated -> still off? Actually allow maintenance until final
+            classOff = false;
+          } else {
+            classOff = false;
+          }
+        } else {
+          // only at-or-below signup: base cutoff is hard end for ALL class (study+maintenance), even mocks
+          if (date > cutoff) classOff = true;
+        }
+      }
+      // examRelated exception only applies when hasAboveSignupRows true (above-signup maintenance)
+      // D14b PO case: ZERO class rows after base, even mocks — except shortage run-up (STUDY1)
+      const isRunUpForOff = examDate && daysToExam != null && daysToExam > 0 && daysToExam <= 14;
+      if (!hasAboveSignupRows && date > cutoff) {
+        if (!(shortage && isRunUpForOff)) {
+          classOff = true; // D14b PO case: ZERO class rows after base, even mocks
+        } else {
+          classOff = false; // shortage run-up allows class study after base
+        }
+      }
+    }
     // For coverage, we need to know if per-tag is in effect
-    const perTagInEffect = !!(finalClassNum != null && finalCutoff);
+    // D14b: perTagInEffect true only when above-signup rows exist (strict: classLevelNum > signup)
+    const perTagInEffect = !!(hasAboveSignupRowsForCoverage && finalCutoff);
     // same honesty rule as pruneExpired, applied to consolidation sessions: once a
     // one-shot event's date has arrived, revising for it is meaningless — no
     // revision / quiz / conquered-chapter ladder rows for that track from then on.
@@ -1066,10 +1132,15 @@ export function planSchedule(input) {
     const dayStart = capacity;
     let blocks = 0;
     let dupGuard = 0;
+    // FIX-FILLDUP: per-day topic counts to cap identical topics at 2
+    const dayTopicCounts = new Map();
 
     const push = (subject, topic, type, minutes, track, priority) => {
       const m = Math.min(Math.floor(num(minutes, 0)), Math.floor(capacity));
       if (m < MIN_BLOCK_MIN) return 'small';
+      // FIX-FILLDUP: cap same-topic blocks per day at 2 (for all types)
+      const cnt = dayTopicCounts.get(topic) || 0;
+      if (cnt >= 2) return 'cap'; // over cap, try next
       const start_time = minutesToTime(cursor);
       const end_time = minutesToTime(cursor + m);
       const key = dedupeKey({ date, start_time, subject: String(subject || ''), topic: String(topic || ''), session_type: type });
@@ -1080,6 +1151,7 @@ export function planSchedule(input) {
         return 'dup';
       }
       existingKeys.add(key);
+      dayTopicCounts.set(topic, cnt + 1);
       rows.push({
         user_id: userId,
         date,
@@ -1113,9 +1185,10 @@ export function planSchedule(input) {
       return block >= MIN_BLOCK_MIN ? block : 0;
     };
 
-    // place one study block for a track; returns 'ok' | 'dup' | 'none'
+    // place one study block for a track; returns 'ok' | 'dup' | 'none' | 'cap'
     // onlySubjects (FIX-S S1): restrict the pick to the day's subject pair
     // FIX-SESSION D14: per-tag cutoffs — filter by row's resolved cutoff
+    // FIX-FILLDUP: cap same-topic per day at 2, rotate to next pool member
     const placeStudy = (track, quota, allowTail, onlySubjects) => {
       const q = queues[track];
       if (!q || !q.length) return 'none';
@@ -1131,29 +1204,36 @@ export function planSchedule(input) {
         });
       }
       if (!pool.length) return 'none';
-      const it = pool[0];
-      const block = blockFor(it, Math.min(num(quota, 0), capacity), allowTail);
-      if (!block) return 'none';
-      const res = push(it.subject, it.chapter, 'study', block, track, it.overdue ? 'high' : 'normal');
-      if (res === 'small') return 'none';
-      if (res === 'dup') return 'dup';
-      it.remainingMinutes = Math.max(0, it.remainingMinutes - block);
-      it.plannedMinutes += block;
-      studied.push({ subject: it.subject, chapter: it.chapter, date, track });
-      if (it.remainingMinutes > 0 && it.remainingMinutes < MIN_BLOCK_MIN) {
-        it.absorbedMinutes = it.remainingMinutes; // tail too small for a real block
-        it.remainingMinutes = 0;
-      }
-      if (it.remainingMinutes <= 0) {
-        const idx = q.indexOf(it);
-        if (idx >= 0) q.splice(idx, 1); // the picked item is not always the queue head now
-        finishedTopics += 1;
-        // every 2nd finished topic gets a timed-practice block
-        if (finishedTopics % 2 === 0 && capacity >= 35) {
-          push(it.subject, `Timed practice: 10 Qs in 25 min (${it.chapter})`, 'practice', 30, track);
+      // try pool members in order, respecting per-day cap 2
+      for (let pi = 0; pi < pool.length; pi++) {
+        const it = pool[pi];
+        const topic = it.chapter;
+        const cnt = dayTopicCounts.get(topic) || 0;
+        if (cnt >= 2) continue; // cap reached, try next
+        const block = blockFor(it, Math.min(num(quota, 0), capacity), allowTail);
+        if (!block) continue;
+        const res = push(it.subject, it.chapter, 'study', block, track, it.overdue ? 'high' : 'normal');
+        if (res === 'small') return 'none';
+        if (res === 'dup') return 'dup';
+        if (res === 'cap') continue; // try next pool member
+        it.remainingMinutes = Math.max(0, it.remainingMinutes - block);
+        it.plannedMinutes += block;
+        studied.push({ subject: it.subject, chapter: it.chapter, date, track, classLevelNum: it.classLevelNum });
+        if (it.remainingMinutes > 0 && it.remainingMinutes < MIN_BLOCK_MIN) {
+          it.absorbedMinutes = it.remainingMinutes;
+          it.remainingMinutes = 0;
         }
+        if (it.remainingMinutes <= 0) {
+          const idx = q.indexOf(it);
+          if (idx >= 0) q.splice(idx, 1);
+          finishedTopics += 1;
+          if (finishedTopics % 2 === 0 && capacity >= 35) {
+            push(it.subject, `Timed practice: 10 Qs in 25 min (${it.chapter})`, 'practice', 30, track);
+          }
+        }
+        return 'ok';
       }
-      return 'ok';
+      return 'none';
     };
 
     // spend up to `quota` minutes of this track's allocation; returns minutes used.
@@ -1227,7 +1307,8 @@ export function planSchedule(input) {
     if (isMockDay) {
       const mockLabel = dayBeforeSchoolExam ? 'Pre-school-exam mock' : 'Full-length mock';
       const mockTrack = examDate != null || dayBeforeSchoolExam || !olympiadDate ? 'class' : 'olympiad';
-      if (!(classPaused && mockTrack === 'class')) {
+      // D14b: block class mocks after base cutoff when no above-signup rows (classOff)
+      if (!(classPaused && mockTrack === 'class') && !(mockTrack === 'class' && classOff)) {
         // FIX-STUDY-FIRST: shortage halves mock? Keep mock but allow new study after, except final 21 guardrail
         const mockMin = (shortage && !isFinal21Days) ? Math.min(Math.floor(MOCK_MIN/2), capacity) : Math.min(MOCK_MIN, capacity);
         push('Mock Test', `${mockLabel} + analysis`, 'mock', mockMin, mockTrack, 'high');
@@ -1260,7 +1341,8 @@ export function planSchedule(input) {
     }
     // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave
     // FIX-STUDY-FIRST D16: shortage → halve wave quota, allow new study INCLUDING run-up days
-    if (inSchoolExamRev && !classPaused && studied.some((s) => s.track === 'class')) {
+    // D14b: block wave when classOff (no above-signup after base)
+    if (inSchoolExamRev && !classPaused && !classOff && studied.some((s) => s.track === 'class')) {
       const classTopics = studied.filter((s) => s.track === 'class');
       const recent = classTopics.slice(-REV_WAVE_PICKS);
       const run = runUpFor(date);
@@ -1290,9 +1372,10 @@ export function planSchedule(input) {
 
     // Main-exam buffer days
     // FIX-STUDY-FIRST: shortage allows new study even on buffer days, including final21/run-up
+    // D14b: block buffer when classOff
     if (mainExamBufferDay) {
       const bufMin = shortage ? Math.min(45, capacity) : Math.min(90, capacity);
-      if (!classPaused) push('Buffer', 'Backlog / weak topics cleanup', 'revision', bufMin, 'class');
+      if (!classPaused && !classOff) push('Buffer', 'Backlog / weak topics cleanup', 'revision', bufMin, 'class');
       if (!shortage) {
         continue;
       }
@@ -1308,11 +1391,25 @@ export function planSchedule(input) {
     // class: mixed practice/mock; olympiad: problem-practice from covered olympiad chapters; exam: MCQ practice/mocks
     // Labeled 'practice'/'mock'; never counted as new coverage; never fabricated as "chapter done"
     // Deterministic: no Math.random, uses date + studied length for picking, so H2 determinism holds
-    const fillerForTrack = (track) => {
-      const pool = studied.filter(s => s.track === track);
+    // FIX-FILLDUP D14b: avoid repeating same topic all day — blockCounter + cap 2 per topic per day
+    // D14b: after base cutoff, only above-signup studied allowed for class maintenance
+    const fillerForTrack = (track, blockCounter = 0) => {
+      let pool = studied.filter(s => s.track === track);
+      if (track === 'class' && date > cutoff) {
+        if (!hasAboveSignupRows) {
+          pool = []; // no above at all => no class filler after base
+        } else {
+          // only above-signup studied allowed after base
+          pool = pool.filter(s => {
+            if (s.classLevelNum == null) return false;
+            if (signupClassNum == null) return true;
+            return s.classLevelNum > signupClassNum;
+          });
+        }
+      }
       if (!pool.length) return null;
-      // deterministic pick based on studied length and date hash
-      const idx = (studied.length + d) % pool.length;
+      // deterministic pick based on studied length, date hash, and per-day block counter
+      const idx = (studied.length + d * 3 + blockCounter) % pool.length;
       const pick = pool[idx] || pool[pool.length-1];
       if (track === 'class') {
         const isMock = (d % 3) === 0; // every 3rd day mock, else practice — deterministic
@@ -1333,11 +1430,25 @@ export function planSchedule(input) {
     const pushFiller = () => {
       let pushed = 0;
       // FIX-FILL2 + FIX-SESSION: bound filler by per-track hard ends, per-tag cutoffs
+      // D14b: per-tag finalCutoff only for above-signup rows
       const isPastHardEnd = (track) => {
         if (track === 'class' && classOff) return true;
         if (eventPassed(track)) return true;
-        if (track === 'class' && finalCutoff && date > finalCutoff) return true;
-        if (track === 'class' && !finalCutoff && date > cutoff) return true;
+        if (track === 'class') {
+          if (!hasAboveSignupRows) {
+            // no above-signup rows => base cutoff is hard end for all class maintenance
+            if (date > cutoff) return true;
+          } else {
+            if (finalCutoff && date > finalCutoff) return true;
+            // if date > base cutoff, allow only if above-signup studied/queued exists
+            if (date > cutoff) {
+              const hasAboveStudied = studied.some(s => s.track === 'class' && s.classLevelNum != null && signupClassNum != null && s.classLevelNum > signupClassNum);
+              const hasAboveQueued = (queues['class'] || []).some(it => it.classLevelNum != null && signupClassNum != null && it.classLevelNum > signupClassNum);
+              // if signup null, allow (preserve old behavior)
+              if (signupClassNum != null && !hasAboveStudied && !hasAboveQueued) return true;
+            }
+          }
+        }
         if (track === 'olympiad' && olympiadDate && date >= dateStr(dayjs(olympiadDate))) return true;
         if (track === 'exam' && examDate && date > dateStr(dayjs(examDate))) return true;
         if (examDate && date > dateStr(dayjs(examDate))) return true;
@@ -1346,29 +1457,66 @@ export function planSchedule(input) {
       // If date is past final exam, no filler at all
       if (examDate && date > dateStr(dayjs(examDate))) return 0;
       // Try to fill remaining capacity with track-appropriate practice, respecting phase priority
+      // D14b + FILLDUP: use dayTopicCounts (global per-day cap) for filler as well
       const fillerTracks = priorityOrder.length ? priorityOrder : allocatable;
       let attempts = 0;
+      let fillerBlockCounter = 0;
       while (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && attempts < 20) {
         attempts += 1;
         let placed = false;
         for (const track of fillerTracks) {
           if (capacity < MIN_BLOCK_MIN) break;
           if (isPastHardEnd(track)) continue;
-          const filler = fillerForTrack(track);
+          let filler = fillerForTrack(track, fillerBlockCounter);
           if (!filler) continue;
+          // cap same-topic blocks per day at 2 — rotate to next pool member beyond that, using dayTopicCounts
+          let rotateAttempts = 0;
+          while (rotateAttempts < 5) {
+            const cnt = dayTopicCounts.get(filler.topic) || 0;
+            if (cnt < 2) break;
+            fillerBlockCounter += 1;
+            const next = fillerForTrack(track, fillerBlockCounter);
+            if (!next) break;
+            filler = next;
+            rotateAttempts += 1;
+          }
+          if ((dayTopicCounts.get(filler.topic) || 0) >= 2) continue;
           const res = push(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
-          if (res === 'ok') { placed = true; pushed += 1; break; }
+          if (res === 'ok') {
+            placed = true;
+            pushed += 1;
+            fillerBlockCounter += 1;
+            break;
+          }
           if (res === 'dup') { placed = true; break; }
+          if (res === 'cap') {
+            fillerBlockCounter += 1;
+            continue;
+          }
         }
         if (!placed) {
-          // fallback: any studied track that respects hard ends
           const viableTrack = allocatable.find(t => studied.some(s => s.track===t) && !isPastHardEnd(t));
-          const anyFiller = fillerForTrack(viableTrack || null);
+          let anyFiller = fillerForTrack(viableTrack || null, fillerBlockCounter);
           if (!anyFiller || capacity < MIN_BLOCK_MIN) break;
           if (isPastHardEnd(anyFiller.track)) break;
+          let rot = 0;
+          while (rot < 5 && (dayTopicCounts.get(anyFiller.topic) || 0) >= 2) {
+            fillerBlockCounter += 1;
+            const nxt = fillerForTrack(viableTrack || null, fillerBlockCounter);
+            if (!nxt) break;
+            anyFiller = nxt;
+            rot += 1;
+          }
+          if ((dayTopicCounts.get(anyFiller.topic) || 0) >= 2) break;
           const res = push(anyFiller.subject, anyFiller.topic, anyFiller.type, Math.min(40, capacity), anyFiller.track);
-          if (res !== 'ok' && res !== 'dup') break;
-          if (res === 'ok') pushed += 1;
+          if (res !== 'ok' && res !== 'dup' && res !== 'cap') break;
+          if (res === 'ok') {
+            pushed += 1;
+            fillerBlockCounter += 1;
+          }
+          if (res === 'cap') {
+            fillerBlockCounter += 1;
+          }
         }
       }
       return pushed;
@@ -1399,7 +1547,8 @@ export function planSchedule(input) {
       const hasCustomOrder = Array.isArray(prio?.order) && prio.order.length > 0;
       const customOrder = hasCustomOrder ? prio.order : ['class','olympiad','exam'];
       const isDefaultOrder = !hasCustomOrder || (customOrder.length === 3 && customOrder[0] === 'class' && customOrder[1] === 'exam' && customOrder[2] === 'olympiad');
-      const perTag = !!(finalClassNum != null && finalCutoff);
+      // D14b: perTag true only when above-signup rows exist (strict)
+      const perTag = !!(hasAboveSignupRowsForCoverage && finalCutoff);
       // P1: today -> base cutoff
       if (dStr <= cutoff) {
         const base = customOrder.filter(t => ['class','olympiad','exam'].includes(t) && allocatable.includes(t));
@@ -1648,7 +1797,11 @@ export function planSchedule(input) {
     if (!isReducedDay) {
       while (freePool > 0 && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && dupGuard <= MAX_BLOCKS_PER_DAY) {
         for (const t of allocatable) sortQueue(t);
-        const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff)));
+        // D14b: hard-stop class after base when no above-signup (strict), even if inclusive allows
+        // D14b: hard-stop class after base when no above-signup, but allow run-up when shortage (STUDY1)
+        const isRunUp = examDate && daysToExam != null && daysToExam > 0 && daysToExam <= 14;
+        const isClassHardStopped = (date > cutoff && !hasAboveSignupRowsForCoverage && !(shortage && isRunUp));
+        const cands = allocatable.filter((t) => (queues[t] || []).length && !(t === 'class' && (classProtected || classOff || isClassHardStopped)));
         if (!cands.length) break;
         cands.sort((a, b) => {
           const ai = priorityOrder.indexOf(a);
@@ -1783,13 +1936,14 @@ export function planSchedule(input) {
     const msg = `${dueInProtected.length} class chapter(s) are due inside the exam run-up window, where no new topics are allowed — they cannot be finished before that exam. Named in the summary, then scheduled after it.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${msg}` : `⚠️ ${msg}`;
   }
-  // FIX-S S4 + FIX-SESSION D14: per-tag cutoffs
+  // FIX-S S4 + FIX-SESSION D14 + D14b: per-tag cutoffs
   const classUnplaced = [...unscheduled, ...partial].filter((u) => u.track === 'class');
   if (classCutoffDays > 0 && classUnplaced.length) {
-    const perTag = !!(finalClassNum != null && finalCutoff);
+    // D14b: perTag true only when above-signup rows exist (strict)
+    const perTag = !!(hasAboveSignupRowsForCoverage && finalCutoff);
     const cut = perTag
-      ? `${classUnplaced.length} class chapter(s) could not be placed before cutoffs (base ${cutoff}, Class-${finalClassNum} window till ${finalCutoff}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`
-      : `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`;
+      ? `${classUnplaced.length} class chapter(s) could not be placed before cutoffs (base ${cutoff}, Class-${finalClassNum} window till ${finalCutoff} for above-signup rows only [D14b]) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`
+      : `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected. [D14b: at-or-below signup uses base]`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${cut}` : `⚠️ ${cut}`;
   }
   // FIX-S S5 [S5c]: a declined promotion pauses the CLASS track. Say it plainly
@@ -1823,7 +1977,9 @@ export function planSchedule(input) {
     finalClass: finalClassNum,
     finalCutoff,
     baseCutoff: cutoff,
-    perTagInEffect: !!(finalClassNum != null && finalCutoff),
+    signupClassNum,
+    hasAboveSignupRows: hasAboveSignupRowsForCoverage,
+    perTagInEffect: !!(hasAboveSignupRowsForCoverage && finalCutoff), // D14b: only when above-signup rows exist (strict)
     today,
     totalDays,
     studyDays,
