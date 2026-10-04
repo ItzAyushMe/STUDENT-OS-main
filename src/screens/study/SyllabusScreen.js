@@ -133,6 +133,8 @@ export function SyllabusScreen({ navigation }) {
         deadline: null,
         completed_at: null,
         created_at: nowIso(),
+        // FIX-SESSION D14: tag carry-through — write class_level if profile or track provides it
+        ...(activeTrack === 'class' && profile?.class_level ? { class_level: profile.class_level } : {}),
       });
       setNewChapter('');
       setAddOpen(false);

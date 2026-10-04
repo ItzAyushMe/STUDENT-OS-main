@@ -340,6 +340,8 @@ export function ScheduleScreen({ navigation, route }) {
         olympiadDate: profile.olympiad_date || null,
         schoolExams: planSchoolExams,
         classPaused: promo.paused,
+        profile: profile,
+        class_level: profile.class_level || null,
         priorities: profile.priorities || null,
         dailyHours: effectiveDailyHours(profile),
         preferredTime: profile.preferred_time,
@@ -731,7 +733,9 @@ export function ScheduleScreen({ navigation, route }) {
             <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#7C3AED', marginTop: 4, lineHeight: 16 }}>
               {coverage.classDoneBy && coverage.nextSchoolExam
                 ? `Class syllabus target: done by ${coverage.classDoneBy} — 2 weeks before "${coverage.nextSchoolExam.label || coverage.nextSchoolExam.start || 'School Exam'}" (${coverage.nextSchoolExam.start || ''}) 📅`
-                : `Plan horizon: till ${classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')} (${settings.classSessionEnd || '02-25'} session end) — class first, olympiad second, exam last ⚡`}
+                : coverage.perTagInEffect && coverage.finalClass && coverage.finalCutoff
+                  ? `Plan horizon: till ${coverage.finalCutoff} (Class-${coverage.finalClass} window till ${coverage.finalCutoff}) — base ${coverage.baseCutoff || classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')} — class first, olympiad second, exam last ⚡`
+                  : `Plan horizon: till ${classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')} (${settings.classSessionEnd || '02-25'} session end) — class first, olympiad second, exam last ⚡`}
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>

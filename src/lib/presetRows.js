@@ -42,7 +42,7 @@ export function buildPresetRows(userId, preset, track, stamp = nowIso()) {
     chapter: r.chapter,
     topic: null,
     subtopic: null,
-    track, // 'class' | 'olympiad' | 'exam'
+    track,
     weightage: r.weightage || 3,
     estimated_hours: r.estimated_hours || 6,
     status: 'locked',
@@ -50,6 +50,8 @@ export function buildPresetRows(userId, preset, track, stamp = nowIso()) {
     deadline: null,
     completed_at: null,
     created_at: stamp,
+    // FIX-SESSION D14: carry class_level tag if source provides it
+    ...(r.class_level != null || r.classLevel != null || r.grade != null ? { class_level: r.class_level ?? r.classLevel ?? r.grade } : {}),
   }));
 }
 

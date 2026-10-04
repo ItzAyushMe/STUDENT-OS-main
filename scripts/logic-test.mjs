@@ -3250,6 +3250,68 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     });
   })();
 
+  check('SESSION1', 'FIX-SESSION D14: Class-12-tagged chapter schedules AFTER 2027-02-25 and never after 2028-02-25', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const today = '2026-10-01';
+    const examDate = '2028-04-12';
+    const rows = [
+      ...Array.from({length:30}, (_,i)=> mkS('c10-'+i, 'Science', 'Class10 Ch '+i, { class_level: 'Class 10', estimated_hours: 20, deadline: '2027-02-20' })),
+      mkS('c12', 'Science', 'Class 12 Chapter Final', { class_level: 'Class 12', estimated_hours: 20, deadline: '2028-04-10' }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 3, preferredTime:'Morning', daysOff:[], lightDay:6, weeks:80,
+      userId:'u-sess1', today, createdAt: today+'T00:00:00.000Z',
+      examDate, class_level: 'Class 12', profile: { class_level: 'Class 12' },
+    });
+    const afterBaseStudy = p.filter(r => r.date > '2027-02-25' && r.date <= '2028-02-25' && r.session_type==='study' && /Class 12/.test(r.topic));
+    assert.ok(afterBaseStudy.length > 0, `Class-12-tagged should schedule AFTER 2027-02-25, got ${afterBaseStudy.length}`);
+    const afterFinalStudy = p.filter(r => r.date > '2028-02-25' && r.session_type==='study');
+    assert.equal(afterFinalStudy.length, 0, `never after 2028-02-25 new study, got ${afterFinalStudy.length}`);
+    const genSrc = read('src/lib/scheduleGenerator.js');
+    assert.ok(!/['"]2028['"]/.test(genSrc), 'generator must not hardcode 2028 literal');
+  });
+
+  check('SESSION2', 'FIX-SESSION untagged chapter keeps 2027 cutoff', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const today = '2026-10-01';
+    const examDate = '2028-04-12';
+    const rows = [
+      mkS('cU', 'Maths', 'Untagged Chapter', { estimated_hours: 10 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[], lightDay:6, weeks:80,
+      userId:'u-sess2', today, createdAt: today+'T00:00:00.000Z',
+      examDate, class_level: 'Class 12', profile: { class_level: 'Class 12' },
+    });
+    const afterBaseStudy = p.filter(r => r.date > '2027-02-25' && r.session_type==='study');
+    assert.equal(afterBaseStudy.length, 0, `untagged should keep 2027 cutoff, got ${afterBaseStudy.length} after base`);
+  });
+
+  check('SESSION3', 'FIX-SESSION olympiad/exam tracks unchanged', () => {
+    assert.ok(SG, 'scheduleGenerator import failed');
+    const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const mkO = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'olympiad', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const mkE = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'exam', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
+    const today = '2026-10-01';
+    const examDate = '2028-04-12';
+    const rows = [
+      mkS('c12', 'Physics', 'Class 12 Final', { class_level: 'Class 12', estimated_hours: 5 }),
+      mkO('o1', 'Maths', 'Olympiad Ch', { estimated_hours: 5 }),
+      mkE('e1', 'JEE', 'Exam Ch', { estimated_hours: 5 }),
+    ];
+    const p = SG.generateSchedule({
+      syllabus: rows, dailyHours: 4, preferredTime:'Morning', daysOff:[], lightDay:6, weeks:80,
+      userId:'u-sess3', today, createdAt: today+'T00:00:00.000Z',
+      examDate, olympiadDate: '2027-09-06', class_level: 'Class 12', profile: { class_level: 'Class 12' },
+    });
+    const oly = p.filter(r => r.track==='olympiad');
+    const ex = p.filter(r => r.track==='exam');
+    assert.ok(oly.length > 0, 'olympiad track should still have sessions');
+    assert.ok(ex.length > 0, 'exam track should still have sessions');
+  });
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');

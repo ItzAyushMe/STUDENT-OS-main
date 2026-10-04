@@ -429,6 +429,57 @@ export function classSessionCutoff(today, overrideMMDD) {
 }
 
 /**
+ * FIX-SESSION D14: per-tag cutoffs — helpers
+ */
+export function normalizeClassTag(v) {
+  if (v == null) return null;
+  const str = String(v).toLowerCase();
+  const m = str.match(/(\d{1,2})/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function resolveFinalClass(profile, syllabusRows) {
+  // Prefer profile.class_level, else highest tag among class-track rows
+  let finalNum = null;
+  if (profile && profile.class_level) {
+    finalNum = normalizeClassTag(profile.class_level);
+  }
+  if (finalNum == null && Array.isArray(syllabusRows)) {
+    let max = null;
+    for (const r of syllabusRows) {
+      if (!r) continue;
+      const tr = (r.track || '').toLowerCase();
+      if (tr && tr !== 'class') continue; // only class-track tags matter for finalClass
+      const tag = normalizeClassTag(r.class_level ?? r.classLevel ?? r.grade);
+      if (tag != null && (max == null || tag > max)) max = tag;
+    }
+    if (max != null) finalNum = max;
+  }
+  return finalNum;
+}
+
+export function lastFeb25Before(dateStrInput, overrideMMDD) {
+  // Returns last Feb 25 strictly before given date
+  const base = isDateStr(dateStrInput) ? dayjs(dateStrInput) : dayjs(dateStrInput);
+  if (!base.isValid()) return null;
+  const rawMMDD = (typeof overrideMMDD === 'string' && /^\d{2}-\d{2}$/.test(overrideMMDD)) ? overrideMMDD : '02-25';
+  const [mm, dd] = rawMMDD.split('-');
+  const m = Number(mm) || 2;
+  const d = Number(dd) || 25;
+  // candidate Feb 25 same year
+  let cand = dayjs(`${base.year()}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`);
+  if (!cand.isValid()) return null;
+  if (base.isAfter(cand, 'day')) {
+    return dateStr(cand);
+  } else {
+    // before or on Feb 25 => previous year
+    return dateStr(cand.subtract(1, 'year'));
+  }
+}
+
+/**
  * Turns REAL syllabus rows into work items with an honest remaining workload.
  * Excluded (never scheduled again): rows already completed, rows at 100%,
  * rows whose track is disabled or split to 0%, rows fully covered by
@@ -541,6 +592,8 @@ export function buildWorkItems(input) {
     const rawDeadline = row.deadline || (deadlines && deadlines[row.id]) ||
       (track === 'class' ? classTarget : track === 'olympiad' ? olyTarget : track === 'exam' ? examTarget : null);
     const deadline = rawDeadline ? (isDateStr(String(rawDeadline)) ? String(rawDeadline) : dateStr(dayjs(rawDeadline))) : null;
+    const classLevelRaw = row.class_level ?? row.classLevel ?? row.grade ?? null;
+    const classLevelNum = normalizeClassTag(classLevelRaw);
     items.push({
       id: row.id || `${track}:${key}`,
       subject: String(row.subject || 'Subject'),
@@ -553,17 +606,16 @@ export function buildWorkItems(input) {
       deadline,
       overdue: !!(deadline && deadline < today),
       creditedMinutes: credited,
-      // FIX-SCHED1/7/8: show effective hours in UI — base ~4h → effective with track mult + weightage factor
       baseHours: rawHours,
       effectiveHours,
       hoursMultiplier: mult,
       trackMultiplier: mult,
-      // one-shot events: prepping for an olympiad/main exam ON or AFTER its date
-      // is an impossible allocation, so such work stops at the date and is reported
       hardStop:
         track === 'olympiad' && olympiadDate ? dateStr(dayjs(olympiadDate))
         : track === 'exam' && examDate ? dateStr(dayjs(examDate))
         : null,
+      class_level: classLevelRaw,
+      classLevelNum,
     });
   }
   return {
@@ -613,6 +665,17 @@ export function planSchedule(input) {
   const examLimit = examDate ? dayjs(examDate) : null;
   const olympiadLimit = olympiadDate ? dayjs(olympiadDate) : null;
   const classEndOverride = opts.classSessionEnd || opts.classSessionEndOverride || null;
+  // FIX-SESSION D14: per-tag cutoffs — resolve finalClass from profile or highest tag
+  const profileForAnchor = opts.profile || (opts.class_level ? { class_level: opts.class_level } : null);
+  const finalClassNum = resolveFinalClass(profileForAnchor || opts, syllabus);
+  // finalCutoff = last Feb25 strictly before examDate (derived from examDate, not today)
+  let finalCutoff = null;
+  try {
+    if (examDate) {
+      const fb = lastFeb25Before(examDate, classEndOverride);
+      if (fb) finalCutoff = fb;
+    }
+  } catch {}
   let horizon = dayjs(today).add(Math.max(1, num(opts.weeks, 6)) * 7, 'day');
   if (examLimit && examLimit.isAfter(horizon)) horizon = examLimit;
   if (olympiadLimit && olympiadLimit.isAfter(horizon)) horizon = olympiadLimit;
@@ -621,10 +684,15 @@ export function planSchedule(input) {
     if (furthestSchool.isAfter(horizon)) horizon = furthestSchool;
   }
   // FIX-SCHED1: class track must schedule till session cutoff (default Feb 25, editable via D7)
+  // FIX-SESSION D14: also include finalCutoff for final-class tagged rows
   try {
     const cutoffStr = classSessionCutoff(today, classEndOverride);
     const cutoffDay = dayjs(cutoffStr);
     if (cutoffDay.isValid() && cutoffDay.isAfter(horizon)) horizon = cutoffDay;
+    if (finalCutoff) {
+      const finalDay = dayjs(finalCutoff);
+      if (finalDay.isValid() && finalDay.isAfter(horizon)) horizon = finalDay;
+    }
   } catch {}
   // +14-day post-exam buffer so wind-down days exist (SCHED3)
   horizon = horizon.add(POST_EXAM_BUFFER_DAYS, 'day');
@@ -674,11 +742,21 @@ export function planSchedule(input) {
   const sortQueue = (t) => { if (queues[t]) queues[t].sort((a, b) => compareUrgency(a, b, ctx)); };
   for (const t of Object.keys(queues)) sortQueue(t);
 
-  // ---------- FIX-S S4: the class session's hard cutoff ----------
-  // Class-track NEW content stops here; olympiad / competitive tracks run to their
-  // own event dates. Pure + date-injected, so the dev-date offset tests it too.
-  // FIX-SCHED3: D7 override from settings
+  // ---------- FIX-S S4 + FIX-SESSION D14: class session hard cutoff(s) ----------
+  // Base cutoff from today (for untagged/earlier classes)
+  // Final cutoff = last Feb25 before examDate for finalClass-tagged rows
   const cutoff = classSessionCutoff(today, classEndOverride);
+  const getCutoffForItem = (item) => {
+    if (!item || item.track !== 'class') return cutoff;
+    if (finalClassNum != null && item.classLevelNum != null && item.classLevelNum === finalClassNum && finalCutoff) {
+      return finalCutoff;
+    }
+    return cutoff;
+  };
+  const getCutoffForDate = (dateStrCheck) => {
+    // For coverage copy: if per-tag in effect, show final cutoff
+    return finalCutoff || cutoff;
+  };
 
   // ---------- FIX-S S1: the class week is a rotation of subject PAIRS ----------
   // Built once per plan from the class chapters that still need time, keyed by
@@ -909,14 +987,19 @@ export function planSchedule(input) {
     const mainExamBufferDay = examDate != null && daysToExam != null
       && daysToExam <= Math.max(3, Math.round(totalDays * 0.12)) && daysToExam > 0;
     const examRelatedDay = schoolExamToday || dayBeforeSchoolExam || inSchoolExamRev || isMockDay || mainExamBufferDay;
-    const classBlocked = date > cutoff && !examRelatedDay;
+    // FIX-SESSION D14: per-tag cutoffs — base blocked vs final blocked
+    const classBlockedBase = date > cutoff && !examRelatedDay;
+    const classBlockedFinal = finalCutoff ? date > finalCutoff && !examRelatedDay : classBlockedBase;
+    const classBlocked = classBlockedBase; // for stats, counts base cutoff days
     if (classBlocked) classCutoffDays += 1;
-    // FIX-S S5 [S5c]: a DECLINED promotion switches the class track off for the
-    // whole plan — not just new chapters, but every class-labelled emission below
-    // (exam-day revision, class-track mocks, buffer cleanup, consolidation).
-    // classCutoffDays deliberately still counts only the S4 cutoff, so the two
-    // rules never blur in the summary. Olympiad/competitive tracks are untouched.
-    const classOff = classBlocked || !!classPaused;
+    // classOff = fully blocked after final cutoff (or paused)
+    const hasWorkableClass = (queues['class'] || []).some((it) => {
+      if (examRelatedDay) return true;
+      return date <= getCutoffForItem(it);
+    });
+    const classOff = (finalCutoff ? (date > finalCutoff && !examRelatedDay && !hasWorkableClass) : classBlocked) || !!classPaused;
+    // For coverage, we need to know if per-tag is in effect
+    const perTagInEffect = !!(finalClassNum != null && finalCutoff);
     // same honesty rule as pruneExpired, applied to consolidation sessions: once a
     // one-shot event's date has arrived, revising for it is meaningless — no
     // revision / quiz / conquered-chapter ladder rows for that track from then on.
@@ -983,14 +1066,22 @@ export function planSchedule(input) {
     };
 
     // place one study block for a track; returns 'ok' | 'dup' | 'none'
-    // onlySubjects (FIX-S S1): restrict the pick to the day's subject pair — the
-    // most urgent chapter WITHIN that pair leads, everything else keeps its queue.
+    // onlySubjects (FIX-S S1): restrict the pick to the day's subject pair
+    // FIX-SESSION D14: per-tag cutoffs — filter by row's resolved cutoff
     const placeStudy = (track, quota, allowTail, onlySubjects) => {
       const q = queues[track];
       if (!q || !q.length) return 'none';
       if (track === 'class' && classProtected) { protectedBlocksSkipped += 1; return 'none'; }
       sortQueue(track);
-      const pool = onlySubjects && onlySubjects.length ? q.filter((it) => onlySubjects.includes(it.subject)) : q;
+      let pool = onlySubjects && onlySubjects.length ? q.filter((it) => onlySubjects.includes(it.subject)) : q.slice();
+      if (track === 'class') {
+        // per-tag: only items whose cutoff >= date (or examRelatedDay allows)
+        pool = pool.filter((it) => {
+          if (examRelatedDay) return true;
+          const cf = getCutoffForItem(it);
+          return date <= cf;
+        });
+      }
       if (!pool.length) return 'none';
       const it = pool[0];
       const block = blockFor(it, Math.min(num(quota, 0), capacity), allowTail);
@@ -1183,15 +1274,14 @@ export function planSchedule(input) {
     };
     const pushFiller = () => {
       let pushed = 0;
-      // FIX-FILL2: bound ALL filler by per-track hard ends — no sessions after exam/olympiad/cutoff
-      // examDate is final hard end, class past cutoff, olympiad past its date
+      // FIX-FILL2 + FIX-SESSION: bound filler by per-track hard ends, per-tag cutoffs
       const isPastHardEnd = (track) => {
         if (track === 'class' && classOff) return true;
         if (eventPassed(track)) return true;
-        if (track === 'class' && date > cutoff) return true;
+        if (track === 'class' && finalCutoff && date > finalCutoff) return true;
+        if (track === 'class' && !finalCutoff && date > cutoff) return true;
         if (track === 'olympiad' && olympiadDate && date >= dateStr(dayjs(olympiadDate))) return true;
         if (track === 'exam' && examDate && date > dateStr(dayjs(examDate))) return true;
-        // Global final hard end: no filler past examDate at all
         if (examDate && date > dateStr(dayjs(examDate))) return true;
         return false;
       };
@@ -1251,14 +1341,22 @@ export function planSchedule(input) {
       const hasCustomOrder = Array.isArray(prio?.order) && prio.order.length > 0;
       const customOrder = hasCustomOrder ? prio.order : ['class','olympiad','exam'];
       const isDefaultOrder = !hasCustomOrder || (customOrder.length === 3 && customOrder[0] === 'class' && customOrder[1] === 'exam' && customOrder[2] === 'olympiad');
+      const perTag = !!(finalClassNum != null && finalCutoff);
+      // P1: today -> base cutoff
       if (dStr <= cutoff) {
         const base = customOrder.filter(t => ['class','olympiad','exam'].includes(t) && allocatable.includes(t));
         const fullBase = base.length ? base : ['class','olympiad','exam'].filter(t => allocatable.includes(t));
-        // Dated-first only for default order; custom order respects user choice (FIX-B)
         const order = isDefaultOrder ? sortByDated(fullBase) : fullBase;
         return { phase: 'P1', order };
       }
-      if (olympiadDate && dStr > cutoff && dStr <= dateStrDayjs(olympiadDate)) {
+      // FIX-SESSION D14: after base cutoff but before finalCutoff, class (finalClass) still in phase
+      if (perTag && finalCutoff && dStr > cutoff && dStr <= finalCutoff) {
+        const base = customOrder.filter(t => ['class','olympiad','exam'].includes(t) && allocatable.includes(t));
+        const fullBase = base.length ? base : ['class','olympiad','exam'].filter(t => allocatable.includes(t));
+        const order = isDefaultOrder ? sortByDated(fullBase) : fullBase;
+        return { phase: 'P1-final', order };
+      }
+      if (olympiadDate && dStr > (perTag ? finalCutoff || cutoff : cutoff) && dStr <= dateStrDayjs(olympiadDate)) {
         const base = customOrder.filter(t => ['olympiad','exam'].includes(t) && allocatable.includes(t));
         const fullBase = base.length ? base : ['olympiad','exam'].filter(t => allocatable.includes(t));
         const order = isDefaultOrder ? sortByDated(fullBase) : fullBase;
@@ -1268,7 +1366,7 @@ export function planSchedule(input) {
         const base = ['exam'].filter(t => allocatable.includes(t));
         return { phase: 'P3', order: base };
       }
-      if (examDate && !olympiadDate && dStr > cutoff && dStr <= dateStrDayjs(examDate)) {
+      if (examDate && !olympiadDate && dStr > (perTag ? finalCutoff || cutoff : cutoff) && dStr <= dateStrDayjs(examDate)) {
         const base = ['exam'].filter(t => allocatable.includes(t));
         return { phase: 'P3-undated-olympiad', order: base };
       }
@@ -1612,11 +1710,13 @@ export function planSchedule(input) {
     const msg = `${dueInProtected.length} class chapter(s) are due inside the exam run-up window, where no new topics are allowed — they cannot be finished before that exam. Named in the summary, then scheduled after it.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${msg}` : `⚠️ ${msg}`;
   }
-  // FIX-S S4: the class session has a hard end. Work that no longer fits is named
-  // here — never quietly scheduled after the cutoff and never silently dropped.
+  // FIX-S S4 + FIX-SESSION D14: per-tag cutoffs
   const classUnplaced = [...unscheduled, ...partial].filter((u) => u.track === 'class');
   if (classCutoffDays > 0 && classUnplaced.length) {
-    const cut = `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`;
+    const perTag = !!(finalClassNum != null && finalCutoff);
+    const cut = perTag
+      ? `${classUnplaced.length} class chapter(s) could not be placed before cutoffs (base ${cutoff}, Class-${finalClassNum} window till ${finalCutoff}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`
+      : `${classUnplaced.length} class chapter(s) could not be placed before the ${cutoff} class-session cutoff (no new class content after ${CLASS_SESSION_END.replace('-', '/')}) — listed above, not scheduled late and not dropped. Olympiad/exam tracks are unaffected.`;
     coverageWarning = coverageWarning ? `${coverageWarning} ⚠️ ${cut}` : `⚠️ ${cut}`;
   }
   // FIX-S S5 [S5c]: a declined promotion pauses the CLASS track. Say it plainly
@@ -1647,6 +1747,10 @@ export function planSchedule(input) {
   const coverage = {
     priorityOrder: allocatable,
     timeSplit: prio.timeSplit,
+    finalClass: finalClassNum,
+    finalCutoff,
+    baseCutoff: cutoff,
+    perTagInEffect: !!(finalClassNum != null && finalCutoff),
     today,
     totalDays,
     studyDays,
