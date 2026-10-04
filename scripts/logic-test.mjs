@@ -4,6 +4,7 @@ import { generateSchedule, autoSetDeadlines, autoRescheduleMissed, normalizePrio
 import { pickDailyArena, pickBankQuiz, QUIZ_BANK } from './../src/lib/quizBank.js';
 import { uuid, mondayOf, daysBetween, seededShuffle, hashString, todayStr } from './../src/lib/utils.js';
 import { XP_RULES, TIERS, effectiveDailyHours } from './../src/config/constants.js';
+import { buildPlanDiagnostics } from './../src/lib/scheduleSave.js';
 
 // ---- utils ----
 assert.ok(uuid().length >= 30, 'uuid');
@@ -6298,6 +6299,110 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const failed = results.filter(r => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failed.length, 0, `FIX-MULT: ${failed.length} check(s) failed -> ${failed.map(f => f.id).join(', ')}`);
+}
+
+{
+  // FIX-SCOPE SCOPE1: pure diag-builder given crafted inputs produces all fields exact counts
+  console.log('\n--- FIX-SCOPE SCOPE1 diagnostics builder ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+
+  check('SCOPE1', 'pure diag-builder produces all required fields exact counts', () => {
+    const rows = [
+      { date: '2026-10-01', track: 'class', session_type: 'study' },
+      { date: '2026-10-15', track: 'class', session_type: 'study' },
+      { date: '2026-10-20', track: 'olympiad', session_type: 'study' },
+      { date: '2026-11-02', track: 'class', session_type: 'study' },
+      { date: '2026-11-10', track: 'exam', session_type: 'mock' },
+      { date: '2026-12-05', track: 'class', session_type: 'study' },
+      { date: '2026-12-31', track: 'class', session_type: 'study' },
+    ];
+    const coverage = {
+      weekdayHours: 3,
+      weekendHours: 5,
+      baseCutoff: '2027-02-25',
+      finalCutoff: '2027-03-11',
+      perTagInEffect: { Class10: '2027-02-25' },
+      priorityOrder: ['class','olympiad','exam'],
+      timeSplit: { class: 50, olympiad: 30, exam: 20 },
+    };
+    const syllabus = [
+      { id: '1', subject: 'Maths', chapter: 'Algebra', status: 'pending', track: 'class', class_level: 'Class10', deadline: '2026-11-01', estimated_hours: 4, progress_percent: 0 },
+      { id: '2', subject: 'Science', chapter: 'Light', status: 'completed', track: 'class', class_level: 'Class10', deadline: '2026-10-15', estimated_hours: 3, progress_percent: 100 },
+      { id: '3', subject: 'Maths', chapter: 'Geometry', status: 'pending', track: 'class', class_level: 'Class9', deadline: null, estimated_hours: 5, progress_percent: 20, archived: true },
+      { id: '4', subject: 'Olympiad', chapter: 'Number Theory', status: 'pending', track: 'olympiad', class_level: null, deadline: '2026-12-01', estimated_hours: 2, progress_percent: 0 },
+      { id: '5', subject: 'JEE', chapter: 'Mechanics', status: 'pending', track: 'exam', class_level: null, deadline: null, estimated_hours: 6, progress_percent: 0 },
+    ];
+    const profile = { days_off: [0] };
+    const settings = { lightDay: 6 };
+    const savedCount = 7;
+    const failedChunks = [];
+    const chunkSize = 500;
+    const workerCount = 2;
+    const reloadedSessions = [
+      { date: '2026-10-01' }, { date: '2026-10-15' }, { date: '2026-11-02' }, { date: '2026-12-05' }
+    ];
+
+    const diag = buildPlanDiagnostics({ rows, coverage, syllabus, profile, settings, savedCount, failedChunks, chunkSize, workerCount, reloadedSessions });
+
+    // PLAN
+    assert.equal(diag.PLAN.totalRows, 7, 'PLAN totalRows 7');
+    assert.equal(diag.PLAN.firstDate, '2026-10-01', 'PLAN firstDate');
+    assert.equal(diag.PLAN.lastDate, '2026-12-31', 'PLAN lastDate');
+    assert.equal(diag.PLAN.months['2026-10'], 3, 'PLAN 2026-10 count 3');
+    assert.equal(diag.PLAN.months['2026-11'], 2, 'PLAN 2026-11 count 2');
+    assert.equal(diag.PLAN.months['2026-12'], 2, 'PLAN 2026-12 count 2');
+
+    // SAVE
+    assert.equal(diag.SAVE.savedCount, 7, 'SAVE savedCount');
+    assert.equal(diag.SAVE.totalRows, 7, 'SAVE totalRows');
+    assert.equal(diag.SAVE.savedRatio, '7/7', 'SAVE ratio');
+    assert.deepEqual(diag.SAVE.failedChunks, [], 'SAVE failedChunks');
+    assert.equal(diag.SAVE.chunkSize, 500, 'SAVE chunkSize');
+    assert.equal(diag.SAVE.workerCount, 2, 'SAVE workerCount');
+
+    // RELOAD
+    assert.equal(diag.RELOAD.sessionsCount, 4, 'RELOAD count 4');
+    assert.equal(diag.RELOAD.months['2026-10'], 2, 'RELOAD 2026-10 2');
+    assert.equal(diag.RELOAD.months['2026-11'], 1, 'RELOAD 2026-11 1');
+    assert.equal(diag.RELOAD.months['2026-12'], 1, 'RELOAD 2026-12 1');
+
+    // PROFILE
+    assert.equal(diag.PROFILE.weekdayHours, 3, 'PROFILE weekdayHours');
+    assert.equal(diag.PROFILE.weekendHours, 5, 'PROFILE weekendHours');
+    assert.deepEqual(diag.PROFILE.daysOff, [0], 'PROFILE daysOff');
+    assert.equal(diag.PROFILE.lightDay, 6, 'PROFILE lightDay');
+    assert.equal(diag.PROFILE.cutoff, '2027-02-25', 'PROFILE cutoff');
+    assert.equal(diag.PROFILE.finalCutoff, '2027-03-11', 'PROFILE finalCutoff');
+    assert.deepEqual(diag.PROFILE.perTagInEffect, { Class10: '2027-02-25' }, 'PROFILE perTag');
+    assert.deepEqual(diag.PROFILE.priorityOrder, ['class','olympiad','exam'], 'PROFILE priorityOrder');
+    assert.deepEqual(diag.PROFILE.timeSplit, { class: 50, olympiad: 30, exam: 20 }, 'PROFILE timeSplit');
+
+    // SYLLABUS
+    assert.equal(diag.SYLLABUS.totalRows, 5, 'SYLLABUS totalRows');
+    assert.equal(diag.SYLLABUS.classRows, 3, 'SYLLABUS classRows 3');
+    assert.equal(diag.SYLLABUS.byClassLevel['Class10'], 2, 'SYLLABUS byClassLevel Class10 2');
+    assert.equal(diag.SYLLABUS.byClassLevel['Class9'], 1, 'SYLLABUS byClassLevel Class9 1');
+    assert.equal(diag.SYLLABUS.withDeadline.count, 3, 'SYLLABUS withDeadline count 3');
+    assert.equal(diag.SYLLABUS.withDeadline.min, '2026-10-15', 'SYLLABUS deadline min');
+    assert.equal(diag.SYLLABUS.withDeadline.max, '2026-12-01', 'SYLLABUS deadline max');
+    assert.equal(diag.SYLLABUS.archivedCount, 1, 'SYLLABUS archivedCount 1');
+    assert.equal(diag.SYLLABUS.completedCount, 1, 'SYLLABUS completedCount 1');
+    assert.equal(diag.SYLLABUS.progressGt0Count, 2, 'SYLLABUS progress>0 count 2');
+    assert.equal(diag.SYLLABUS.sample.length, 3, 'SYLLABUS sample 3');
+    assert.equal(diag.SYLLABUS.sample[0].subject, 'Maths', 'SYLLABUS sample subject');
+    assert.ok(diag.SYLLABUS.sample[0].hasOwnProperty('estimated_hours'), 'sample has estimated_hours');
+
+    // QUEUES
+    assert.equal(diag.QUEUES.atStart['class'], 3, 'QUEUES class 3');
+    assert.equal(diag.QUEUES.atStart['olympiad'], 1, 'QUEUES olympiad 1');
+    assert.equal(diag.QUEUES.atStart['exam'], 1, 'QUEUES exam 1');
+    assert.equal(diag.QUEUES.classQueueEmptiesDate, '2026-12-31', 'QUEUES class empties date last class study');
+  });
+
+  const failed2 = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed2.length, 0, `FIX-SCOPE: ${failed2.length} check(s) failed -> ${failed2.map(f => f.id).join(', ')}`);
 }
 
 

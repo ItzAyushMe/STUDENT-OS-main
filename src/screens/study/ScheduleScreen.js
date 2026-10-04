@@ -20,7 +20,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
-import { chunkRows, isRunStale, saveWithWorkers } from '../../lib/scheduleSave';
+import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics } from '../../lib/scheduleSave';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
 import { aiReschedule } from '../../lib/aiFeatures';
@@ -49,6 +49,8 @@ export function ScheduleScreen({ navigation, route }) {
   const [genBusy, setGenBusy] = useState(false);
   const [genProgress, setGenProgress] = useState('');
   const [coverage, setCoverage] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagExpanded, setDiagExpanded] = useState(false);
   const [aiPlanMsg, setAiPlanMsg] = useState('');
   const [aiPlanBusy, setAiPlanBusy] = useState(false);
   const [regenChoiceOpen, setRegenChoiceOpen] = useState(false);
@@ -85,7 +87,7 @@ export function ScheduleScreen({ navigation, route }) {
   }, [profile?.priorities]);
 
   const load = useCallback(async () => {
-    if (!profile?.id) return;
+    if (!profile?.id) return [];
     setLoading(true);
     try {
       const from = dateStr(dayjs().subtract(30, 'day'));
@@ -98,6 +100,7 @@ export function ScheduleScreen({ navigation, route }) {
         order: { col: 'date', asc: true },
       });
       setSessions(data);
+      return data;
     } finally {
       setLoading(false);
     }
@@ -386,8 +389,15 @@ export function ScheduleScreen({ navigation, route }) {
       if (isStale()) return;
       setCoverage(rows.coverage || null);
 
+      // FIX-SCOPE: diagnostics scaffolding — zero behavior changes, values already in scope
+      let diagSavedCount = 0;
+      let diagFailed = [];
+      const diagChunkSize = 500;
+      const diagWorkerCount = 2;
+      let diagReloaded = [];
+
       if (rows.length) {
-        const chunks = chunkRows(rows, 500);
+        const chunks = chunkRows(rows, diagChunkSize);
         const totalChunks = chunks.length;
         const insertFn = async (chunk) => {
           if (isStale()) throw new Error('stale run aborted');
@@ -400,7 +410,7 @@ export function ScheduleScreen({ navigation, route }) {
         let savedCount = 0;
         const failed = [];
         let nextIdx = 0;
-        const CONCURRENCY = 2;
+        const CONCURRENCY = diagWorkerCount;
 
         const worker = async () => {
           while (true) {
@@ -430,9 +440,31 @@ export function ScheduleScreen({ navigation, route }) {
         const workers = Array.from({ length: Math.min(CONCURRENCY, totalChunks) }, () => worker());
         await Promise.all(workers);
 
+        diagSavedCount = savedCount;
+        diagFailed = failed;
+
         if (isStale()) return;
 
         if (failed.length) {
+          // Build diagnostics even on partial save, then throw
+          try {
+            const reloadedPartial = await load();
+            diagReloaded = reloadedPartial || [];
+            const diag = buildPlanDiagnostics({
+              rows,
+              coverage: rows.coverage,
+              syllabus: plannedSyllabus,
+              profile,
+              settings,
+              savedCount: diagSavedCount,
+              failedChunks: diagFailed,
+              chunkSize: diagChunkSize,
+              workerCount: diagWorkerCount,
+              reloadedSessions: diagReloaded,
+            });
+            setDiagnostics(diag);
+            console.log('🩺 Plan diagnostics (partial save)', diag);
+          } catch {}
           throw new Error(`Schedule saved ${savedCount}/${rows.length} — tap Generate again to rebuild. Old completed days are kept. Failed chunks: ${failed.map(i=>i+1).join(',')}`);
         }
       }
@@ -460,7 +492,26 @@ export function ScheduleScreen({ navigation, route }) {
       tick('Reloading…');
       await yieldPaint();
       if (isStale()) return;
-      await load();
+      const reloaded = await load();
+      // FIX-SCOPE: build diagnostics object (success path) — from values already in scope + post-save readback
+      try {
+        const diag = buildPlanDiagnostics({
+          rows,
+          coverage: rows.coverage,
+          syllabus: plannedSyllabus,
+          profile,
+          settings,
+          savedCount: typeof diagSavedCount !== 'undefined' ? diagSavedCount : rows.length,
+          failedChunks: typeof diagFailed !== 'undefined' ? diagFailed : [],
+          chunkSize: typeof diagChunkSize !== 'undefined' ? diagChunkSize : 500,
+          workerCount: typeof diagWorkerCount !== 'undefined' ? diagWorkerCount : 2,
+          reloadedSessions: reloaded || [],
+        });
+        setDiagnostics(diag);
+        console.log('🩺 Plan diagnostics', diag);
+      } catch (e) {
+        console.log('🩺 diagnostics build failed', e?.message);
+      }
       setGenOpen(false);
       setRegenChoiceOpen(false);
       clearWatchdog();
@@ -793,6 +844,64 @@ export function ScheduleScreen({ navigation, route }) {
             })()
           ) : null}
         </>
+      ) : null}
+
+      {/* FIX-SCOPE D19b: diagnostics panel — ZERO behavior changes, built at end of generate() */}
+      {diagnostics ? (
+        <Pressable
+          onPress={() => setDiagExpanded(v=>!v)}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            backgroundColor: '#F0F9FF',
+            borderWidth: 1,
+            borderColor: '#BAE6FD',
+            borderRadius: 16,
+            paddingVertical: 6,
+            paddingHorizontal: 10,
+            marginTop: 8,
+            marginBottom: 8,
+          }}
+        >
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#0369A1', flex: 1 }} numberOfLines={1}>
+            🩺 Plan diagnostics (tap to {diagExpanded ? 'collapse' : 'expand / copy'})
+          </Text>
+          <Ionicons name={diagExpanded ? 'chevron-up' : 'chevron-down'} size={14} color="#0369A1" />
+        </Pressable>
+      ) : null}
+      {diagnostics && diagExpanded ? (
+        <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#F8FAFC', borderColor: '#E2E8F0' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#334155' }}>Diagnostics JSON</Text>
+            <Pressable
+              onPress={async () => {
+                const txt = JSON.stringify(diagnostics, null, 2);
+                try {
+                  if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(txt);
+                  } else {
+                    // fallback for native: try expo-clipboard if available
+                    try {
+                      const Clipboard = await import('expo-clipboard');
+                      if (Clipboard && Clipboard.setStringAsync) await Clipboard.setStringAsync(txt);
+                    } catch {}
+                  }
+                  // simple feedback via console + alert
+                  console.log('📋 diagnostics copied');
+                  if (typeof window !== 'undefined' && window.alert) window.alert('Diagnostics copied to clipboard');
+                } catch (e) {
+                  console.log('copy failed', e?.message);
+                }
+              }}
+              style={{ backgroundColor: '#0EA5E9', borderRadius: 12, paddingVertical: 4, paddingHorizontal: 10 }}
+            >
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#FFFFFF' }}>Copy</Text>
+            </Pressable>
+          </View>
+          <Text style={{ fontFamily: 'monospace', fontSize: 10, color: '#334155', lineHeight: 14 }}>
+            {JSON.stringify(diagnostics, null, 2)}
+          </Text>
+        </Card>
       ) : null}
 
       {/* Generate modal — FIX-SCHED3: shows effective hours + progress + editable session end */}
