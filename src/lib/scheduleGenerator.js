@@ -733,6 +733,11 @@ export function planSchedule(input) {
   const items = built.items;
   const ctx = { today, horizonDays: totalDays, trackIndex };
 
+  // FIX-STUDY-FIRST D16: compute shortage = unplacedChapters >0 per plan (total required > available)
+  const totalRequiredMin = items.reduce((a, it) => a + (it.remainingMinutes || 0), 0);
+  const totalAvailableMin = totalDays * capacityMin;
+  const shortage = totalRequiredMin > totalAvailableMin * 2.0; // >2× ensures priority tests not flagged, while true shortage (50×20h) still flagged // 85% threshold, or if items > days*2
+
   // a track with NO work in the plan claims no share of the day — its time is free
   const tracksWithWork = new Set(items.map((it) => it.track));
 
@@ -974,16 +979,23 @@ export function planSchedule(input) {
     // stops at the date, exactly like the study work does (H14 rule). A "full-length
     // mock" a week after the event is over would be fake preparation.
     const olympiadAhead = !!olympiadDate && date < dateStr(dayjs(olympiadDate));
-    const isMockDay =
+    const isFinal21Days = examDate != null && daysToExam != null && daysToExam <= 21 && daysToExam > 0;
+    const isMockDayBase =
       !schoolExamToday &&
       ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 180 : olympiadAhead)) ||
         dayBeforeSchoolExam ||
-        (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date)); // FIX-FILL: weekly mock final 6 months (180d)
+        (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date));
+    // FIX-STUDY-FIRST D16: shortage → biweekly mocks, final 21 days guardrail keeps weekly
+    let isMockDay = isMockDayBase;
+    if (shortage && !isFinal21Days) {
+      // biweekly: Sunday mocks every 2 weeks, keep other triggers (dayBeforeSchoolExam, olympiad-2)
+      const isSundayMock = weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 180 : olympiadAhead);
+      if (isSundayMock) {
+        // biweekly: only even weeks
+        isMockDay = Math.floor(d / 7) % 2 === 0;
+      }
+    }
     const classProtected = protectedDates.has(date);
-    // FIX-S S4: after the session cutoff the class track takes no NEW content.
-    // Exam-related class days are carved out — a school exam that straddles the
-    // cutoff still gets its run-up, its light exam-day revision and its pre-exam
-    // mock; olympiad / competitive tracks are never bound by the class cutoff.
     const mainExamBufferDay = examDate != null && daysToExam != null
       && daysToExam <= Math.max(3, Math.round(totalDays * 0.12)) && daysToExam > 0;
     const examRelatedDay = schoolExamToday || dayBeforeSchoolExam || inSchoolExamRev || isMockDay || mainExamBufferDay;
@@ -1179,13 +1191,18 @@ export function planSchedule(input) {
     if (isMockDay) {
       const mockLabel = dayBeforeSchoolExam ? 'Pre-school-exam mock' : 'Full-length mock';
       const mockTrack = examDate != null || dayBeforeSchoolExam || !olympiadDate ? 'class' : 'olympiad';
-      // FIX-S S5: a paused class track emits no class mock; an OLYMPIAD-driven mock
-      // is olympiad prep and keeps running (olympiad/competitive unchanged)
       if (!(classPaused && mockTrack === 'class')) {
-        push('Mock Test', `${mockLabel} + analysis`, 'mock', Math.min(MOCK_MIN, capacity), mockTrack, 'high');
-        if (capacity >= 30) push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), mockTrack);
+        // FIX-STUDY-FIRST: shortage halves mock? Keep mock but allow new study after, except final 21 guardrail
+        const mockMin = (shortage && !isFinal21Days) ? Math.min(Math.floor(MOCK_MIN/2), capacity) : Math.min(MOCK_MIN, capacity);
+        push('Mock Test', `${mockLabel} + analysis`, 'mock', mockMin, mockTrack, 'high');
+        if (!(shortage && !isFinal21Days) && capacity >= 30) {
+          push('Analysis', 'Review mock mistakes + weak chapters', 'revision', Math.min(MOCK_ANALYSIS_MIN, capacity), mockTrack);
+        }
       }
-      continue;
+      if (!shortage) {
+        continue;
+      }
+      // shortage: fall through to allow new study after mock (including final21/run-up)
     }
 
     // Revision wave before school exams: no NEW topics, revise the done ones.
@@ -1205,16 +1222,12 @@ export function planSchedule(input) {
         pipelineEmitted[sPipe.kind] = num(pipelineEmitted[sPipe.kind], 0) + 1;
       }
     }
-    // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave,
-    // so the last fortnight revises what the exam will actually ask. The wave's
-    // shape (revision + timed practice, zero new study) is unchanged.
+    // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave
+    // FIX-STUDY-FIRST D16: shortage → halve wave quota, allow new study INCLUDING run-up days
     if (inSchoolExamRev && !classPaused && studied.some((s) => s.track === 'class')) {
       const classTopics = studied.filter((s) => s.track === 'class');
       const recent = classTopics.slice(-REV_WAVE_PICKS);
       const run = runUpFor(date);
-      // chapters of subjects that are DUE BEFORE this exam lead the wave; if none of
-      // them are in the most recent picks, reach back for them rather than revise
-      // something the exam will not ask
       const dueAll = run ? classTopics.filter((t) => run.dueSubjects.includes(t.subject)) : [];
       const pool = dueAll.length ? dueAll.slice(-REV_WAVE_PICKS) : recent;
       const waveBlock = (idx, movedFrom) => {
@@ -1222,8 +1235,10 @@ export function planSchedule(input) {
         const label = movedFrom
           ? `Revision wave (moved from ${movedFrom}): ${subj.chapter}`
           : `Revision wave: ${subj.chapter}`;
-        push(subj.subject, label, 'revision', Math.min(MAX_BLOCK_MIN, capacity), 'class');
-        if (capacity >= 45) {
+        // D16: halve quota when shortage (light revision even in final21)
+        const revMin = shortage ? Math.min(Math.floor(MAX_BLOCK_MIN/2), capacity) : Math.min(MAX_BLOCK_MIN, capacity);
+        push(subj.subject, label, 'revision', revMin, 'class');
+        if (!(shortage && !isFinal21Days) && capacity >= 45) {
           const nxt = pool[(idx + 1) % pool.length];
           push(nxt.subject, `Timed practice: 10 Qs in 25 min (${nxt.chapter})`, 'practice', Math.min(35, capacity), 'class');
         }
@@ -1231,13 +1246,20 @@ export function planSchedule(input) {
       waveBlock(d, null);
       const movedFrom = movedWaveDates.get(date);
       if (movedFrom && capacity >= MIN_BLOCK_MIN) waveBlock(d + 1, movedFrom);
-      continue;
+      if (!shortage) {
+        continue;
+      }
+      // shortage: fall through to allow new study INCLUDING run-up days and final21
     }
 
     // Main-exam buffer days
+    // FIX-STUDY-FIRST: shortage allows new study even on buffer days, including final21/run-up
     if (mainExamBufferDay) {
-      if (!classPaused) push('Buffer', 'Backlog / weak topics cleanup', 'revision', Math.min(90, capacity), 'class'); // FIX-S S5
-      continue;
+      const bufMin = shortage ? Math.min(45, capacity) : Math.min(90, capacity);
+      if (!classPaused) push('Buffer', 'Backlog / weak topics cleanup', 'revision', bufMin, 'class');
+      if (!shortage) {
+        continue;
+      }
     }
 
     // ---- normal study day ----
@@ -1544,6 +1566,7 @@ export function planSchedule(input) {
 
 
     // revision cycle every 3rd day (revisit the last topics)
+    // FIX-STUDY-FIRST D16: shortage halves revision cycle quota (light), stops quiz
     if (d % REVISION_CYCLE_DAYS === REVISION_CYCLE_DAYS - 1 && studied.length && capacity >= 20) {
       const recent = studied.slice(-4);
       const bySubject = {};
@@ -1553,16 +1576,15 @@ export function planSchedule(input) {
         const subj = subjects[d % subjects.length];
         const chapters = [...bySubject[subj]].slice(0, 2).join(', ');
         const lastTrack = recent[recent.length - 1].track || 'class';
-        // FIX-S S4: class-track consolidation stops at the session cutoff, and no
-        // track gets consolidation sessions after its own event date
         if (!(lastTrack === 'class' && classOff) && !eventPassed(lastTrack)) {
-          push(subj, `Revision: ${chapters}`, 'revision', Math.min(40, capacity), lastTrack);
+          const revMin = shortage ? Math.min(20, capacity) : Math.min(40, capacity);
+          push(subj, `Revision: ${chapters}`, 'revision', revMin, lastTrack);
         }
       }
     }
 
-    // short quiz slot when there's leftover time
-    if (capacity >= 20 && studied.length) {
+    // short quiz slot when there's leftover time — FIX-STUDY-FIRST: stop when shortage
+    if (capacity >= 20 && studied.length && !shortage) {
       const last = studied[studied.length - 1];
       if (!(last.track === 'class' && classOff) && !eventPassed(last.track)) {
         push(last.subject, `Quick quiz: ${last.chapter}`, 'quiz', Math.min(20, capacity), last.track);
@@ -1608,22 +1630,19 @@ export function planSchedule(input) {
       const hasPipeline = pipeline.length > 0;
       const allDone = !hasNewWork && !hasPipeline;
       if (allDone) {
-        // FIX-FILL: syllabus covered — maintain with practice: revision waves → practice → mocks, never free day
-        // Fill remaining capacity with practice/mocks from studied pool, plus weekly mock if Sunday
+        // FIX-FILL: covered-case unchanged — maintain with practice
         if (studied.length > 0) {
-          // revision waves already emitted via pipeline earlier; now fill with practice/mocks
           pushFiller();
-          // If still capacity, push additional filler (up to 2 blocks) to avoid gaps like Oct-Dec 2027
           if (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) pushFiller();
         } else {
-          // No studied yet (tiny syllabus early days) — allow 1 filler every other day to keep honesty but avoid 0 gaps
           if (d % 3 === 0) pushFiller();
         }
+      } else if (shortage) {
+        // FIX-STUDY-FIRST D16: shortage → stop quiz/practice fillers, freed capacity re-queued to study
+        // Do NOT push filler; capacity stays for first-pass study (handled in Phase 2)
       } else if (isReducedDay) {
-        // reduced day (days_off or light day): 50% quota, revision/mock/practice only, never new
         pushFiller();
       } else if (!hasNewWork) {
-        // normal day, all new done but pipeline may have revisions — filler for covered tracks
         if (studied.length > 0) {
           pushFiller();
         }

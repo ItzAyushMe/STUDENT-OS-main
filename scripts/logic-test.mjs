@@ -5587,6 +5587,114 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failed.length, 0, `FIX-TEST: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
 }
 
+// ---------- FIX-STUDY-FIRST D16: shortage re-queues to first-pass study, run-up new study only under shortage, final-21 mock guarantee, covered-case fill ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const mkS = (id, subject, chapter, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 6,
+    status: 'locked', track: 'class', progress_percent: 0, archived: false, ...over,
+  });
+
+  const TODAY = '2026-10-01';
+  const CREATED = '2026-10-01T00:00:00.000Z';
+  const EXAM_SHORT = '2027-04-15';
+  const EXAM_FAR = '2028-04-15';
+
+  // Fixed fixture: 50 chapters × 20h, 3h/day, 20 weeks → totalRequired 1000h, totalAvailable ~ 20*7*3=420h → shortage
+  const shortageRows = Array.from({ length: 50 }, (_, i) => mkS(`c${i}`, 'Science', `Ch ${i}`, { estimated_hours: 20, deadline: '2027-03-01' }));
+  const pShortage = generateSchedule({
+    syllabus: shortageRows,
+    dailyHours: 3, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 20,
+    userId: 'u-study-first', today: TODAY, createdAt: CREATED, examDate: EXAM_SHORT,
+  });
+
+  check('STUDY1', 'shortage fixture is actually shortage (unplaced >0) and strict improvement: planned >=9 (old logic 8) with run-up study >0', () => {
+    assert.ok(pShortage.coverage.unscheduled.length > 0, `expected shortage unplaced >0 got ${pShortage.coverage.unscheduled.length}`);
+    assert.ok(pShortage.coverage.classTotal === 50, 'total 50');
+    // Old logic before D16 fall-through gave 8 planned, 0 run-up study. New logic must strictly improve.
+    assert.ok(pShortage.coverage.classPlanned >= 9, `strict improvement: expected >=9 planned, got ${pShortage.coverage.classPlanned} (old=8)`);
+    const runUpStudy = pShortage.filter(r => {
+      const diff = (new Date(EXAM_SHORT) - new Date(r.date)) / (1000*60*60*24);
+      return diff > 0 && diff <= 14 && r.session_type === 'study';
+    });
+    assert.ok(runUpStudy.length > 0, `run-up days must carry new study under shortage, got ${runUpStudy.length}`);
+  });
+
+  check('STUDY2', 'run-up days carry new study ONLY under shortage: covered case (tiny syllabus) has 0 run-up new study', () => {
+    const tinyRows = [mkS('tiny1', 'Science', 'Tiny', { estimated_hours: 1 })];
+    const pTiny = generateSchedule({
+      syllabus: tinyRows,
+      dailyHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 10,
+      userId: 'u-tiny-study', today: TODAY, createdAt: CREATED, examDate: EXAM_FAR,
+    });
+    // covered case: no shortage, run-up (14d before far exam) should have 0 new study
+    const runUpTiny = pTiny.filter(r => {
+      const diff = (new Date(EXAM_FAR) - new Date(r.date)) / (1000*60*60*24);
+      return diff > 0 && diff <= 14 && r.session_type === 'study';
+    });
+    assert.equal(runUpTiny.length, 0, `covered case run-up must have 0 new study, got ${runUpTiny.length}`);
+  });
+
+  check('STUDY3', 'final-21-days mock guarantee: shortage plan keeps ≥1 mock in final 21 days + light revision present', () => {
+    const final21Mocks = pShortage.filter(r => {
+      const diff = (new Date(EXAM_SHORT) - new Date(r.date)) / (1000*60*60*24);
+      return diff > 0 && diff <= 21 && r.session_type === 'mock';
+    });
+    assert.ok(final21Mocks.length >= 1, `final 21 days must keep ≥1 mock, got ${final21Mocks.length}`);
+    assert.ok(final21Mocks.length <= 5, `final 21 weekly mocks at most 3-4, got ${final21Mocks.length}`);
+    const final21Revs = pShortage.filter(r => {
+      const diff = (new Date(EXAM_SHORT) - new Date(r.date)) / (1000*60*60*24);
+      return diff > 0 && diff <= 21 && r.session_type === 'revision';
+    });
+    assert.ok(final21Revs.length >= 1, `final 21 must keep light revision, got ${final21Revs.length}`);
+  });
+
+  check('STUDY4', 'covered case still fills with revision/mocks (FIX-FILL unchanged): tiny syllabus filler >0 and days stay free honestly', () => {
+    const tinyRows = [mkS('tiny1', 'Science', 'Tiny', { estimated_hours: 1 })];
+    const pTiny = generateSchedule({
+      syllabus: tinyRows,
+      dailyHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 10,
+      userId: 'u-tiny-fill', today: TODAY, createdAt: CREATED, examDate: EXAM_FAR,
+    });
+    const filler = pTiny.filter(r => r.session_type === 'practice' || r.session_type === 'mock' || r.session_type === 'revision');
+    assert.ok(filler.length > 0, `covered case must still fill with practice/mock/revision, got ${filler.length}`);
+    assert.ok(pTiny.coverage.unscheduled.length === 0, 'covered case no unscheduled');
+  });
+
+  check('STUDY5', 'shortage halves revision-wave quota and stops quiz/practice fillers (freed capacity → study)', () => {
+    // In shortage, quick quiz should be 0 or minimal, and practice filler (non-allDone) should be 0
+    const quizzes = pShortage.filter(r => r.session_type === 'quiz');
+    // quizzes stopped when shortage
+    assert.equal(quizzes.length, 0, `shortage must stop quick quizzes, got ${quizzes.length}`);
+    // practice filler outside allDone: our shortage plan has hasNewWork true, so filler path is shortage branch (no filler)
+    // Count practice that are filler (not timed practice after finishedTopics)
+    // At least ensure total study minutes > revision minutes in shortage? Check that study exists
+    const studyCount = pShortage.filter(r => r.session_type === 'study').length;
+    assert.ok(studyCount > 0, `shortage must have study blocks, got ${studyCount}`);
+    // biweekly mock check: Sunday mocks every 2 weeks when shortage && !final21
+    const sundayMocks = pShortage.filter(r => {
+      const d = new Date(r.date);
+      const isSun = d.getDay() === 0; // JS Sunday 0
+      return isSun && r.session_type === 'mock';
+    });
+    // With biweekly, count should be roughly half of weekly. Weekly would be ~ 20 weeks = 20 mocks, biweekly ~10.
+    // Just ensure it's less than weekly would be and >=1
+    assert.ok(sundayMocks.length >= 1 && sundayMocks.length <= 15, `biweekly Sunday mocks in range, got ${sundayMocks.length}`);
+  });
+
+  const failedSF = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedSF.length, 0, `FIX-STUDY-FIRST: ${failedSF.length} check(s) failed -> ${failedSF.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 
