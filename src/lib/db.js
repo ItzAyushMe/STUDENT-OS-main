@@ -316,20 +316,30 @@ export const db = {
         try {
           const { data, error } = await supabase.from(table).upsert(full, { onConflict: 'id' }).select();
           if (error) throw error;
-          return data || full;
+          // FIX-VERIFY5: receipt integrity — never return input as receipt
+          if (!Array.isArray(data) || data.length !== full.length) {
+            throw new Error(`[db.insertMany] receipt mismatch: sent ${full.length} returned ${Array.isArray(data) ? data.length : 'null'}`);
+          }
+          return data;
         } catch (e) {
           const msg = String(e?.message || '').toLowerCase();
           if (msg.includes('updated_at')) {
             const without = full.map(({ updated_at: _u, ...r }) => r);
             const { data, error } = await supabase.from(table).upsert(without, { onConflict: 'id' }).select();
             if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-            return data || without;
+            if (!Array.isArray(data) || data.length !== without.length) {
+              throw new Error(`[db.insertMany] receipt mismatch: sent ${without.length} returned ${Array.isArray(data) ? data.length : 'null'}`);
+            }
+            return data;
           }
           if (msg.includes('created_at')) {
             const without = full.map(({ created_at: _c, ...r }) => r);
             const { data, error } = await supabase.from(table).upsert(without, { onConflict: 'id' }).select();
             if (error) throw new Error(`[db.insertMany ${table}] ${error.message}`);
-            return data || without;
+            if (!Array.isArray(data) || data.length !== without.length) {
+              throw new Error(`[db.insertMany] receipt mismatch: sent ${without.length} returned ${Array.isArray(data) ? data.length : 'null'}`);
+            }
+            return data;
           }
           throw new Error(`[db.insertMany ${table}] ${e.message || e}`);
         }

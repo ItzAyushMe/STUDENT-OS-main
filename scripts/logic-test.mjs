@@ -6966,6 +6966,141 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedV4.length, 0, `FIX-VERIFY4: ${failedV4.length} check(s) failed -> ${failedV4.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-VERIFY5: final app-side round — REPAIR PASS + receipt integrity + meal timeline
+  console.log('\n--- FIX-VERIFY5 repair + receipt + timeline ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const record = async (id, desc, fn) => { try { await fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } };
+
+  let SS5 = null; let ss5Err = '';
+  try { SS5 = await import('./../src/lib/scheduleSave.js'); } catch (e) { ss5Err = String(e && e.message ? e.message : e).split('\n')[0]; }
+  const needSS5 = () => assert.ok(SS5, `scheduleSave import failed: ${ss5Err}`);
+
+  check('V5A', 'repair helper pickShortWindows picks windows with count < sent', () => {
+    needSS5();
+    const { pickShortWindows } = SS5;
+    assert.equal(typeof pickShortWindows, 'function', 'pickShortWindows exists');
+    const chunkWindows = [
+      { index:0, min:'2026-11-30', max:'2027-01-24', count:0 },
+      { index:1, min:'2027-01-25', max:'2027-02-10', count:500 },
+      { index:2, min:'2027-02-11', max:'2027-02-20', count:499 },
+    ];
+    const chunks = [
+      Array.from({length:500}, (_,i)=>({id:`c0-${i}`})),
+      Array.from({length:500}, (_,i)=>({id:`c1-${i}`})),
+      Array.from({length:500}, (_,i)=>({id:`c2-${i}`})),
+    ];
+    const short = pickShortWindows(chunkWindows, chunks);
+    assert.equal(short.length, 2, 'should pick 2 short windows (0 and 2)');
+    assert.ok(short.some(w=>w.index===0), 'index 0 short');
+    assert.ok(short.some(w=>w.index===2), 'index 2 short (499<500)');
+    assert.ok(!short.some(w=>w.index===1), 'index 1 not short');
+  });
+
+  await record('V5B', 'receipt mismatch throws on null/short data (spy) — db.js insertMany integrity', async () => {
+    const dbSrc = read('src/lib/db.js');
+    assert.ok(dbSrc.includes('receipt mismatch') && dbSrc.includes('sent ${'), 'db.js has receipt mismatch throw');
+    assert.ok(dbSrc.includes("return data;") && !dbSrc.includes("return data || full"), 'never returns input as receipt — old fallback removed');
+    // simulate receipt check logic
+    const checkReceipt = (sent, data) => {
+      if (!Array.isArray(data) || data.length !== sent) {
+        throw new Error(`[db.insertMany] receipt mismatch: sent ${sent} returned ${Array.isArray(data)?data.length:'null'}`);
+      }
+      return data;
+    };
+    let threw = false;
+    try { checkReceipt(500, null); } catch (e) { threw = true; assert.ok(e.message.includes('receipt mismatch') && e.message.includes('sent 500 returned null'), 'null receipt throws'); }
+    assert.ok(threw, 'null throws');
+    threw = false;
+    try { checkReceipt(500, Array.from({length:499}, (_,i)=>({id:i}))); } catch (e) { threw = true; assert.ok(e.message.includes('sent 500 returned 499'), 'short receipt throws exact counts'); }
+    assert.ok(threw, 'short throws');
+    threw = false;
+    try { checkReceipt(500, Array.from({length:500}, (_,i)=>({id:i}))); } catch { threw = true; }
+    assert.ok(!threw, 'exact count does not throw');
+  });
+
+  check('V5C', 'TIMELINE emitted both success and failure paths — deleteDone, chunkReceipt, chunkWindowCount, repair, finalCountDone', () => {
+    needSS5();
+    const { buildPlanDiagnostics } = SS5;
+    const diagSuccess = buildPlanDiagnostics({
+      rows: [{date:'2026-11-30'},{date:'2027-01-24'}],
+      coverage: {},
+      syllabus: [],
+      profile: {},
+      settings: {},
+      savedCount: 2,
+      failedChunks: [],
+      chunkSize: 500,
+      workerCount: 2,
+      reloadedSessions: [{date:'2026-11-30'}],
+      deleteDeletedCount: 3113,
+      totalAnyBefore: 4000,
+      totalMineBefore: 3113,
+      verifyInfo: { perChunk: [], retries:0, finalCount: 2 },
+      finalCountAnyUser: 2,
+      finalCountAnyStatus: 2,
+      sampleOrphans: [],
+      chunkWindows: [],
+      repairInfo: { iterations:1, repairedWindows:[0], finalAfterRepair: 2 },
+      timelineInfo: { deleteDone: 1000, chunkReceipt: [{index:0, at:1001}], chunkWindowCount: [{index:0, at:1002, count:500}], repair: [{iteration:1, at:1003}], finalCountDone: 1004 },
+    });
+    assert.ok(diagSuccess.TIMELINE, 'TIMELINE exists');
+    assert.equal(diagSuccess.TIMELINE.deleteDone, 1000, 'deleteDone timestamp');
+    assert.equal(diagSuccess.TIMELINE.chunkReceipt.length, 1, 'chunkReceipt');
+    assert.equal(diagSuccess.TIMELINE.chunkWindowCount[0].count, 500, 'chunkWindowCount count');
+    assert.equal(diagSuccess.TIMELINE.repair[0].iteration, 1, 'repair iteration');
+    assert.equal(diagSuccess.TIMELINE.finalCountDone, 1004, 'finalCountDone');
+    assert.ok(diagSuccess.REPAIR, 'REPAIR exists');
+    assert.equal(diagSuccess.REPAIR.iterations, 1, 'repair iterations');
+    assert.deepEqual(diagSuccess.REPAIR.repairedWindows, [0], 'repairedWindows');
+
+    const diagFail = buildPlanDiagnostics({
+      rows: [{date:'2026-11-30'}],
+      coverage: {},
+      syllabus: [],
+      profile: {},
+      settings: {},
+      savedCount: 0,
+      failedChunks: [0],
+      chunkSize: 500,
+      workerCount: 2,
+      reloadedSessions: [],
+      deleteDeletedCount: 0,
+      totalAnyBefore: 0,
+      totalMineBefore: 0,
+      verifyInfo: { perChunk: [], retries:0, finalCount: 0 },
+      finalCountAnyUser: 0,
+      finalCountAnyStatus: 0,
+      sampleOrphans: [],
+      chunkWindows: [{index:0,min:'2026-11-30',max:'2027-01-24',count:0}],
+      repairInfo: { iterations:2, repairedWindows:[0,0], finalAfterRepair: 0 },
+      timelineInfo: { deleteDone: 2000, chunkReceipt: [], chunkWindowCount: [], repair: [{iteration:1,at:2001},{iteration:2,at:2002}], finalCountDone: 2003 },
+    });
+    assert.equal(diagFail.TIMELINE.repair.length, 2, 'failure dump also has TIMELINE repair');
+    assert.equal(diagFail.REPAIR.finalAfterRepair, 0, 'failure dump REPAIR finalAfterRepair');
+  });
+
+  check('V5D', 'ScheduleScreen has REPAIR PASS up to 2 iterations + TIMELINE stamps + receipt integrity preserved', () => {
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    // repair pass
+    assert.ok(screenSrc.includes('REPAIR PASS') && screenSrc.includes('up to 2 iterations'), 'repair pass comment exists');
+    assert.ok(screenSrc.includes('repairedWindows') && screenSrc.includes('finalAfterRepair'), 'repair diag fields');
+    assert.ok(screenSrc.includes('diagTimeline') && screenSrc.includes('deleteDone') && screenSrc.includes('chunkReceipt') && screenSrc.includes('chunkWindowCount') && screenSrc.includes('finalCountDone'), 'TIMELINE fields');
+    // receipt integrity: insertFn returns res, not fallback
+    assert.ok(screenSrc.includes('return Array.isArray(res) ? res : chunk') || screenSrc.includes('Array.isArray(res)'), 'receipt returned');
+    // db.js receipt mismatch already checked
+    // prior pins still hold
+    const inIdPattern = /db\.list\([^)]*in:\s*\{\s*id:/;
+    assert.ok(!inIdPattern.test(screenSrc), 'still no .in(id)');
+    assert.ok(screenSrc.includes('totalAnyBefore') && screenSrc.includes('finalCountAnyUser'), 'V4 probes still present');
+  });
+
+  const failedV5 = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failedV5.length, 0, `FIX-VERIFY5: ${failedV5.length} check(s) failed -> ${failedV5.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 

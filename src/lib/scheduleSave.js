@@ -63,6 +63,15 @@ export function summarizeVerifyProbes({
   return { preDelete, final, isWrongOwner, isTrulyAbsent, chunkWindows, sampleOrphans };
 }
 
+// FIX-VERIFY5: pure helper to pick short windows for repair
+export function pickShortWindows(chunkWindows, chunks) {
+  if (!Array.isArray(chunkWindows) || !Array.isArray(chunks)) return [];
+  return chunkWindows.filter((w) => {
+    const sent = chunks[w.index]?.length || 0;
+    return typeof w.count === 'number' && w.count < sent;
+  });
+}
+
 export function buildPlanDiagnostics({
   rows = [],
   coverage = null,
@@ -82,6 +91,8 @@ export function buildPlanDiagnostics({
   finalCountAnyStatus = null,
   sampleOrphans = null,
   chunkWindows = null,
+  repairInfo = null,
+  timelineInfo = null,
 }) {
   // PLAN: from generated rows BEFORE save
   const planMonths = {
@@ -215,6 +226,20 @@ export function buildPlanDiagnostics({
     chunkWindows: Array.isArray(chunkWindows) ? chunkWindows : [],
   };
 
+  const REPAIR = repairInfo || {
+    iterations: 0,
+    repairedWindows: [],
+    finalAfterRepair: null,
+  };
+
+  const TIMELINE = timelineInfo || {
+    deleteDone: null,
+    chunkReceipt: [],
+    chunkWindowCount: [],
+    repair: [],
+    finalCountDone: null,
+  };
+
   return {
     PLAN,
     SAVE,
@@ -229,6 +254,8 @@ export function buildPlanDiagnostics({
     sampleOrphans: FINAL_PROBES.sampleOrphans,
     chunkWindows: FINAL_PROBES.chunkWindows,
     FINAL_PROBES,
+    REPAIR,
+    TIMELINE,
     generatedAt: new Date().toISOString(),
   };
 }

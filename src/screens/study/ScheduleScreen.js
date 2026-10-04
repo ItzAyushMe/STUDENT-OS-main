@@ -264,6 +264,8 @@ export function ScheduleScreen({ navigation, route }) {
       let diagDeleteCount = null;
       let diagTotalAnyBefore = null;
       let diagTotalMineBefore = null;
+      // FIX-VERIFY5: timeline deleteDone
+      let diagTimelineDeleteDone = null;
       const probePreDelete = async () => {
         try {
           const anyList = await db.list('schedule', {});
@@ -291,12 +293,14 @@ export function ScheduleScreen({ navigation, route }) {
                 const del = await db.removeWhere('schedule', { user_id: profile.id });
                 totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
                 diagDeleteCount = totalDeleted;
+                diagTimelineDeleteDone = Date.now();
                 break;
               } else {
                 await probePreDelete();
                 const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
                 totalDeleted = typeof del === 'number' ? del : rowsToDelete.length;
                 diagDeleteCount = totalDeleted;
+                diagTimelineDeleteDone = Date.now();
                 break;
               }
             }
@@ -319,11 +323,13 @@ export function ScheduleScreen({ navigation, route }) {
           await probePreDelete();
           const del = await db.removeWhere('schedule', { user_id: profile.id });
           diagDeleteCount = typeof del === 'number' ? del : null;
+          diagTimelineDeleteDone = Date.now();
           // FIX-VERIFY: small settle after delete — ensure delete fully completed before any insert
           await new Promise((r) => setTimeout(r, 350));
         } catch (e) {
           if (allExisting.length) {
             await chunkedRemove(allExisting, 'Clearing old schedule');
+            diagTimelineDeleteDone = Date.now();
             await new Promise((r) => setTimeout(r, 350));
           } else {
             throw new Error(`Old schedule delete failed — keeping old plan. ${e?.message || ''}`);
@@ -340,10 +346,12 @@ export function ScheduleScreen({ navigation, route }) {
           await probePreDelete();
           const del = await db.removeWhere('schedule', { user_id: profile.id, status: 'pending' });
           diagDeleteCount = typeof del === 'number' ? del : null;
+          diagTimelineDeleteDone = Date.now();
           await new Promise((r) => setTimeout(r, 350));
         } catch (e) {
           if (pendingRows.length) {
             await chunkedRemove(pendingRows, 'Clearing pending slots');
+            diagTimelineDeleteDone = Date.now();
             await new Promise((r) => setTimeout(r, 350));
           } else {
             throw new Error(`Pending delete failed — keeping existing. ${e?.message || ''}`);
@@ -431,6 +439,15 @@ export function ScheduleScreen({ navigation, route }) {
       let diagVerifyPerChunk = [];
       let diagVerifyRetries = 0;
       let diagFinalCount = null;
+      // FIX-VERIFY5: timeline
+      let diagTimeline = {
+        deleteDone: typeof diagTimelineDeleteDone !== 'undefined' ? diagTimelineDeleteDone : null,
+        chunkReceipt: [],
+        chunkWindowCount: [],
+        repair: [],
+        finalCountDone: null,
+      };
+      let diagRepair = null;
 
       // FIX-VERIFY: assign stable uuid v4 at generation for idempotent writes
       for (const r of rows) {
@@ -457,17 +474,36 @@ export function ScheduleScreen({ navigation, route }) {
           if (isStale()) throw new Error('stale run aborted');
           const res = await db.insertMany('schedule', chunk);
           // FIX-VERIFY3: receipt-based verify — use upsert's own .select() return as returned, zero extra queries
+          // FIX-VERIFY5: receipt integrity — db.js now throws on mismatch, so we just return array
           return Array.isArray(res) ? res : chunk;
         };
 
-        const insertAndVerifyReceipt = async (chunk) => {
+        const insertAndVerifyReceipt = async (chunk, idxForTimeline = null) => {
           const sentIds = chunk.map((r) => r.id);
           let returnedRows = await insertFn(chunk);
+          if (idxForTimeline !== null) {
+            diagTimeline.chunkReceipt.push({ index: idxForTimeline, at: Date.now() });
+          }
+          // FIX-VERIFY5: recount each chunk's window immediately after its receipt
+          try {
+            const { min, max } = getMinMax(chunk);
+            if (min && max) {
+              const wList = await db.list('schedule', {
+                eq: { user_id: profile.id, status: 'pending' },
+                gte: { date: min },
+                lte: { date: max },
+              });
+              diagTimeline.chunkWindowCount.push({ index: idxForTimeline, at: Date.now(), count: Array.isArray(wList) ? wList.length : 0 });
+            }
+          } catch {}
           let missing = computeMissingIds(sentIds, returnedRows);
           let retried = false;
           if (missing.length > 0) {
             const missingRows = chunk.filter((r) => missing.includes(r.id));
             returnedRows = await insertFn(missingRows);
+            if (idxForTimeline !== null) {
+              diagTimeline.chunkReceipt.push({ index: idxForTimeline, at: Date.now() });
+            }
             retried = true;
             const stillMissing = computeMissingIds(missing, returnedRows);
             missing = stillMissing;
@@ -497,18 +533,20 @@ export function ScheduleScreen({ navigation, route }) {
 
         // FIX-VERIFY: Serialize first chunk — await delete already done + settle, now chunk1 alone verified before workers
         // FIX-VERIFY3: receipt-based + range-count sentinel for chunk1
+        // FIX-VERIFY5: timeline chunkReceipt + chunkWindowCount recorded in insertAndVerifyReceipt
         if (totalChunks >= 1) {
           tick(`Saving schedule (1/${totalChunks})…`);
           await yieldPaint();
           if (isStale()) return;
           try {
-            const receiptRes = await insertAndVerifyReceipt(chunks[0]);
+            const receiptRes = await insertAndVerifyReceipt(chunks[0], 0);
             // chunk1 sentinel range-count
             let rangeReturned = await rangeCountChunk1(chunks[0]);
             let retriedRange = false;
             if (rangeReturned < receiptRes.sent) {
               // retry once
               await insertFn(chunks[0]);
+              diagTimeline.chunkReceipt.push({ index: 0, at: Date.now() });
               retriedRange = true;
               rangeReturned = await rangeCountChunk1(chunks[0]);
             }
@@ -533,11 +571,12 @@ export function ScheduleScreen({ navigation, route }) {
             try {
               await yieldPaint();
               if (isStale()) return;
-              const receiptRes2 = await insertAndVerifyReceipt(chunks[0]);
+              const receiptRes2 = await insertAndVerifyReceipt(chunks[0], 0);
               let rangeReturned2 = await rangeCountChunk1(chunks[0]);
               let retriedRange2 = false;
               if (rangeReturned2 < receiptRes2.sent) {
                 await insertFn(chunks[0]);
+                diagTimeline.chunkReceipt.push({ index: 0, at: Date.now() });
                 retriedRange2 = true;
                 rangeReturned2 = await rangeCountChunk1(chunks[0]);
               }
@@ -574,7 +613,7 @@ export function ScheduleScreen({ navigation, route }) {
               if (cur >= totalChunks) break;
               const chunk = chunks[cur];
               try {
-                const res = await insertAndVerifyReceipt(chunk);
+                const res = await insertAndVerifyReceipt(chunk, cur);
                 diagVerifyPerChunk.push({ index: cur, sent: res.sent, returned: res.returned, missingCount: res.missing.length, retried: res.retried });
                 if (res.retried) diagVerifyRetries++;
                 if (res.missing.length > 0) failed.push(cur);
@@ -583,7 +622,7 @@ export function ScheduleScreen({ navigation, route }) {
                 try {
                   await yieldPaint();
                   if (isStale()) break;
-                  const res2 = await insertAndVerifyReceipt(chunk);
+                  const res2 = await insertAndVerifyReceipt(chunk, cur);
                   diagVerifyPerChunk.push({ index: cur, sent: res2.sent, returned: res2.returned, missingCount: res2.missing.length, retried: res2.retried });
                   if (res2.retried) diagVerifyRetries++;
                   if (res2.missing.length > 0) failed.push(cur);
@@ -613,6 +652,7 @@ export function ScheduleScreen({ navigation, route }) {
 
         // FIX-VERIFY3: FINAL VERIFICATION — ONE range-count query user_id + date range + pending, throw LOUD, no warn swallow
         // FIX-VERIFY4: additions — finalCountAnyUser (no user filter), finalCountAnyStatus (no status filter), sampleOrphans, chunkWindows
+        // FIX-VERIFY5: REPAIR PASS + TIMELINE
         if (!isStale()) {
           const allDates = rows.map((r) => r.date).filter(Boolean).sort();
           const firstDate = allDates[0] || null;
@@ -624,6 +664,7 @@ export function ScheduleScreen({ navigation, route }) {
               lte: { date: lastDate },
             });
             diagFinalCount = Array.isArray(finalList) ? finalList.length : 0;
+            diagTimeline.finalCountDone = Date.now();
 
             // FIX-VERIFY4: finalCountAnyUser — NO user filter, pending + date range
             try {
@@ -655,25 +696,109 @@ export function ScheduleScreen({ navigation, route }) {
             } catch {}
 
             // FIX-VERIFY4: chunkWindows — per-chunk scoped counts if still short
-            if (diagFinalCount < rows.length) {
-              try {
-                const windows = [];
-                for (let i = 0; i < chunks.length; i++) {
-                  const { min, max } = getMinMax(chunks[i]);
-                  if (!min || !max) continue;
-                  try {
-                    const wList = await db.list('schedule', {
-                      eq: { user_id: profile.id, status: 'pending' },
-                      gte: { date: min },
-                      lte: { date: max },
-                    });
-                    windows.push({ index: i, min, max, count: Array.isArray(wList) ? wList.length : 0 });
-                  } catch {
-                    windows.push({ index: i, min, max, count: null });
-                  }
+            try {
+              const windows = [];
+              for (let i = 0; i < chunks.length; i++) {
+                const { min, max } = getMinMax(chunks[i]);
+                if (!min || !max) continue;
+                try {
+                  const wList = await db.list('schedule', {
+                    eq: { user_id: profile.id, status: 'pending' },
+                    gte: { date: min },
+                    lte: { date: max },
+                  });
+                  windows.push({ index: i, min, max, count: Array.isArray(wList) ? wList.length : 0 });
+                } catch {
+                  windows.push({ index: i, min, max, count: null });
                 }
-                diagChunkWindows = windows;
-              } catch {}
+              }
+              diagChunkWindows = windows;
+            } catch {}
+
+            // FIX-VERIFY5: REPAIR PASS — up to 2 iterations for short windows
+            if (diagFinalCount < rows.length) {
+              let repairedWindows = [];
+              let finalAfterRepair = diagFinalCount;
+              let iterations = 0;
+              for (let iter = 1; iter <= 2; iter++) {
+                const shortWindows = diagChunkWindows.filter((w) => {
+                  const sent = chunks[w.index]?.length || 0;
+                  return typeof w.count === 'number' && w.count < sent;
+                });
+                if (!shortWindows.length) break;
+                iterations = iter;
+                diagTimeline.repair.push({ iteration: iter, at: Date.now() });
+                for (const w of shortWindows) {
+                  const chunk = chunks[w.index];
+                  if (!chunk) continue;
+                  try {
+                    await insertFn(chunk);
+                    diagTimeline.chunkReceipt.push({ index: w.index, at: Date.now() });
+                    repairedWindows.push(w.index);
+                  } catch {}
+                  try {
+                    const { min, max } = getMinMax(chunk);
+                    if (min && max) {
+                      const wList = await db.list('schedule', {
+                        eq: { user_id: profile.id, status: 'pending' },
+                        gte: { date: min },
+                        lte: { date: max },
+                      });
+                      const newCount = Array.isArray(wList) ? wList.length : 0;
+                      w.count = newCount;
+                      diagTimeline.chunkWindowCount.push({ index: w.index, at: Date.now(), count: newCount });
+                    }
+                  } catch {}
+                }
+                try {
+                  const finalList2 = await db.list('schedule', {
+                    eq: { user_id: profile.id, status: 'pending' },
+                    gte: { date: firstDate },
+                    lte: { date: lastDate },
+                  });
+                  finalAfterRepair = Array.isArray(finalList2) ? finalList2.length : 0;
+                  diagFinalCount = finalAfterRepair;
+                  diagTimeline.finalCountDone = Date.now();
+                } catch {}
+                if (finalAfterRepair === rows.length) break;
+              }
+              diagRepair = { iterations, repairedWindows, finalAfterRepair };
+              if (finalAfterRepair === rows.length) {
+                // success after repair — proceed, will build success diag below
+                diagSavedCount = rows.length;
+                diagFailed = [];
+              } else {
+                // still short — throw LOUD with repair info in failure dump
+                try {
+                  const reloadedPartial = await load();
+                  diagReloaded = reloadedPartial || [];
+                  const diag = buildPlanDiagnostics({
+                    rows,
+                    coverage: rows.coverage,
+                    syllabus: plannedSyllabus,
+                    profile,
+                    settings,
+                    savedCount: diagSavedCount,
+                    failedChunks: diagFailed,
+                    chunkSize: diagChunkSize,
+                    workerCount: diagWorkerCount,
+                    reloadedSessions: diagReloaded,
+                    deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
+                    totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
+                    totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
+                    verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+                    finalCountAnyUser: diagFinalCountAnyUser,
+                    finalCountAnyStatus: diagFinalCountAnyStatus,
+                    sampleOrphans: diagSampleOrphans,
+                    chunkWindows: diagChunkWindows,
+                    repairInfo: diagRepair,
+                    timelineInfo: diagTimeline,
+                  });
+                  setDiagnostics(diag);
+                  console.log('🩺 Plan diagnostics (final verify failed + repair)', diag);
+                } catch {}
+                throw new Error(`Saved ${diagFinalCount}/${rows.length} — tap Generate again.`);
+              }
             }
 
             if (diagFinalCount < rows.length) {
@@ -699,6 +824,8 @@ export function ScheduleScreen({ navigation, route }) {
                   finalCountAnyStatus: diagFinalCountAnyStatus,
                   sampleOrphans: diagSampleOrphans,
                   chunkWindows: diagChunkWindows,
+                  repairInfo: diagRepair,
+                  timelineInfo: diagTimeline,
                 });
                 setDiagnostics(diag);
                 console.log('🩺 Plan diagnostics (final verify failed)', diag);
@@ -733,6 +860,8 @@ export function ScheduleScreen({ navigation, route }) {
               finalCountAnyStatus: diagFinalCountAnyStatus,
               sampleOrphans: diagSampleOrphans,
               chunkWindows: diagChunkWindows,
+              repairInfo: diagRepair,
+              timelineInfo: diagTimeline,
             });
             setDiagnostics(diag);
             console.log('🩺 Plan diagnostics (partial save)', diag);
@@ -790,6 +919,8 @@ export function ScheduleScreen({ navigation, route }) {
           finalCountAnyStatus: typeof diagFinalCountAnyStatus !== 'undefined' ? diagFinalCountAnyStatus : null,
           sampleOrphans: typeof diagSampleOrphans !== 'undefined' ? diagSampleOrphans : [],
           chunkWindows: typeof diagChunkWindows !== 'undefined' ? diagChunkWindows : [],
+          repairInfo: typeof diagRepair !== 'undefined' ? diagRepair : null,
+          timelineInfo: typeof diagTimeline !== 'undefined' ? diagTimeline : null,
         });
         setDiagnostics(diag);
         console.log('🩺 Plan diagnostics', diag);
