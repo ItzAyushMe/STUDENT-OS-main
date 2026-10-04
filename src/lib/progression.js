@@ -65,23 +65,73 @@ export function sessionLabelFor(today) {
 }
 
 /**
- * The 1 April that opens THIS date's promotion window.
- *
- * WHY the calendar year and not "the next session": FIX-S S4 already stops all
- * class-track sessions after 25 Feb of the CURRENT year, so from 26 Feb a Class 10
- * student has no class plan until they progress. The window therefore opens on the
- * 1 April of the same calendar year — before it (Jan–Mar, board-exam season) there
- * is no prompt, on/after it there is one.
- *   2027-02-26 -> 2027-04-01 (not yet)   2027-03-15 -> 2027-04-01 (not yet)
- *   2027-04-01 -> 2027-04-01 (DUE)       2027-09-27 -> 2027-04-01 (DUE)
+ * FIX-ANCHOR D18: ONE SHARED ANCHOR — derive class-year window from signup.
+ * The student's class year ends on the next 25-Feb strictly AFTER creation date.
+ * Signup Oct-2026 Class-10 => anchor 2027-02-25. Signup Jan-2026 => 2026-02-25.
+ * Strictly after: signup on Feb-25 itself => next year Feb-25.
  */
-export function promotionDueDate(today) {
+export function classYearAnchor(profile) {
+  const raw = profile && (profile.created_at || profile.createdAt);
+  if (!raw) return null;
+  let d = dayjs(raw);
+  if (!d.isValid()) {
+    // try YYYY-MM-DD prefix
+    const m = String(raw).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) d = dayjs(m[1]);
+  }
+  if (!d.isValid()) return null;
+  // CLASS_SESSION_END is 02-25
+  const [mm, dd] = String('02-25').split('-');
+  const m = Number(mm) || 2;
+  const day = Number(dd) || 25;
+  // candidate Feb 25 of same year
+  let cand = dayjs(`${d.year()}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`);
+  if (!cand.isValid()) return null;
+  // strictly after: if d < cand, anchor = cand, else next year
+  if (d.isBefore(cand, 'day')) {
+    return dateStr(cand);
+  } else {
+    const next = cand.add(1, 'year');
+    return dateStr(next);
+  }
+}
+
+/**
+ * The 1 April that opens THIS date's promotion window.
+ * FIX-ANCHOR: if profile has an anchor, due = April 1 of anchor's year.
+ * Otherwise fallback to calendar year's April 1 (old behavior).
+ */
+export function promotionDueDate(today, profile = null) {
   const d = dayjs(asDate(today));
   if (!d.isValid()) return '';
+  const anchor = profile ? classYearAnchor(profile) : null;
+  if (anchor) {
+    const a = dayjs(anchor);
+    if (a.isValid()) {
+      const [mm, dd] = String(SESSION_START || '04-01').split('-');
+      const iso = `${a.year()}-${String(Number(mm) || 4).padStart(2, '0')}-${String(Number(dd) || 1).padStart(2, '0')}`;
+      const x = dayjs(iso);
+      return x.isValid() ? dateStr(x) : iso;
+    }
+  }
   const [mm, dd] = String(SESSION_START || '04-01').split('-');
   const iso = `${d.year()}-${String(Number(mm) || 4).padStart(2, '0')}-${String(Number(dd) || 1).padStart(2, '0')}`;
   const x = dayjs(iso);
   return x.isValid() ? dateStr(x) : iso;
+}
+
+/**
+ * Auto-void check: decline recorded BEFORE anchored year-end is solicited mid-year => invalid.
+ */
+export function isDeclineInvalid(profile) {
+  const prog = progressionOf(profile);
+  if (!prog || prog.status !== 'declined') return false;
+  const anchor = classYearAnchor(profile);
+  if (!anchor) return false;
+  const declinedOn = prog.declinedOn || prog.decidedAt;
+  if (!isDateStr(declinedOn)) return false;
+  // declined before anchor => invalid (solicited mid-year)
+  return declinedOn < anchor;
 }
 
 /** Normalised users.progression (null when absent/invalid). */
@@ -122,21 +172,26 @@ export function isSchemaReady(profile, opts = {}) {
 
 /**
  * PURE [S5a]: does this profile need the promotion prompt on this date?
- *   Class 10 + nothing decided this session + today >= 1 Apr  -> true
- *   15 Mar / Class 11 / already accepted / already asked today -> false
- * A decline re-fires the NEXT day (declinedOn !== today).
+ * FIX-ANCHOR: promotion may only be offered AFTER anchored 25-Feb has passed.
+ * Anchor = next Feb 25 after signup. Due = Apr 1 of anchor year.
+ * A decline recorded BEFORE anchor is auto-voided (solicited mid-year) => treated as no decision.
  */
 export function shouldPrompt(profile, today) {
   const p = profile || {};
   const t = asDate(today);
   if (normalizeClassLevel(p.class_level) !== PROMOTION_FROM_CLASS) return false;
-  const due = promotionDueDate(t);
+  // FIX-ANCHOR: if anchor exists and today is before anchor, class year not ended yet => no prompt
+  const anchor = classYearAnchor(p);
+  if (anchor && t < anchor) return false;
+  const due = promotionDueDate(t, p);
   if (!due || t < due) return false;
   const prog = progressionOf(p);
   if (!prog) return true;
-  if (prog.status === 'accepted') return false;           // promoted — never again
-  if (prog.session !== sessionLabelFor(t)) return true;   // a decision from an older session
-  if (prog.status === 'declined') return prog.declinedOn !== t; // re-prompt the next day
+  // auto-void solicited decline
+  if (isDeclineInvalid(p)) return true; // invalid decline => treat as no decision, but only after due (already checked)
+  if (prog.status === 'accepted') return false;
+  if (prog.session !== sessionLabelFor(t)) return true;
+  if (prog.status === 'declined') return prog.declinedOn !== t;
   return true;
 }
 
@@ -157,12 +212,15 @@ export function promotionState(profile, today) {
 /**
  * [S5c] Planner input: the class track is paused while a decline stands for the
  * current session. Olympiad/competitive tracks are untouched.
+ * FIX-ANCHOR: decline recorded BEFORE anchored year-end is auto-voided => not paused.
  */
 export function classPausedFor(profile, today) {
   const t = asDate(today);
   const prog = progressionOf(profile);
   if (!prog || prog.status !== 'declined') return null;
-  if (prog.session !== sessionLabelFor(t)) return null; // an old decline cannot pause a new session
+  // FIX-ANCHOR auto-void
+  if (isDeclineInvalid(profile)) return null;
+  if (prog.session !== sessionLabelFor(t)) return null;
   return {
     reason: 'promotion-declined',
     since: prog.declinedOn || prog.decidedAt || t,

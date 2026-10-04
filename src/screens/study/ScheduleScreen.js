@@ -570,28 +570,22 @@ export function ScheduleScreen({ navigation, route }) {
         />
       ) : null}
 
-      {/* FIX-S S5: promotion decision — paused class track / result / error */}
+      {/* FIX-ANCHOR: paused banner max 2 lines + button, present/future tense anchored */}
       {promo.paused ? (
         <Card mode="light" style={{ marginBottom: 12, backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#92400E', lineHeight: 18 }}>
-            ⏸️ Class planning paused — tumne {promo.toClass} promotion decline kiya tha
-            {promo.paused.since ? ` (${promo.paused.since})` : ''}
-          </Text>
-          <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#B45309', marginTop: 4, lineHeight: 16 }}>
-            Generate karne par class track ke ZERO session banenge — koi naya chapter, chapter test ya spaced
-            revision nahi. Olympiad aur competitive sessions pehle jaise chalenge. {(promo.progression &&
-            promo.progression.fromClass) || 'Class 10'} ka data safe hai, kuch delete nahi hua.
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#92400E', lineHeight: 16 }} numberOfLines={2}>
+            ⏸️ Class planning paused till {promo.anchor ? promo.anchor.split('-').reverse().join('-') : '25-Feb'} — tap to decide
           </Text>
           <View style={{ height: 8 }} />
           <Button title="🎓 Promotion decide karo" size="sm" mode="light" onPress={() => setPromoOpen(true)} />
         </Card>
       ) : null}
 
-      {/* FIX-A5: compact S5 banner — was full card, now one-line chip → opens PromotionSheet */}
+      {/* FIX-ANCHOR: compact prompt chip max 2 lines + button, anchored */}
       {promo.state === 'prompt' && !promoOpen ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE', borderRadius: 20, paddingVertical: 6, paddingHorizontal: 12, marginBottom: 12 }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#5B21B6', flex: 1 }} numberOfLines={1}>
-            🎓 Naya session — {promo.toClass}?
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#5B21B6', flex: 1 }} numberOfLines={2}>
+            🎓 Your Class 10 year ends {promo.anchor ? promo.anchor.split('-').reverse().join('-') : '25-Feb'} — {promo.toClass}?
           </Text>
           <Pressable onPress={() => setPromoOpen(true)} style={{ backgroundColor: '#6D28D9', borderRadius: 14, paddingVertical: 4, paddingHorizontal: 10, marginLeft: 8 }}>
             <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#FFFFFF' }}>Decide</Text>
@@ -892,6 +886,7 @@ export function ScheduleScreen({ navigation, route }) {
         streams={promo.streams}
         toClass={promo.toClass}
         preset={promo.preset}
+        anchor={promo.anchor}
         busy={promo.busy}
         error={promo.error}
         onAccept={onPromoAccept}

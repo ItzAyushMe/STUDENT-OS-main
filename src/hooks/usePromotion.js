@@ -26,6 +26,7 @@ import {
   activeSchoolExams,
   pendingSessionsToRetire,
   promotionPreset,
+  classYearAnchor,
 } from '../lib/progression';
 import { PROMOTION_TO_CLASS, PROGRESSION_STREAMS } from '../config/constants';
 import { todayStr, nowIso } from '../lib/utils';
@@ -136,6 +137,7 @@ export function usePromotion() {
     [profile]
   );
 
+  const anchor = profile ? classYearAnchor(profile) : null;
   return {
     today,
     ready,
@@ -154,6 +156,7 @@ export function usePromotion() {
     streams: PROGRESSION_STREAMS,
     toClass: PROMOTION_TO_CLASS,
     preset: promotionPreset(),
+    anchor,
     shouldPrompt: () => (profile ? shouldPrompt(profile, today) : false),
   };
 }

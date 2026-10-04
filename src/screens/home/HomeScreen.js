@@ -202,7 +202,7 @@ export function HomeScreen({ navigation }) {
     >
       <Confetti trigger={confetti} origin={{ x: '50%', y: '25%' }} />
 
-      {/* FIX-S S5: promotion banner — Class 10 -> Class 11 once the session rolls */}
+      {/* FIX-ANCHOR: short prompt banner max 2 lines + button, anchored to real date */}
       {promo.ready && promo.state === 'prompt' ? (
         <View
           style={{
@@ -210,36 +210,15 @@ export function HomeScreen({ navigation }) {
             borderWidth: 1,
             borderColor: `${GAMER.primary}66`,
             borderRadius: radius.lg,
-            padding: 13,
+            padding: 12,
             marginBottom: 14,
           }}
         >
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Text style={{ fontSize: 20, marginRight: 9 }}>🎓</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13.5, color: GAMER.primarySoft }}>
-                Class 10 khatam — {promo.toClass} mein move karo?
-              </Text>
-              <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2, lineHeight: 15 }}>
-                Naya session 1 April se shuru. Class 10 map archive hoga (history safe), {promo.preset?.rowCount ?? 0}{' '}
-                {promo.toClass} chapters import honge. XP, streak aur habits untouched.
-              </Text>
-            </View>
-          </View>
-          <View style={{ flexDirection: 'row', marginTop: 10 }}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <Button title="Decide karo 🎓" size="sm" mode="gamer" onPress={() => setPromoOpen(true)} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Abhi nahi"
-                size="sm"
-                variant="ghost"
-                mode="gamer"
-                disabled={promo.busy}
-                onPress={onPromoDecline}
-              />
-            </View>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: GAMER.primarySoft }} numberOfLines={2}>
+            🎓 Your Class 10 year ends {promo.anchor ? promo.anchor.split('-').reverse().join('-') : '25-Feb'} — move to {promo.toClass}?
+          </Text>
+          <View style={{ marginTop: 8 }}>
+            <Button title="Decide karo 🎓" size="sm" mode="gamer" onPress={() => setPromoOpen(true)} />
           </View>
           {!!promo.error ? (
             <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.danger, marginTop: 8, lineHeight: 15 }}>
@@ -249,10 +228,9 @@ export function HomeScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* FIX-S S5: declined -> class track paused, said out loud */}
+      {/* FIX-ANCHOR: paused banner max 2 lines + button, present/future tense */}
       {promo.paused ? (
-        <Pressable
-          onPress={() => setPromoOpen(true)}
+        <View
           style={{
             backgroundColor: 'rgba(245,158,11,0.12)',
             borderWidth: 1,
@@ -260,21 +238,15 @@ export function HomeScreen({ navigation }) {
             borderRadius: radius.lg,
             padding: 12,
             marginBottom: 14,
-            flexDirection: 'row',
-            alignItems: 'center',
           }}
         >
-          <Text style={{ fontSize: 16, marginRight: 9 }}>⏸️</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: GAMER.warn, lineHeight: 17 }}>
-              Class planning paused — {promo.toClass} promotion decline kiya tha
-            </Text>
-            <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: GAMER.subtext, marginTop: 2, lineHeight: 15 }}>
-              Schedule mein class track ke zero session banenge{promo.paused.since ? ` (${promo.paused.since} se)` : ''}.
-              Olympiad/competitive normal chalenge. Tap karke decide karo.
-            </Text>
+          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12, color: GAMER.warn, lineHeight: 16 }} numberOfLines={2}>
+            ⏸️ Class planning paused till {promo.anchor ? promo.anchor.split('-').reverse().join('-') : '25-Feb'} — tap to decide
+          </Text>
+          <View style={{ marginTop: 8 }}>
+            <Button title="🎓 Promotion decide karo" size="sm" mode="gamer" onPress={() => setPromoOpen(true)} />
           </View>
-        </Pressable>
+        </View>
       ) : null}
 
       {promo.msg ? (
@@ -706,6 +678,7 @@ export function HomeScreen({ navigation }) {
         streams={promo.streams}
         toClass={promo.toClass}
         preset={promo.preset}
+        anchor={promo.anchor}
         busy={promo.busy}
         error={promo.error}
         onAccept={onPromoAccept}

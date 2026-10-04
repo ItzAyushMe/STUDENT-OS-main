@@ -3187,6 +3187,69 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.equal(progressCalls, 7, 'progress called per chunk');
   });
 
+  // Real anchor tests using actual progression module (Node ESM)
+  await (async () => {
+    let P = null;
+    try { P = await import('./../src/lib/progression.js'); } catch (e) { /* will be caught in record */ }
+    const rec = async (id, desc, fn) => {
+      try { await fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: String(e.message).split('\n')[0] }); }
+    };
+    await rec('ANCHOR1b', 'FIX-ANCHOR real: signup 2026-10-04 Class-10 false until 2027-02-25 true after', async () => {
+      assert.ok(P, 'progression import failed');
+      const profile = { class_level: 'Class 10', created_at: '2026-10-04T10:00:00.000Z' };
+      const anchor = P.classYearAnchor(profile);
+      assert.equal(anchor, '2027-02-25', `anchor for 2026-10-04 should be 2027-02-25, got ${anchor}`);
+      // before anchor
+      assert.equal(P.shouldPrompt(profile, '2026-12-01'), false, 'shouldPrompt false before anchor');
+      assert.equal(P.shouldPrompt(profile, '2027-02-24'), false, 'false day before anchor');
+      assert.equal(P.shouldPrompt(profile, '2027-02-25'), false, 'false on anchor day itself (needs Apr 1)');
+      assert.equal(P.shouldPrompt(profile, '2027-03-15'), false, 'false between anchor and Apr 1');
+      // after Apr 1
+      assert.equal(P.shouldPrompt(profile, '2027-04-01'), true, 'true on Apr 1 after anchor');
+      assert.equal(P.shouldPrompt(profile, '2027-04-02'), true, 'true after Apr 1');
+      assert.equal(P.shouldPrompt(profile, '2027-09-01'), true, 'true later in year');
+    });
+
+    await rec('ANCHOR2', 'FIX-ANCHOR decline 2026-10-04 auto-voided (classPausedFor null)', async () => {
+      assert.ok(P, 'progression import failed');
+      const profile = {
+        class_level: 'Class 10',
+        created_at: '2026-10-04T10:00:00.000Z',
+        progression: { status: 'declined', session: '2026-27', declinedOn: '2026-10-04', decidedAt: '2026-10-04', fromClass: 'Class 10', toClass: 'Class 11' }
+      };
+      const paused = P.classPausedFor(profile, '2026-10-05');
+      assert.equal(paused, null, `decline before anchor should be auto-voided, got ${JSON.stringify(paused)}`);
+      assert.equal(P.isDeclineInvalid(profile), true, 'isDeclineInvalid should be true for pre-anchor decline');
+    });
+
+    await rec('ANCHOR3', 'FIX-ANCHOR decline AFTER anchored year-end still pauses (real decision preserved)', async () => {
+      assert.ok(P, 'progression import failed');
+      const profile = {
+        class_level: 'Class 10',
+        created_at: '2026-10-04T10:00:00.000Z',
+        progression: { status: 'declined', session: '2026-27', declinedOn: '2027-03-10', decidedAt: '2027-03-10', fromClass: 'Class 10', toClass: 'Class 11' }
+      };
+      // Anchor 2027-02-25, decline 2027-03-10 is AFTER anchor, should still pause
+      const paused = P.classPausedFor(profile, '2027-03-11');
+      assert.ok(paused, 'decline after anchor should still pause');
+      assert.equal(P.isDeclineInvalid(profile), false, 'isDeclineInvalid false for post-anchor decline');
+    });
+
+    await rec('ANCHOR4', 'FIX-ANCHOR acceptance flow unchanged for genuinely-eligible students', async () => {
+      assert.ok(P, 'progression import failed');
+      const profile = { class_level: 'Class 10', created_at: '2026-01-10T00:00:00.000Z' };
+      const anchor = P.classYearAnchor(profile);
+      assert.equal(anchor, '2026-02-25', `anchor for Jan 10 should be 2026-02-25, got ${anchor}`);
+      // After Apr 1 2026, should prompt
+      assert.equal(P.shouldPrompt(profile, '2026-04-02'), true, 'eligible after Apr 1 should prompt');
+      // Simulate accept plan
+      const rows = [{ id: 'r1', subject: 'Science', chapter: 'Ch1', track: 'class', status: 'locked' }];
+      const plan = P.planAccept({ userId: 'u1', profile, rows, stream: 'Science', today: '2026-04-02', stamp: '2026-04-02T00:00:00.000Z' });
+      assert.equal(plan.kind, 'accept', 'planAccept should still work');
+      assert.equal(plan.userPatch.class_level, 'Class 11', 'should promote to Class 11');
+    });
+  })();
+
   // ================= FIX-CLAMP D10 Layer1: track-labeled chList + syllabus boundary fence, frozen zones =================
   check('CLAMP1', 'fence presence class-only — [track: class] labels + STRICT SYLLABUS BOUNDARY Class N board FORBIDDEN', () => {
     const aiSrc = read('src/lib/aiFeatures.js');
