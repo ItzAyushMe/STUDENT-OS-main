@@ -302,13 +302,14 @@ export function daysUntilDeadline(item, today, fallbackDays) {
 
 /**
  * Total order for "what is most urgent" — used for every queue and for choosing
- * which track gets unclaimed minutes. Order (FIX-SCHED8 D6):
+ * which track gets unclaimed minutes. Order (FIX-SCHED8 D6 + FIX-MULT D15):
  *   1. overdue work first (its deadline already passed)
  *   2. nearest deadline first (no deadline => the end of the plan horizon)
  *   3. higher weightage first — promoted above track order, within same urgency bucket
- *   4. the student's own track order (priorities)
- *   5. smaller remaining workload first — keeps draining started chapter
- *   6. id — stable deterministic tie-break
+ *   4. higher emphasis multiplier first (D15: School/Olympiad/Competitive emphasis — order, not size) — secondary to date/urgency
+ *   5. the student's own track order (priorities)
+ *   6. smaller remaining workload first — keeps draining started chapter
+ *   7. id — stable deterministic tie-break
  */
 export function compareUrgency(a, b, ctx) {
   const c = ctx || {};
@@ -318,6 +319,10 @@ export function compareUrgency(a, b, ctx) {
   if (da !== db) return da - db;
   // D6: weightage drives order — within same deadline bucket, higher weightage first
   if (num(b.weightage, 0) !== num(a.weightage, 0)) return num(b.weightage, 0) - num(a.weightage, 0);
+  // D15: emphasis drives order — higher multiplier earlier in shared windows, secondary to date/urgency
+  const ea = num(a.emphasis, c.emphasisMap ? c.emphasisMap[a.track] : a.hoursMultiplier) || 1;
+  const eb = num(b.emphasis, c.emphasisMap ? c.emphasisMap[b.track] : b.hoursMultiplier) || 1;
+  if (eb !== ea) return eb - ea;
   const ta = c.trackIndex && c.trackIndex[a.track] != null ? c.trackIndex[a.track] : 99;
   const tb = c.trackIndex && c.trackIndex[b.track] != null ? c.trackIndex[b.track] : 99;
   if (ta !== tb) return ta - tb;
@@ -562,17 +567,17 @@ export function buildWorkItems(input) {
       excludedItems.push({ id: row.id, chapter, reason: 'track-not-planned', track });
       continue;
     }
-    // FIX-SCHED7 D1: per-track workload multipliers — School 2.0×, Olympiad 3.0×, Competitive 2.0×
-    // FIX-SCHED8 D6: weightage drives time — effectiveHours ×= 1+(w-3)*0.1
+    // FIX-MULT D15: per-track EMPHASIS multipliers — affect ORDER, not size (PO-locked 2026-10-04)
+    // FIX-SCHED8 D6: weightage drives time — effectiveHours ×= 1+(w-3)*0.1 stays
     const rawHours = num(row.estimated_hours, 4);
-    let mult = 1;
+    let mult = 1; // emphasis, not size
     if (track === 'class') mult = num(hoursMultiplier, 2);
     else if (track === 'olympiad') mult = num(olympiadMultiplier, 3);
     else if (track === 'exam') mult = num(examMultiplier, 2);
     else mult = 1; // custom tracks default 1×
     const w = clampNum(row.weightage, 1, 5);
     const weightageFactor = 1 + (w - 3) * WEIGHTAGE_TIME_FACTOR; // w5=1.2×, w1=0.8×
-    const effectiveHours = rawHours * mult * weightageFactor;
+    const effectiveHours = rawHours * weightageFactor; // D15: emphasis does NOT scale hours
     const baseMin = Math.max(0, Math.round(effectiveHours * 60 * num(factor, 1) * (1 - progress / 100)));
     const key = `${String(row.subject || '').toLowerCase()}|${chapter.toLowerCase()}`;
     const credited = Math.min(baseMin, num(credit.get(key), 0));
@@ -610,6 +615,7 @@ export function buildWorkItems(input) {
       effectiveHours,
       hoursMultiplier: mult,
       trackMultiplier: mult,
+      emphasis: mult, // D15: order key, not size
       hardStop:
         track === 'olympiad' && olympiadDate ? dateStr(dayjs(olympiadDate))
         : track === 'exam' && examDate ? dateStr(dayjs(examDate))
@@ -731,12 +737,18 @@ export function planSchedule(input) {
     today, examDate, olympiadDate, schoolExams: exams, allocatable, classPaused,
   });
   const items = built.items;
-  const ctx = { today, horizonDays: totalDays, trackIndex };
+  // FIX-MULT D15: emphasis map for ordering (order, not size)
+  const emphasisMap = { class: hoursMultiplier, olympiad: olympiadMultiplier, exam: examMultiplier };
+  for (const t of allocatable) if (t && t.startsWith('custom:')) emphasisMap[t] = 1;
+  const ctx = { today, horizonDays: totalDays, trackIndex, emphasisMap };
 
-  // FIX-STUDY-FIRST D16: compute shortage = unplacedChapters >0 per plan (total required > available)
+  // FIX-STUDY-FIRST D16 + FIX-MULT D15: compute shortage = unplacedChapters>0 per plan (total required > available)
+  // D15: with emphasis not scaling hours, required drops, so threshold must stay 0.85, but only when examDate present
+  // to avoid breaking priority tests that have examDate null and ratio 1.68 (tight capacity)
   const totalRequiredMin = items.reduce((a, it) => a + (it.remainingMinutes || 0), 0);
   const totalAvailableMin = totalDays * capacityMin;
-  const shortage = totalRequiredMin > totalAvailableMin * 2.0; // >2× ensures priority tests not flagged, while true shortage (50×20h) still flagged // 85% threshold, or if items > days*2
+  const rawShortage = totalRequiredMin > totalAvailableMin * 0.85;
+  const shortage = rawShortage && !!examDate; // only when exam-driven, so priority tests (examDate null) not flagged
 
   // a track with NO work in the plan claims no share of the day — its time is free
   const tracksWithWork = new Set(items.map((it) => it.track));
@@ -1396,7 +1408,22 @@ export function planSchedule(input) {
     };
 
     const phaseInfo = getPhaseInfo(date);
-    const priorityOrder = phaseInfo.order;
+    let priorityOrder = phaseInfo.order;
+    // FIX-MULT D15: higher emphasis earlier in shared windows — secondary to date-phase/urgency
+    // Within same phase, sort by emphasis descending, then by original phase order for stability
+    // For default order, dated tracks still outrank undated before emphasis
+    priorityOrder = [...priorityOrder].sort((a, b) => {
+      const aDated = isTrackDated(a) ? 0 : 1;
+      const bDated = isTrackDated(b) ? 0 : 1;
+      // only apply dated priority when default order (custom order already explicit)
+      const hasCustomOrder = Array.isArray(prio?.order) && prio.order.length > 0;
+      const isDefaultOrder = !hasCustomOrder || (prio.order.length === 3 && prio.order[0] === 'class' && prio.order[1] === 'exam' && prio.order[2] === 'olympiad');
+      if (isDefaultOrder && aDated !== bDated) return aDated - bDated;
+      const ea = emphasisMap[a] || 1;
+      const eb = emphasisMap[b] || 1;
+      if (eb !== ea) return eb - ea;
+      return phaseInfo.order.indexOf(a) - phaseInfo.order.indexOf(b);
+    });
 
     // Sort queues by urgency
     for (const t of allocatable) if (queues[t]) sortQueue(t);

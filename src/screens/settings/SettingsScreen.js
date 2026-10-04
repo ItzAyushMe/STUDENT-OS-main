@@ -565,14 +565,14 @@ export function SettingsScreen({ navigation }) {
           </View>
           <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6 }}>0.5 hr steps — schedule engine isse daily capacity banata hai</Text>
         </View>
-        {/* FIX-SCHED7 D1/D1b: per-track workload multipliers — THREE sliders, 1.0–10.0× step 0.5, replaces SegmentedControl */}
+        {/* FIX-MULT D15: per-track EMPHASIS multipliers — order, not size (PO-locked 2026-10-04) */}
         <View style={{ marginBottom: 12 }}>
-          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 10 }}>Chapter workload — per-track multipliers (effective hours)</Text>
+          <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#1E293B', marginBottom: 10 }}>Chapter emphasis — per-track multipliers (order, not size) [D15]</Text>
 
-          {/* School workload */}
+          {/* School emphasis */}
           <View style={{ backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 10, marginBottom: 10 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#334155' }}>🏫 School workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#334155' }}>🏫 School emphasis</Text>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#7C3AED' }}>{(settings.hoursMultiplier ?? 2.0).toFixed(1)}×</Text>
             </View>
             <Slider
@@ -587,14 +587,14 @@ export function SettingsScreen({ navigation }) {
               onSlidingComplete={(v) => settings.update({ hoursMultiplier: Number(v.toFixed(1)) })}
             />
             <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', lineHeight: 14 }}>
-              Base ~4h → Effective ~{(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h (School {settings.hoursMultiplier ?? 2.0}×, default 2.0×)
+              Emphasis {(settings.hoursMultiplier ?? 2.0).toFixed(1)}× — affects order, not size; higher = earlier in shared windows. Example: School 1.5× / Olympiad 10× / Comp 10× — order only (D15)
             </Text>
           </View>
 
-          {/* Olympiad workload */}
+          {/* Olympiad emphasis */}
           <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 10, padding: 10, marginBottom: 10 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#92400E' }}>🏅 Olympiad workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#92400E' }}>🏅 Olympiad emphasis</Text>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#D97706' }}>{(settings.olympiadMultiplier ?? 3.0).toFixed(1)}×</Text>
             </View>
             <Slider
@@ -609,14 +609,14 @@ export function SettingsScreen({ navigation }) {
               onSlidingComplete={(v) => settings.update({ olympiadMultiplier: Number(v.toFixed(1)) })}
             />
             <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#92400E', lineHeight: 14 }}>
-              Base ~4h → Effective ~{(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h (Olympiad {settings.olympiadMultiplier ?? 3.0}×, default 3.0×, D1)
+              Emphasis {(settings.olympiadMultiplier ?? 3.0).toFixed(1)}× — affects order, not size; higher = earlier. Example School 1.5× / Olympiad 10× / Comp 10× (D15)
             </Text>
           </View>
 
-          {/* Competitive workload */}
+          {/* Competitive emphasis */}
           <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 4 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#991B1B' }}>🎯 Competitive workload</Text>
+              <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#991B1B' }}>🎯 Competitive emphasis</Text>
               <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 12.5, color: '#DC2626' }}>{(settings.examMultiplier ?? 2.0).toFixed(1)}×</Text>
             </View>
             <Slider
@@ -631,12 +631,12 @@ export function SettingsScreen({ navigation }) {
               onSlidingComplete={(v) => settings.update({ examMultiplier: Number(v.toFixed(1)) })}
             />
             <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#991B1B', lineHeight: 14 }}>
-              Base ~4h → Effective ~{(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (Competitive {settings.examMultiplier ?? 2.0}×, default 2.0×, D1)
+              Emphasis {(settings.examMultiplier ?? 2.0).toFixed(1)}× — affects order, not size; higher = earlier. Example School 1.5× / Olympiad 10× / Comp 10× (D15)
             </Text>
           </View>
 
           <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#64748B', marginTop: 6, lineHeight: 14 }}>
-            Per-track multipliers: School 2.0× / Olympiad 3.0× / Competitive 2.0× defaults (D1). Range 1.0–10.0× step 0.5 (D1b). Slider dep @react-native-community/slider D13. Engine applies track's own multiplier.
+            Per-track emphasis: School 2.0× / Olympiad 3.0× / Competitive 2.0× defaults (D1). Range 1.0–10.0× step 0.5 (D1b). D15: multipliers drive EMPHASIS ORDER — higher places earlier in shared windows, secondary to date-phase/urgency. Hours = Base × weightage factor only, never × emphasis. Slider dep @react-native-community/slider D13.
           </Text>
         </View>
         {/* FIX-SCHED3 D7: School session end MM-DD, editable, default 02-25 */}

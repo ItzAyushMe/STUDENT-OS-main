@@ -654,7 +654,7 @@ function HeaderBtn({ icon, onPress }) {
 function ChapterRow({ row, onOpen, onDelete, onToggle }) {
   const icon = STATUS_ICON[row.status] || '🔒';
   const high = (row.weightage || 0) >= 5;
-  // FIX-SCHED7 D1: per-track effective hours — School 2.0× / Olympiad 3.0× / Competitive 2.0×
+  // FIX-MULT D15: per-track EMPHASIS — order, not size (effective = base × weightage factor only)
   let settings;
   try { settings = useSettings(); } catch { settings = { hoursMultiplier: 2.0, olympiadMultiplier: 3.0, examMultiplier: 2.0 }; }
   const base = Number(row.estimated_hours) || 4;
@@ -663,8 +663,10 @@ function ChapterRow({ row, onOpen, onDelete, onToggle }) {
   if (track === 'class') mult = settings?.hoursMultiplier ?? 2.0;
   else if (track === 'olympiad') mult = settings?.olympiadMultiplier ?? 3.0;
   else if (track === 'exam') mult = settings?.examMultiplier ?? 2.0;
-  const effective = base * mult;
-  const hoursLine = `Base ~${base}h → Effective ~${effective.toFixed(1)}h (${track} ${mult}×)${row.deadline ? ` · due ${row.deadline}` : ''}`;
+  const w = Math.max(1, Math.min(5, Number(row.weightage) || 3));
+  const wf = 1 + (w - 3) * 0.1;
+  const effective = base * wf;
+  const hoursLine = `Base ~${base}h → Effective ~${effective.toFixed(1)}h (w${w} ${wf.toFixed(1)}×) · Emphasis ${track} ${mult}× order only (D15)${row.deadline ? ` · due ${row.deadline}` : ''}`;
   const isDone = String(row.status).toLowerCase() === 'completed';
   return (
     <Pressable

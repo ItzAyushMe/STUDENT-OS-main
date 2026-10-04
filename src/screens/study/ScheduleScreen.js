@@ -739,7 +739,7 @@ export function ScheduleScreen({ navigation, route }) {
             </Text>
             {coverage.totalRequiredHours ? (
               <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 6, lineHeight: 15 }}>
-                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× (Base→Effective per track)
+                📊 Total: {coverage.totalRequiredHours} hrs required · {coverage.totalAvailableHours} hrs available · {coverage.requiredPerDay} hrs/day needed · Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15)
               </Text>
             ) : null}
           </Card>
@@ -753,7 +753,7 @@ export function ScheduleScreen({ navigation, route }) {
                   </Text>
                   {!isCovered ? (
                     <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 15 }}>
-                      💡 How to fix: increase daily study hours in Settings, push exam date later, or lower Chapter workload School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Competitive {settings.examMultiplier ?? 2.0}× → lower. Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
+                      💡 How to fix: increase daily study hours in Settings, push exam date later. Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15). Plan honestly shows shortfall till {classSessionCutoff(coverage.today || todayStr(), settings.classSessionEnd || '02-25')}, never fabricates impossible hours.
                     </Text>
                   ) : null}
               {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
@@ -796,11 +796,11 @@ export function ScheduleScreen({ navigation, route }) {
       {/* Generate modal — FIX-SCHED3: shows effective hours + progress + editable session end */}
       <ModalSheet visible={genOpen} onClose={() => setGenOpen(false)} title="Generate Smart Schedule" mode="light">
         <Text style={{ fontFamily: fonts.body, fontSize: 13.5, color: '#475569', lineHeight: 20, marginBottom: 14 }}>
-          Ye engine tumhare syllabus ke weightage + estimated hours × workload multiplier + available time se ek day-by-day plan banayegi —
-          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
+          Ye engine tumhare syllabus ke weightage + estimated hours (× weightage factor) + available time se ek day-by-day plan banayegi —
+          revision cycles, Sunday mock tests aur exam-ke-pehle buffer days ke saath. Emphasis School {settings.hoursMultiplier ?? 2.0}× / Olympiad {settings.olympiadMultiplier ?? 3.0}× / Comp {settings.examMultiplier ?? 2.0}× — affects order, not size (D15). Plan horizon: till {classSessionCutoff(todayStr(), settings.classSessionEnd || '02-25')} ({settings.classSessionEnd || '02-25'} session end) + 14d buffer, per-track hard ends.
         </Text>
         <InfoRow label="Daily study hours" value={`${profile.daily_study_hours} hrs`} />
-        <InfoRow label="Workload" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — e.g. Base 4h → School ~${(4 * (settings.hoursMultiplier ?? 2.0)).toFixed(1)}h / Olympiad ~${(4 * (settings.olympiadMultiplier ?? 3.0)).toFixed(1)}h / Comp ~${(4 * (settings.examMultiplier ?? 2.0)).toFixed(1)}h (per-track, revision separate)`} />
+        <InfoRow label="Emphasis" value={`School ${settings.hoursMultiplier ?? 2.0}× / Olympiad ${settings.olympiadMultiplier ?? 3.0}× / Competitive ${settings.examMultiplier ?? 2.0}× — affects order, not size (D15)`} />
         <InfoRow label="Preferred time" value={profile.preferred_time || 'Night'} />
         <InfoRow label="Days off" value={(profile.days_off || []).length ? `${profile.days_off.length} days/week (50% light — revision/mock/practice only)` : 'None'} />
         <InfoRow label="Light day" value={`${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.lightDay ?? 6]} — 50% quota, revision/mock/practice only`} />

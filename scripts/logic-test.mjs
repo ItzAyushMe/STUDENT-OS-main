@@ -2794,7 +2794,7 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
   // ================= FIX-SCHED4 D4: date-cascade allocator — three-phase, overflow, undated deprioritization =================
   // ================= FIX-SCHED7 D1/D1b: per-track multiplier sliders =================
-  check('MULT1', 'per-track multiplier math: class 2.0×, olympiad 3.0×, exam 2.0× defaults', () => {
+  check('MULT1', 'per-track multiplier math: D15 emphasis — order not size, effectiveHours = base × weightage only', () => {
     assert.ok(SG, `scheduleGenerator import failed: ${sgErr}`);
     const mkS = (id, subject, chapter, over={}) => ({ id, subject, chapter, track:'class', status:'locked', progress_percent:0, weightage:3, estimated_hours:4, archived:false, ...over });
     const classRow = mkS('c1', 'Science', 'Class Ch', { track:'class', estimated_hours:4 });
@@ -2812,19 +2812,27 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(cItem, 'class item exists');
     assert.ok(oItem, 'olympiad item exists');
     assert.ok(eItem, 'exam item exists');
-    assert.equal(cItem.effectiveHours, 8, `class 4h *2.0× =8h, got ${cItem.effectiveHours}`);
-    assert.equal(oItem.effectiveHours, 12, `olympiad 4h *3.0× =12h, got ${oItem.effectiveHours}`);
-    assert.equal(eItem.effectiveHours, 8, `exam 4h *2.0× =8h, got ${eItem.effectiveHours}`);
-    // custom multipliers
+    // D15: effectiveHours = base × weightage only, never × emphasis
+    assert.equal(cItem.effectiveHours, 4, `D15 class 4h base ×1.0 weightage =4h, got ${cItem.effectiveHours}`);
+    assert.equal(oItem.effectiveHours, 4, `D15 olympiad 4h base =4h, got ${oItem.effectiveHours}`);
+    assert.equal(eItem.effectiveHours, 4, `D15 exam 4h base =4h, got ${eItem.effectiveHours}`);
+    // emphasis stored
+    assert.equal(cItem.emphasis, 2, 'class emphasis 2.0 stored');
+    assert.equal(oItem.emphasis, 3, 'olympiad emphasis 3.0 stored');
+    assert.equal(eItem.emphasis, 2, 'exam emphasis 2.0 stored');
+    // custom multipliers — effectiveHours still 4, emphasis changes
     const builtCustom = SG.buildWorkItems({
       syllabus: [classRow, olympRow, examRow],
       existing: [], deadlines: null, prio: SG.normalizePriorities(null), factor:1,
       hoursMultiplier:1.5, olympiadMultiplier:5.0, examMultiplier:10.0,
       today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class','olympiad','exam'], classPaused:null,
     });
-    assert.equal(builtCustom.items.find(i=>i.track==='class').effectiveHours, 6, 'class 4h*1.5=6');
-    assert.equal(builtCustom.items.find(i=>i.track==='olympiad').effectiveHours, 20, 'olympiad 4h*5.0=20');
-    assert.equal(builtCustom.items.find(i=>i.track==='exam').effectiveHours, 40, 'exam 4h*10.0=40');
+    assert.equal(builtCustom.items.find(i=>i.track==='class').effectiveHours, 4, 'D15 class 4h base still 4 despite 1.5× emphasis');
+    assert.equal(builtCustom.items.find(i=>i.track==='olympiad').effectiveHours, 4, 'D15 olympiad still 4 despite 5.0× emphasis');
+    assert.equal(builtCustom.items.find(i=>i.track==='exam').effectiveHours, 4, 'D15 exam still 4 despite 10.0× emphasis');
+    assert.equal(builtCustom.items.find(i=>i.track==='class').emphasis, 1.5, 'class emphasis 1.5');
+    assert.equal(builtCustom.items.find(i=>i.track==='olympiad').emphasis, 5.0, 'olympiad emphasis 5.0');
+    assert.equal(builtCustom.items.find(i=>i.track==='exam').emphasis, 10.0, 'exam emphasis 10.0');
   });
 
   check('MULT2', 'persistence probe: SettingsContext DEFAULTS has olympiadMultiplier 3.0 and examMultiplier 2.0, same pattern as hoursMultiplier', () => {
@@ -2841,11 +2849,11 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/AsyncStorage\.setItem/.test(ctxSrc), 'must persist via AsyncStorage');
   });
 
-  check('MULT3', 'wiring probe: SettingsScreen has THREE sliders School/Olympiad/Competitive, ranges 1.0–10.0 step 0.5, live labels', () => {
+  check('MULT3', 'wiring probe: SettingsScreen has THREE sliders School/Olympiad/Competitive emphasis, ranges 1.0–10.0 step 0.5, live labels, D15 copy', () => {
     const src = read('src/screens/settings/SettingsScreen.js');
-    assert.ok(/School workload/.test(src), 'must have School workload slider');
-    assert.ok(/Olympiad workload/.test(src), 'must have Olympiad workload slider');
-    assert.ok(/Competitive workload/.test(src), 'must have Competitive workload slider');
+    assert.ok(/School emphasis/.test(src), 'must have School emphasis slider (D15)');
+    assert.ok(/Olympiad emphasis/.test(src), 'must have Olympiad emphasis slider (D15)');
+    assert.ok(/Competitive emphasis/.test(src), 'must have Competitive emphasis slider (D15)');
     // Check Slider import
     assert.ok(/@react-native-community\/slider/.test(src), 'must import slider');
     // Check ranges
@@ -2853,23 +2861,23 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.ok(/step.*0\.5/.test(src), 'step 0.5');
     // Check live value labels
     assert.ok(/hoursMultiplier/.test(src) && /olympiadMultiplier/.test(src) && /examMultiplier/.test(src), 'must use all three multipliers');
-    // Ensure old SegmentedControl for workload is gone (only AI provider uses it)
-    const workloadSeg = (src.match(/Chapter workload/g) || []).length;
-    assert.ok(workloadSeg >= 1, 'Chapter workload section exists');
-    // The old 1.0×/1.5×/2.0× segmented for workload should be replaced — check no SegmentedControl with 1.0×/1.5×/2.0× for workload
-    // We allow SegmentedControl for AI provider, but not for workload
+    // D15 copy: affects order, not size
+    assert.ok(/affects order, not size/.test(src), 'D15 copy: affects order, not size');
+    assert.ok(/Emphasis.*order/.test(src) || /emphasis.*order/i.test(src), 'emphasis order text');
+    // Ensure old workload copy gone
+    assert.ok(!/Base ~4h → Effective/.test(src), 'old Base→Effective workload copy must be gone (D15)');
+    // Ensure old SegmentedControl for workload is gone
     const hasOldWorkloadSeg = /Chapter workload[\s\S]*?SegmentedControl[\s\S]*?1\.0×/.test(src);
     assert.ok(!hasOldWorkloadSeg, 'old workload SegmentedControl 1.0×/1.5×/2.0× must be replaced by sliders');
   });
 
-  check('MULT4', 'engine + UI wiring: ScheduleScreen passes per-track multipliers, SyllabusScreen uses track multiplier', () => {
+  check('MULT4', 'engine + UI wiring: ScheduleScreen passes per-track multipliers, shows Emphasis copy D15, SyllabusScreen uses track multiplier for emphasis', () => {
     const schedSrc = read('src/screens/study/ScheduleScreen.js');
     assert.ok(/olympiadMultiplier/.test(schedSrc), 'ScheduleScreen must pass olympiadMultiplier');
     assert.ok(/examMultiplier/.test(schedSrc), 'ScheduleScreen must pass examMultiplier');
-    assert.ok(/School.*Olympiad.*Competitive/.test(schedSrc) || /Workload School/.test(schedSrc), 'InfoRow must show all three');
+    assert.ok(/Emphasis School/.test(schedSrc) && /affects order, not size/.test(schedSrc), 'D15 copy: Emphasis School ... affects order, not size in coverage/modal');
     const sylSrc = read('src/screens/study/SyllabusScreen.js');
-    assert.ok(/olympiadMultiplier/.test(sylSrc) && /examMultiplier/.test(sylSrc), 'SyllabusScreen ChapterRow must use per-track multipliers');
-    assert.ok(/track.*mult|mult.*track/.test(sylSrc) || /olympiad.*3\.0/.test(sylSrc), 'ChapterRow effective hours per track');
+    assert.ok(/olympiadMultiplier/.test(sylSrc) && /examMultiplier/.test(sylSrc), 'SyllabusScreen ChapterRow must use per-track multipliers for emphasis');
   });
 
   // ================= FIX-SCHED8 D6: weightage order + time + AI estimator =================
@@ -2920,14 +2928,15 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.equal(w5.effectiveHours, 4 * 1.2, `w5: 4h *1.2=4.8, got ${w5.effectiveHours}`);
     assert.equal(w3.effectiveHours, 4 * 1.0, `w3: 4h *1.0=4, got ${w3.effectiveHours}`);
     assert.equal(w1.effectiveHours, 4 * 0.8, `w1: 4h *0.8=3.2, got ${w1.effectiveHours}`);
-    // With track multiplier
+    // With track multiplier — D15: emphasis does NOT scale hours, only weightage
     const built2 = SG.buildWorkItems({
       syllabus: [mkS('w5', 'Science', 'Ch w5', { weightage:5, estimated_hours:4, track:'class' })],
       existing:[], deadlines:null, prio: SG.normalizePriorities(null), factor:1,
       hoursMultiplier:2, olympiadMultiplier:3, examMultiplier:2,
       today:'2026-01-05', examDate:null, olympiadDate:null, schoolExams:[], allocatable:['class'], classPaused:null,
     });
-    assert.equal(built2.items[0].effectiveHours, 4 * 2 * 1.2, 'class track: 4h *2.0× *1.2× =9.6h');
+    assert.equal(built2.items[0].effectiveHours, 4 * 1.2, 'D15 class track: 4h *1.2× weightage =4.8h, NOT *2.0× emphasis');
+    assert.equal(built2.items[0].emphasis, 2, 'emphasis still stored as 2');
   });
 
   check('WEIGHT3', 'AI estimator: schema {results:[{subject,chapter,weightage 1-5, reason}]}, clamp 1-5, batching ≤10', () => {
@@ -5693,6 +5702,118 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   const failedSF = results.filter(r => !r.ok);
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failedSF.length, 0, `FIX-STUDY-FIRST: ${failedSF.length} check(s) failed -> ${failedSF.map(f => f.id).join(', ')}`);
+}
+
+// ---------- FIX-MULT D15: emphasis order, not size — identical totalRequiredHours, ordering visible, covered-case unchanged ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+      results.push({ id, desc, ok: false, err: 'async fn given to sync check() — use record()' });
+      return;
+    }
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const mkS = (id, subject, chapter, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 4,
+    status: 'locked', track: 'class', progress_percent: 0, archived: false, ...over,
+  });
+
+  const TODAY = '2026-10-01';
+  const CREATED = '2026-10-01T00:00:00.000Z';
+
+  // (a) identical syllabus with multipliers 1/1/1 vs 3/10/2 → IDENTICAL totalRequiredHours and placement capacity
+  check('MULT5', 'identical syllabus with multipliers 1/1/1 vs 3/10/2 → IDENTICAL totalRequiredHours and placement capacity (D15)', () => {
+    const syllabus = [
+      mkS('c1', 'Science', 'Ch1', { track: 'class', estimated_hours: 4 }),
+      mkS('c2', 'Maths', 'Ch2', { track: 'class', estimated_hours: 6 }),
+      mkS('o1', 'Olympiad', 'Oly1', { track: 'olympiad', estimated_hours: 5 }),
+      mkS('e1', 'JEE', 'Exam1', { track: 'exam', estimated_hours: 5 }),
+    ];
+    const p111 = generateSchedule({
+      syllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-mult-111', today: TODAY, createdAt: CREATED, examDate: '2028-04-15',
+      hoursMultiplier: 1, olympiadMultiplier: 1, examMultiplier: 1,
+    });
+    const p3102 = generateSchedule({
+      syllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-mult-3102', today: TODAY, createdAt: CREATED, examDate: '2028-04-15',
+      hoursMultiplier: 3, olympiadMultiplier: 10, examMultiplier: 2,
+    });
+    assert.equal(p111.coverage.totalRequiredHours, p3102.coverage.totalRequiredHours, `totalRequiredHours must be identical: 1/1/1=${p111.coverage.totalRequiredHours} vs 3/10/2=${p3102.coverage.totalRequiredHours}`);
+    assert.equal(p111.coverage.requiredMinutes, p3102.coverage.requiredMinutes, 'requiredMinutes identical');
+    assert.equal(p111.coverage.classTotal, p3102.coverage.classTotal, 'classTotal identical');
+    // placement capacity identical: same number of study rows (or same planned count)
+    const study111 = p111.filter(r => r.session_type === 'study').length;
+    const study3102 = p3102.filter(r => r.session_type === 'study').length;
+    assert.equal(study111, study3102, `study placement count identical: ${study111} vs ${study3102}`);
+  });
+
+  // (b) emphasis ordering visible: higher-emphasis track placed earlier in shared constrained-window fixture
+  check('MULT6', 'emphasis ordering visible: higher-emphasis track placed earlier in shared constrained window (D15)', () => {
+    // Constrained window: 1h/day, 2 weeks, class + olympiad + exam each 1 chapter, same deadline, same weightage
+    // With low emphasis on class (1×) and high on olympiad (10×), olympiad should be placed earlier (first day)
+    // Need examDate+olympiadDate to make all tracks dated and in same P1 phase, so emphasis can decide (dated vs undated would otherwise dominate)
+    const sameDeadline = '2026-10-20';
+    const syllabus = [
+      mkS('c1', 'Science', 'Class Ch', { track: 'class', estimated_hours: 4, deadline: sameDeadline, weightage: 3 }),
+      mkS('o1', 'Olympiad', 'Oly Ch', { track: 'olympiad', estimated_hours: 4, deadline: sameDeadline, weightage: 3 }),
+      mkS('e1', 'JEE', 'Exam Ch', { track: 'exam', estimated_hours: 4, deadline: sameDeadline, weightage: 3 }),
+    ];
+    const pLowClass = generateSchedule({
+      syllabus, dailyHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: null, weeks: 2,
+      userId: 'u-mult-low', today: TODAY, createdAt: CREATED, examDate: '2028-04-15', olympiadDate: '2027-11-15',
+      hoursMultiplier: 1, olympiadMultiplier: 10, examMultiplier: 2,
+    });
+    const firstStudy = pLowClass.filter(r => r.session_type === 'study').sort((a,b) => a.date.localeCompare(b.date) || a.start_time.localeCompare(b.start_time))[0];
+    assert.ok(firstStudy, 'must have first study');
+    assert.equal(firstStudy.track, 'olympiad', `higher emphasis (olympiad 10×) should be placed first, got ${firstStudy.track} ${firstStudy.topic} on ${firstStudy.date}`);
+
+    // Reverse: class 10×, olympiad 1× → class first
+    const pHighClass = generateSchedule({
+      syllabus, dailyHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: null, weeks: 2,
+      userId: 'u-mult-high', today: TODAY, createdAt: CREATED, examDate: '2028-04-15', olympiadDate: '2027-11-15',
+      hoursMultiplier: 10, olympiadMultiplier: 1, examMultiplier: 2,
+    });
+    const firstHigh = pHighClass.filter(r => r.session_type === 'study').sort((a,b) => a.date.localeCompare(b.date) || a.start_time.localeCompare(b.start_time))[0];
+    assert.ok(firstHigh, 'must have first study high class');
+    assert.equal(firstHigh.track, 'class', `higher emphasis (class 10×) should be placed first, got ${firstHigh.track}`);
+  });
+
+  // (c) covered-case fill behavior unchanged
+  check('MULT7', 'covered-case fill unchanged: tiny syllabus still fills with revision/mocks/practice (D15)', () => {
+    const tinyRows = [mkS('tiny1', 'Science', 'Tiny', { estimated_hours: 1 })];
+    const pTiny = generateSchedule({
+      syllabus: tinyRows, dailyHours: 4, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 10,
+      userId: 'u-tiny-mult', today: TODAY, createdAt: CREATED, examDate: '2028-04-15',
+      hoursMultiplier: 10, olympiadMultiplier: 10, examMultiplier: 10,
+    });
+    const filler = pTiny.filter(r => /Practice|Mock|Revision/.test(r.topic));
+    assert.ok(filler.length > 0, `covered case must still fill, got ${filler.length}`);
+    assert.ok(pTiny.coverage.unscheduled.length === 0, 'no unscheduled in covered case');
+  });
+
+  // Device-proof 4308 hrs: ensure with high multipliers totalRequired does NOT inflate
+  check('MULT8', 'device proof 4308 hrs: high multipliers 1.5×/10×/10× must NOT inflate required hours beyond base+weightage', () => {
+    const syllabus = [
+      mkS('c1', 'Science', 'Ch1', { track: 'class', estimated_hours: 4, weightage: 3 }),
+      mkS('o1', 'Olympiad', 'Oly1', { track: 'olympiad', estimated_hours: 4, weightage: 3 }),
+      mkS('e1', 'JEE', 'Exam1', { track: 'exam', estimated_hours: 4, weightage: 3 }),
+    ];
+    const pHigh = generateSchedule({
+      syllabus, dailyHours: 3, preferredTime: 'Morning', daysOff: [], weeks: 6,
+      userId: 'u-mult-4308', today: TODAY, createdAt: CREATED, examDate: '2028-04-15',
+      hoursMultiplier: 1.5, olympiadMultiplier: 10, examMultiplier: 10,
+    });
+    // Base 4h ×3 chapters =12h, weightage 3 → 1.0× → 12h required. With old logic 1.5×/10×/10× → 4*1.5+4*10+4*10=86h. New must be 12h.
+    assert.ok(pHigh.coverage.totalRequiredHours < 20, `totalRequiredHours with 1.5/10/10 must be <20h (base 12h), got ${pHigh.coverage.totalRequiredHours}h — proves 4308h inflation fixed`);
+    assert.equal(pHigh.coverage.totalRequiredHours, 12, `expected 12h base, got ${pHigh.coverage.totalRequiredHours}`);
+  });
+
+  const failed = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-MULT: ${failed.length} check(s) failed -> ${failed.map(f => f.id).join(', ')}`);
 }
 
 
