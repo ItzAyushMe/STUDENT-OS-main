@@ -2159,6 +2159,216 @@ export function planSchedule(input) {
     }
   }
 
+  // ---------- FIX-STRETCH: competitive stretches till exam date ----------
+  let stretchDiag = { days: 0, blocks: 0, byType: {} };
+  if (examDate && isDateStr(examDate)) {
+    let lastPlanDateStr = today;
+    if (rows.length) {
+      const sortedDates = rows.map(r => r.date).filter(Boolean).sort();
+      if (sortedDates.length) lastPlanDateStr = sortedDates[sortedDates.length - 1];
+    }
+    if (lastPlanDateStr < examDate) {
+      const stretchStartStr = dateStr(dayjs(lastPlanDateStr).add(1, 'day'));
+      const stretchEndStr = examDate;
+      let cur = dayjs(stretchStartStr);
+      const end = dayjs(stretchEndStr);
+      let stretchDays = 0;
+      let stretchBlocks = 0;
+      const byType = { mock: 0, revision: 0, practice: 0, quiz: 0 };
+      while (!cur.isAfter(end, 'day')) {
+        const date = dateStr(cur);
+        const weekday = (cur.day() + 6) % 7;
+        const isDayOff = offDays.has(weekday);
+        const isLightDay = hasLightDay && weekday === lightDayIdx;
+        const cap0 = dayCapacity(date, isDayOff, isLightDay, weekday);
+        const daysToExam = dayjs(examDate).diff(cur, 'day');
+        const isFinal21 = daysToExam >= 0 && daysToExam <= 21;
+        let cursor = startM;
+        let capacity = cap0;
+        let blocks = 0;
+        const dayTopicCounts = new Map();
+        const dayChapterCounts = new Map();
+        const dayChaptersUsed = new Set();
+        const dayTypeSeq = [];
+        let lastPickKeyToday = null;
+
+        const pushTail = (subject, topic, type, minutes, track) => {
+          const m = Math.min(Math.floor(num(minutes, 0)), Math.floor(capacity));
+          if (m < MIN_BLOCK_MIN) return 'small';
+          const cnt = dayTopicCounts.get(topic) || 0;
+          if (cnt >= 2) return 'cap';
+          let chapForCapRaw = String(topic || '');
+          const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+          if (parenMatch) chapForCapRaw = parenMatch[1].trim();
+          else {
+            const colonMatch = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+            if (colonMatch) chapForCapRaw = colonMatch[1].trim();
+          }
+          const subjForCap = String(subject || '').trim();
+          if (subjForCap && chapForCapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw)) {
+            const key = `${subjForCap}|${chapForCapRaw}`;
+            const c = dayChapterCounts.get(key) || 0;
+            if (c >= 2) return 'cap';
+          }
+          const start_time = minutesToTime(cursor);
+          const end_time = minutesToTime(cursor + m);
+          const key = dedupeKey({ date, start_time, subject: String(subject || ''), topic: String(topic || ''), session_type: type });
+          if (existingKeys.has(key)) {
+            duplicatesSuppressed += 1;
+            cursor += m + BREATH_MIN;
+            return 'dup';
+          }
+          existingKeys.add(key);
+          dayTopicCounts.set(topic, cnt + 1);
+          {
+            let chapRaw = String(topic || '');
+            const pm = chapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+            if (pm) chapRaw = pm[1].trim();
+            else {
+              const cm = chapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+              if (cm) chapRaw = cm[1].trim();
+            }
+            const subj = String(subject || '').trim();
+            if (subj && chapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapRaw)) {
+              const k = `${subj}|${chapRaw}`;
+              dayChapterCounts.set(k, (dayChapterCounts.get(k) || 0) + 1);
+            }
+          }
+          rows.push({
+            user_id: userId,
+            date,
+            start_time,
+            end_time,
+            subject: String(subject || ''),
+            topic: String(topic || ''),
+            session_type: type,
+            track: track || 'exam',
+            status: 'pending',
+            duration_minutes: m,
+            priority: type === 'mock' ? 'high' : 'normal',
+            created_at: stamp,
+          });
+          cursor += m + BREATH_MIN;
+          capacity = Math.max(0, capacity - (m + BREATH_MIN));
+          blocks += 1;
+          const chapMatch = String(topic || '').match(/:\s*(.+?)(?:\s*\(|—|$)/);
+          const chapForPush = chapMatch ? chapMatch[1].trim() : String(topic || '').trim();
+          const subjForPush = String(subject || '');
+          const trackForPush = String(track || 'exam');
+          const chapterKey = `${trackForPush}|${subjForPush}|${chapForPush}`;
+          const subjectChapterKey = `${subjForPush}|${chapForPush}`;
+          chapterLastUsed.set(chapterKey, date);
+          dayChaptersUsed.add(subjectChapterKey);
+          lastPickKeyToday = subjectChapterKey;
+          dayTypeSeq.push(type);
+          return 'ok';
+        };
+
+        const fillerForTrackTail = (track, blockCounter, forcedType) => {
+          let pool = studied.filter(s => s.track === track);
+          if (!pool.length) pool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          if (!pool.length) return null;
+          if (pool.length >= 3 && prevDayLastPickKey) {
+            const filtered = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
+            if (filtered.length >= 2) pool = filtered;
+          }
+          if (pool.length) {
+            const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
+            if (notCapped.length >= 2) pool = notCapped;
+            else if (notCapped.length === 1 && pool.length >= 3) pool = notCapped;
+          }
+          if (pool.length >= 3) {
+            const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
+            if (notUsedToday.length >= 2) pool = notUsedToday;
+            pool = [...pool].sort((a, b) => {
+              const ka = `${a.track}|${a.subject}|${a.chapter}`;
+              const kb = `${b.track}|${b.subject}|${b.chapter}`;
+              const da = chapterLastUsed.get(ka) || '';
+              const db = chapterLastUsed.get(kb) || '';
+              if (da !== db) return da < db ? -1 : 1;
+              return 0;
+            });
+          }
+          if (!pool.length) return null;
+          let idx = 0;
+          if (pool.length >= 3) idx = 0;
+          else idx = (studied.length + cur.diff(dayjs(today), 'day') * 3 + blockCounter * 2) % pool.length;
+          const pick = pool[idx] || pool[pool.length - 1];
+          const type = forcedType || 'practice';
+          if (type === 'mock') return { subject: pick.subject, topic: `Mock practice: ${pick.chapter}`, type, track: 'exam', chapter: pick.chapter };
+          if (type === 'revision') return { subject: pick.subject, topic: `Revision: ${pick.chapter} (exam)`, type, track: 'exam', chapter: pick.chapter };
+          if (type === 'quiz') return { subject: pick.subject, topic: `Quiz: ${pick.chapter} (exam)`, type, track: 'exam', chapter: pick.chapter };
+          return { subject: pick.subject, topic: `MCQ practice: ${pick.chapter}`, type, track: 'exam', chapter: pick.chapter };
+        };
+
+        if (capacity >= MIN_BLOCK_MIN) {
+          const varietyTypes = isFinal21 ? ['mock', 'revision', 'mock', 'practice', 'mock', 'quiz'] : ['mock', 'revision', 'practice', 'quiz'];
+          const getVarietyType = (counter, seq) => {
+            let t = varietyTypes[counter % varietyTypes.length];
+            if (seq.length >= 2 && seq[seq.length - 1] === t && seq[seq.length - 2] === t) {
+              for (let k = 1; k < varietyTypes.length; k++) {
+                const alt = varietyTypes[(counter + k) % varietyTypes.length];
+                if (alt !== t) { t = alt; break; }
+              }
+            }
+            return t;
+          };
+          let blockCounter = 0;
+          let attempts = 0;
+          while (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
+            attempts += 1;
+            const desiredType = getVarietyType(blockCounter, dayTypeSeq);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            if (!filler) break;
+            let rot = 0;
+            while (rot < 5 && (dayTopicCounts.get(filler.topic) || 0) >= 2) {
+              blockCounter += 1;
+              const nt = getVarietyType(blockCounter, dayTypeSeq);
+              const nxt = fillerForTrackTail('exam', blockCounter, nt);
+              if (!nxt) break;
+              filler = nxt;
+              rot += 1;
+            }
+            if ((dayTopicCounts.get(filler.topic) || 0) >= 2) { blockCounter += 1; continue; }
+            if (dayTypeSeq.length >= 2 && dayTypeSeq[dayTypeSeq.length - 1] === filler.type && dayTypeSeq[dayTypeSeq.length - 2] === filler.type) {
+              const altType = varietyTypes.find(t => t !== filler.type) || filler.type;
+              const alt = fillerForTrackTail('exam', blockCounter, altType);
+              if (alt && (dayTopicCounts.get(alt.topic) || 0) < 2) filler = alt;
+              else { blockCounter += 1; continue; }
+            }
+            const res = pushTail(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
+            if (res === 'ok') blockCounter += 1;
+            else if (res === 'cap' || res === 'small') blockCounter += 1;
+            else if (res === 'dup') break;
+          }
+          while (blocks < 2 && capacity >= MIN_BLOCK_MIN && attempts < 35) {
+            attempts += 1;
+            const desiredType = getVarietyType(blockCounter, dayTypeSeq);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            if (!filler) break;
+            const res = pushTail(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
+            if (res === 'ok') blockCounter += 1;
+            else blockCounter += 1;
+          }
+        }
+
+        if (lastPickKeyToday) prevDayLastPickKey = lastPickKeyToday;
+        if (blocks > 0) {
+          stretchDays += 1;
+          stretchBlocks += blocks;
+          for (const t of dayTypeSeq) byType[t] = (byType[t] || 0) + 1;
+        } else if (cap0 >= MIN_BLOCK_MIN) {
+          stretchDays += 1;
+        }
+
+        cur = cur.add(1, 'day');
+      }
+      stretchDiag = { days: stretchDays, blocks: stretchBlocks, byType };
+    }
+  }
+
   // anything still unfinished whose event date the plan already reached is too late,
   // not merely "did not fit" — classified honestly instead of silently dropped
   pruneExpired(dateStr(horizon));
@@ -2275,8 +2485,14 @@ export function planSchedule(input) {
     const msg = `syllabus covered — maintain with practice`;
     coverageWarning = coverageWarning ? `${coverageWarning} ${msg}` : msg;
   }
+  // FIX-STRETCH: competitive stretches till exam date — report tail honestly, never silent
+  if (stretchDiag.days > 0) {
+    const tailMsg = `STRETCH: exam-track maintenance tail ${stretchDiag.days} days (${stretchDiag.blocks} blocks) till ${examDate} — ${Object.entries(stretchDiag.byType).map(([k,v])=>`${k}:${v}`).join(', ')} [FIX-STRETCH]`;
+    coverageWarning = coverageWarning ? `${coverageWarning} ${tailMsg}` : tailMsg;
+  }
 
   const coverage = {
+    STRETCH: stretchDiag,
     priorityOrder: allocatable,
     timeSplit: prio.timeSplit,
     finalClass: finalClassNum,

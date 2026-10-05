@@ -7101,6 +7101,153 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failedV5.length, 0, `FIX-VERIFY5: ${failedV5.length} check(s) failed -> ${failedV5.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-STRETCH: plan tail — exam-run-up maintenance till exam date
+  console.log('\n--- FIX-STRETCH tail maintenance ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const mkS = (id, subject, chapter, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 2, status: 'locked', track: 'exam', progress_percent: 0, archived: false, ...over,
+  });
+  const CREATED = '2026-10-01T00:00:00.000Z';
+
+  check('STRETCH-A', 'tail days 2028-01-25..2028-04-04 all have ≥2 maintenance blocks, none empty while weekday quota >0', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-a', today, createdAt: CREATED, examDate,
+    });
+    const tailStart = '2028-01-25';
+    const tailEnd = '2028-04-04';
+    let cur = new Date(tailStart);
+    const end = new Date(tailEnd);
+    const fails = [];
+    while (cur <= end) {
+      const ds = cur.toISOString().slice(0,10);
+      const dayRows = rows.filter(r=>r.date===ds);
+      // compute quota for that weekday using same logic as generator: weekdayHours/weekendHours + light/dayOff 50%
+      // For this fixture daysOff=[] lightDay=6, so Saturday (5) weekend, Sunday (6) light 50%
+      // We just check that if dayRows empty, then quota must be 0 — but in our fixture quota >0 always (4h weekday, 6h weekend, light 50% => min 2h)
+      // So we require ≥2 blocks
+      if (dayRows.length < 2) fails.push(`${ds}:${dayRows.length}`);
+      cur.setDate(cur.getDate()+1);
+    }
+    assert.equal(fails.length, 0, `tail days should all have ≥2 blocks, fails: ${fails.slice(0,5).join(', ')}`);
+  });
+
+  check('STRETCH-B', '0 class-track rows after 2027-02-25 anywhere in plan', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-b', today, createdAt: CREATED, examDate,
+    });
+    const after = rows.filter(r=> r.track==='class' && r.date > '2027-02-25');
+    assert.equal(after.length, 0, `0 class-track after 2027-02-25, got ${after.length} e.g. ${after[0]?.date} ${after[0]?.topic}`);
+  });
+
+  check('STRETCH-C', 'worst chapter/day ≤2 across tail (PROPORT1)', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-c', today, createdAt: CREATED, examDate,
+    });
+    const tailStart='2028-01-25', tailEnd='2028-04-04';
+    const byDateChapter = {};
+    let worst=0;
+    for (const r of rows) {
+      if (r.date < tailStart || r.date > tailEnd) continue;
+      // extract chapter for cap: try inside parens or after colon
+      let chap = String(r.topic||'');
+      const pm = chap.match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if (pm) chap = pm[1].trim();
+      else {
+        const cm = chap.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+        if (cm) chap = cm[1].trim();
+      }
+      const key = `${r.date}|${r.subject}|${chap}`;
+      byDateChapter[key] = (byDateChapter[key]||0)+1;
+      worst = Math.max(worst, byDateChapter[key]);
+    }
+    assert.ok(worst <= 2, `PROPORT1 worst chapter/day ≤2 across tail, got ${worst}`);
+  });
+
+  check('STRETCH-D', 'tail blocks only mock/revision/practice/quiz types', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-d', today, createdAt: CREATED, examDate,
+    });
+    const tailStart='2028-01-25', tailEnd='2028-04-04';
+    const bad = rows.filter(r=> r.date>=tailStart && r.date<=tailEnd && !['mock','revision','practice','quiz'].includes(r.session_type));
+    assert.equal(bad.length, 0, `tail blocks only mock/revision/practice/quiz, got bad ${bad.length} e.g. ${bad[0]?.session_type} ${bad[0]?.topic}`);
+  });
+
+  check('STRETCH-E', 'plan lastDate == 2028-04-04', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-e', today, createdAt: CREATED, examDate,
+    });
+    const last = rows.map(r=>r.date).filter(Boolean).sort().pop();
+    assert.equal(last, '2028-04-04', `lastDate should be examDate 2028-04-04, got ${last}`);
+  });
+
+  check('STRETCH-F', 'diag.STRETCH = { days, blocks, byType } into plan diagnostics + coverage summary mentions tail', () => {
+    const today = '2026-10-01';
+    const examDate = '2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours: 4, weekendHours: 6, preferredTime: 'Morning', daysOff: [], lightDay: 6, weeks: 6,
+      userId: 'u-stretch-f', today, createdAt: CREATED, examDate,
+    });
+    const cov = rows.coverage;
+    assert.ok(cov.STRETCH, 'coverage.STRETCH exists');
+    assert.ok(typeof cov.STRETCH.days === 'number' && cov.STRETCH.days > 0, `STRETCH.days >0 got ${cov.STRETCH.days}`);
+    assert.ok(typeof cov.STRETCH.blocks === 'number' && cov.STRETCH.blocks >= cov.STRETCH.days*2, `STRETCH.blocks >= days*2 got ${cov.STRETCH.blocks} days ${cov.STRETCH.days}`);
+    assert.ok(cov.STRETCH.byType && typeof cov.STRETCH.byType === 'object', 'STRETCH.byType exists');
+    assert.ok(cov.coverageWarning && cov.coverageWarning.includes('STRETCH'), `coverageWarning mentions STRETCH tail, got ${cov.coverageWarning?.slice(0,100)}`);
+    const src = read('src/lib/scheduleSave.js');
+    assert.ok(src.includes('STRETCH'), 'scheduleSave.js includes STRETCH');
+    assert.ok(src.includes('stretchInfo'), 'buildPlanDiagnostics signature includes stretchInfo');
+  });
+
+  check('STRETCH-G', 'all prior pins hold (D14b, VARIETY, MAINT, PROPORT1a/b, VERIFY1-6, V4A-D, D20b) — probe via existing tests still pass', () => {
+    // This is meta: we already have those tests earlier, but we check that our stretch file still contains D14b guards and no class after cutoff logic
+    const genSrc = read('src/lib/scheduleGenerator.js');
+    assert.ok(genSrc.includes('FIX-STRETCH'), 'generator has FIX-STRETCH comment');
+    assert.ok(genSrc.includes('exam-track maintenance') || genSrc.includes('competitive stretches'), 'stretch comment mentions exam-track');
+    assert.ok(genSrc.includes('STRETCH: exam-track maintenance tail'), 'coverageWarning mentions tail');
+    // D14b still present
+    assert.ok(genSrc.includes('classOff') && genSrc.includes('cutoff'), 'D14b classOff still present');
+    // VARIETY still present
+    assert.ok(genSrc.includes('prevDayLastPickKey') && genSrc.includes('dayTypeSeq'), 'VARIETY still present');
+    // MAINT LRU
+    assert.ok(genSrc.includes('chapterLastUsed'), 'MAINT LRU still present');
+    // PROPORT1 cap
+    assert.ok(genSrc.includes('dayChapterCounts') && genSrc.includes('PROPORT1'), 'PROPORT1 cap still present');
+    // VERIFY pins
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    assert.ok(!/db\.list\([^)]*in:\s*\{\s*id:/.test(screenSrc), 'still no .in(id) mega-URL');
+    assert.ok(screenSrc.includes('totalAnyBefore') && screenSrc.includes('finalCountAnyUser'), 'V4 probes still present');
+    // D20b days off 50%
+    assert.ok(genSrc.includes('offDays') && genSrc.includes('50%'), 'D20b still present');
+  });
+
+  const failed = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-STRETCH: ${failed.length} check(s) failed -> ${failed.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 

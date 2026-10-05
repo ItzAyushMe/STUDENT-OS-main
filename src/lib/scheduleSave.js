@@ -93,6 +93,7 @@ export function buildPlanDiagnostics({
   chunkWindows = null,
   repairInfo = null,
   timelineInfo = null,
+  stretchInfo = null,
 }) {
   // PLAN: from generated rows BEFORE save
   const planMonths = {
@@ -240,7 +241,10 @@ export function buildPlanDiagnostics({
     finalCountDone: null,
   };
 
+  const STRETCH = stretchInfo || coverage?.STRETCH || { days: 0, blocks: 0, byType: {} };
+
   return {
+    STRETCH,
     PLAN,
     SAVE,
     RELOAD,
