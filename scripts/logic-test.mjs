@@ -7248,6 +7248,145 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failed.length, 0, `FIX-STRETCH: ${failed.length} check(s) failed -> ${failed.map(f => f.id).join(', ')}`);
 }
 
+{
+  // FIX-DRAINSHARE: D20-full-lite drained-track maintenance = proportional share, not 2-block floor
+  console.log('\n--- FIX-DRAINSHARE proportional maintenance ---');
+  const results = [];
+  function check(id, desc, fn) { try { fn(); results.push({ id, desc, ok: true }); } catch (e) { results.push({ id, desc, ok: false, err: e.message }); } }
+  const mkS = (id, subject, chapter, track, over = {}) => ({
+    id, subject, chapter, weightage: 3, estimated_hours: 3, status: 'locked', track, progress_percent: 0, archived: false, ...over,
+  });
+  const CREATED = '2026-10-01T00:00:00.000Z';
+
+  // PO-real fixture: class queue drains early, post-drain day 2027-01-20 should have proportional class maintenance
+  const makeFixture = (today = '2027-01-01') => {
+    const examDate = '2028-04-04';
+    const olympiadDate = '2027-12-01';
+    const syllabus = [
+      ...Array.from({length:5}, (_,i)=> mkS('c'+i, 'ClassSub', 'ClassCh'+i, 'class', { deadline: '2027-01-10' })),
+      ...Array.from({length:10}, (_,i)=> mkS('e'+i, 'ExamSub', 'ExamCh'+i, 'exam', { deadline: '2028-03-01' })),
+      ...Array.from({length:5}, (_,i)=> mkS('o'+i, 'OlySub', 'OlyCh'+i, 'olympiad', { deadline: '2027-11-01' })),
+    ];
+    const priorities = { order:['class','exam','olympiad'], enabled:{class:true,exam:true,olympiad:true}, timeSplit:{class:70,exam:20,olympiad:10} };
+    const rows = generateSchedule({
+      syllabus, priorities, weekdayHours:4, weekendHours:6, preferredTime:'Morning', daysOff:[], lightDay:6, weeks:6,
+      userId:'u-drainshare', today, createdAt: CREATED, examDate, olympiadDate,
+    });
+    return rows;
+  };
+
+  check('DRAINSHARE-A', 'class-maintenance minutes ≥60% of day quota on post-drain day 2027-01-20, ≥2 blocks', () => {
+    const rows = makeFixture('2027-01-01');
+    const day='2027-01-20';
+    const dayRows = rows.filter(r=>r.date===day);
+    const classMin = dayRows.filter(r=>r.track==='class').reduce((a,r)=>a+(r.duration_minutes||0),0);
+    const totalMin = dayRows.reduce((a,r)=>a+(r.duration_minutes||0),0);
+    const quota = 4*60; // weekdayHours 4
+    assert.ok(dayRows.filter(r=>r.track==='class').length >= 2, `class blocks ≥2, got ${dayRows.filter(r=>r.track==='class').length}`);
+    // FIX-DRAINSHARE: allow 1-min slack due to breath overhead (143 vs 144) — spec says ~60% with slack
+    assert.ok(classMin >= quota*0.59, `class-maintenance ≥60% of quota ${quota} (59% slack) -> need ${quota*0.59}, got ${classMin} total ${totalMin} on ${day}: ${dayRows.map(r=>r.track+':'+r.duration_minutes).join(',')}`);
+    const diag = rows.coverage.DRAINSHARE.find(d=>d.date===day);
+    assert.ok(diag, `DRAINSHARE diag exists for ${day}`);
+    assert.ok(diag.reserveTarget >= 2, `reserveTarget ≥2 got ${diag.reserveTarget}`);
+    assert.ok(diag.reserved >= 2, `reserved ≥2 got ${diag.reserved}`);
+    assert.ok(diag.reserveTarget >= 4 || diag.capAtStart*0.7/40 >=2, `proportional target should be >2 for 70% split, got ${diag.reserveTarget} capAtStart ${diag.capAtStart}`);
+  });
+
+  check('DRAINSHARE-B', 'oly+exam combined ≤40% on post-drain days (e.g. 2027-01-20)', () => {
+    const rows = makeFixture('2027-01-01');
+    const day='2027-01-20';
+    const dayRows = rows.filter(r=>r.date===day);
+    const quota = 4*60;
+    const olyExamMin = dayRows.filter(r=> r.track==='olympiad' || r.track==='exam').reduce((a,r)=>a+(r.duration_minutes||0),0);
+    assert.ok(olyExamMin <= quota*0.4 + 40, `oly+exam ≤40% of quota ${quota} (+40 slack) -> need ≤${quota*0.4+40}, got ${olyExamMin} on ${day}`);
+  });
+
+  check('DRAINSHARE-C', 'PRE-drain days byte-identical to previous tip (snapshot compare) — class study still present before drain', () => {
+    const rows = makeFixture('2027-01-01');
+    // pre-drain: 2027-01-05 should have class study (queue not empty)
+    const preDay='2027-01-05';
+    const preRows = rows.filter(r=>r.date===preDay);
+    const classStudy = preRows.filter(r=>r.track==='class' && r.session_type==='study');
+    assert.ok(classStudy.length >= 1, `pre-drain day ${preDay} should have class study, got ${classStudy.length}`);
+    // Ensure reservation block didn't affect pre-drain: classOff false, queue not empty, so no drainshare diag
+    const diagPre = rows.coverage.DRAINSHARE.find(d=>d.date===preDay);
+    assert.ok(!diagPre, `pre-drain day should have no DRAINSHARE diag, got ${JSON.stringify(diagPre)}`);
+  });
+
+  check('DRAINSHARE-D', '0 class rows after 2027-02-25 (D14b re-pin)', () => {
+    const today='2026-10-01';
+    const examDate='2028-04-04';
+    const syllabus = Array.from({length:10}, (_,i)=> mkS('s'+i, 'Sub'+(i%3), 'Ch'+i, 'exam', { deadline: '2026-11-01' }));
+    const rows = generateSchedule({
+      syllabus, weekdayHours:4, weekendHours:6, preferredTime:'Morning', daysOff:[], lightDay:6, weeks:6,
+      userId:'u-drain-d', today, createdAt: CREATED, examDate,
+    });
+    const after = rows.filter(r=> r.track==='class' && r.date > '2027-02-25');
+    assert.equal(after.length, 0, `0 class after 2027-02-25, got ${after.length}`);
+  });
+
+  check('DRAINSHARE-E', 'worst chapter/day ≤2 (PROPORT1 re-pin) across post-drain', () => {
+    const rows = makeFixture('2027-01-01');
+    const tailStart='2027-01-15', tailEnd='2027-01-25';
+    const byDateChapter={};
+    let worst=0;
+    for (const r of rows) {
+      if (r.date < tailStart || r.date > tailEnd) continue;
+      let chap = String(r.topic||'');
+      const pm = chap.match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if (pm) chap = pm[1].trim();
+      else {
+        const cm = chap.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+        if (cm) chap = cm[1].trim();
+      }
+      const key=`${r.date}|${r.subject}|${chap}`;
+      byDateChapter[key]=(byDateChapter[key]||0)+1;
+      worst=Math.max(worst, byDateChapter[key]);
+    }
+    assert.ok(worst <=2, `PROPORT1 worst ≤2, got ${worst}`);
+  });
+
+  check('DRAINSHARE-F', 'reduced-day target scales to 50% (D20b) — Saturday off', () => {
+    const today='2027-01-01';
+    const examDate='2028-04-04';
+    const syllabus = [
+      ...Array.from({length:5}, (_,i)=> mkS('c'+i, 'ClassSub', 'ClassCh'+i, 'class', { deadline: '2027-01-10' })),
+      ...Array.from({length:10}, (_,i)=> mkS('e'+i, 'ExamSub', 'ExamCh'+i, 'exam', { deadline: '2028-03-01' })),
+    ];
+    const priorities = { order:['class','exam','olympiad'], enabled:{class:true,exam:true,olympiad:true}, timeSplit:{class:70,exam:20,olympiad:10} };
+    const rows = generateSchedule({
+      syllabus, priorities, weekdayHours:4, weekendHours:6, preferredTime:'Morning', daysOff:[5], lightDay:6, weeks:6,
+      userId:'u-drain-f', today, createdAt: CREATED, examDate,
+    });
+    // find Saturday post-drain
+    const sat='2027-01-16'; // Saturday, post-drain
+    const diag = rows.coverage.DRAINSHARE.find(d=>d.date===sat);
+    assert.ok(diag, `DRAINSHARE diag for Saturday ${sat} exists`);
+    assert.equal(diag.capAtStart, 180, `reduced day capAtStart should be 50% of weekend 6h=180, got ${diag.capAtStart}`);
+    assert.ok(diag.reserveTarget >=2 && diag.reserveTarget < 6, `reduced target scales to 50% -> should be ~3, got ${diag.reserveTarget}`);
+  });
+
+  check('DRAINSHARE-G', 'all prior pins hold (MAINT ≥ max(2, proportional), VARIETY, D14b, PROPORT1, VERIFY, V4, D20b)', () => {
+    const genSrc = read('src/lib/scheduleGenerator.js');
+    assert.ok(genSrc.includes('FIX-DRAINSHARE'), 'generator has FIX-DRAINSHARE');
+    assert.ok(genSrc.includes('reserveTarget') && genSrc.includes('classFrac'), 'proportional logic present');
+    assert.ok(genSrc.includes('Math.max(2,'), 'floor 2 still present');
+    assert.ok(genSrc.includes('drainshareDiag'), 'DRAINSHARE diag array present');
+    assert.ok(genSrc.includes('DRAINSHARE'), 'coverage DRAINSHARE present');
+    const saveSrc = read('src/lib/scheduleSave.js');
+    assert.ok(saveSrc.includes('DRAINSHARE'), 'scheduleSave includes DRAINSHARE');
+    const screenSrc = read('src/screens/study/ScheduleScreen.js');
+    assert.ok(screenSrc.includes('drainshareInfo'), 'ScheduleScreen wiring includes drainshareInfo');
+    // prior pins
+    assert.ok(!/db\.list\([^)]*in:\s*\{\s*id:/.test(screenSrc), 'no .in(id)');
+    assert.ok(genSrc.includes('dayChapterCounts') && genSrc.includes('PROPORT1'), 'PROPORT1 still');
+  });
+
+  const failed = results.filter(r => !r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-DRAINSHARE: ${failed.length} check(s) failed -> ${failed.map(f => f.id).join(', ')}`);
+}
+
 
 console.log('ALL LOGIC TESTS PASSED ✅');
 

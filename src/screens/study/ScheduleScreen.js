@@ -794,6 +794,7 @@ export function ScheduleScreen({ navigation, route }) {
                     repairInfo: diagRepair,
                     timelineInfo: diagTimeline,
                     stretchInfo: rows.coverage?.STRETCH || null,
+                    drainshareInfo: rows.coverage?.DRAINSHARE || null,
                   });
                   setDiagnostics(diag);
                   console.log('🩺 Plan diagnostics (final verify failed + repair)', diag);
@@ -828,6 +829,7 @@ export function ScheduleScreen({ navigation, route }) {
                   repairInfo: diagRepair,
                   timelineInfo: diagTimeline,
                     stretchInfo: rows.coverage?.STRETCH || null,
+                    drainshareInfo: rows.coverage?.DRAINSHARE || null,
                 });
                 setDiagnostics(diag);
                 console.log('🩺 Plan diagnostics (final verify failed)', diag);
@@ -865,6 +867,7 @@ export function ScheduleScreen({ navigation, route }) {
               repairInfo: diagRepair,
               timelineInfo: diagTimeline,
                     stretchInfo: rows.coverage?.STRETCH || null,
+                    drainshareInfo: rows.coverage?.DRAINSHARE || null,
             });
             setDiagnostics(diag);
             console.log('🩺 Plan diagnostics (partial save)', diag);
@@ -925,6 +928,7 @@ export function ScheduleScreen({ navigation, route }) {
           repairInfo: typeof diagRepair !== 'undefined' ? diagRepair : null,
           timelineInfo: typeof diagTimeline !== 'undefined' ? diagTimeline : null,
           stretchInfo: typeof rows !== 'undefined' && rows.coverage?.STRETCH ? rows.coverage.STRETCH : null,
+          drainshareInfo: typeof rows !== 'undefined' && rows.coverage?.DRAINSHARE ? rows.coverage.DRAINSHARE : null,
         });
         setDiagnostics(diag);
         console.log('🩺 Plan diagnostics', diag);

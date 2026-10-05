@@ -94,6 +94,7 @@ export function buildPlanDiagnostics({
   repairInfo = null,
   timelineInfo = null,
   stretchInfo = null,
+  drainshareInfo = null,
 }) {
   // PLAN: from generated rows BEFORE save
   const planMonths = {
@@ -242,8 +243,10 @@ export function buildPlanDiagnostics({
   };
 
   const STRETCH = stretchInfo || coverage?.STRETCH || { days: 0, blocks: 0, byType: {} };
+  const DRAINSHARE = drainshareInfo || coverage?.DRAINSHARE || [];
 
   return {
+    DRAINSHARE,
     STRETCH,
     PLAN,
     SAVE,
