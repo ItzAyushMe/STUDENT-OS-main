@@ -9,6 +9,9 @@ import {
   TIERS,
   STREAK_FREEZE_MAX,
   STREAK_FREEZE_EARN_EVERY,
+  HABIT_DIFFICULTIES,
+  habitDifficultyMultiplier,
+  habitXpForDifficulty,
 } from '../config/constants';
 import { todayStr, daysBetween } from './utils';
 
@@ -20,6 +23,20 @@ export function xpForCode(code, overrideAmount) {
     category: rule.category,
     label: rule.label || code,
   };
+}
+
+export function xpForHabitWithDifficulty(baseCode, difficulty) {
+  const base = XP_RULES[baseCode] || { amount: 0 };
+  const baseAmount = base.amount || 0;
+  // FIX-HABIT-XP: easy 0.5×, medium 1×, hard 1.5×, ultra 2×, round half up, min 1
+  // For negative base (undo), keep sign and apply multiplier to absolute value
+  const mult = habitDifficultyMultiplier(difficulty);
+  const absBase = Math.abs(baseAmount);
+  const scaledAbs = Math.round(absBase * mult);
+  const scaled = baseAmount < 0 ? -Math.max(1, scaledAbs) : Math.max(1, scaledAbs);
+  // If baseAmount is 0, still min 1? But HABIT base is 10, so fine. For safety, if base 0, return 0
+  if (baseAmount === 0) return 0;
+  return scaled;
 }
 
 export function levelForXp(totalXp) {
@@ -92,15 +109,24 @@ export function streakOnActivity(profile, today = todayStr()) {
 // to avoid the stale-closure race where two rapid awards both computed from
 // the same pre-award total_xp (audit HIGH-1).
 // NEW X R3: countActivity false for reversals, floor at 0, allow negatives
+// FIX-HABIT-XP: difficulty scaling inside guarded awardXP — same guards, ledger, anti-double-award
 export async function awardXPToProfile(deps, code, opts = {}) {
   const { profile: maybeStale, updateProfile, insert, getProfile } = deps;
   const profile = (typeof getProfile === 'function' ? getProfile() : null) || maybeStale;
   if (!profile?.id) return null;
 
-  const rule = xpForCode(code, opts.amount);
+  let rule = xpForCode(code, opts.amount);
   let gained = Number(rule.amount) || 0;
   if (!gained && rule.perMinute && opts.minutes) {
     gained = Math.round(rule.perMinute * opts.minutes);
+  }
+  // FIX-HABIT-XP: if difficulty provided and no explicit amount override, scale base HABIT/HABIT_UNDO by tier
+  // easy 0.5×, medium 1×, hard 1.5×, ultra 2×, round half up, min 1. Bad-habit keys untouched.
+  if (opts.amount == null && opts.difficulty && (code === 'HABIT' || code === 'HABIT_UNDO')) {
+    const scaled = xpForHabitWithDifficulty(code, opts.difficulty);
+    // xpForHabitWithDifficulty already handles sign and min 1
+    gained = scaled;
+    rule = { ...rule, amount: scaled };
   }
   // R3: allow 0? No — but allow negative (negatives are truthy, !-10 === false)
   // So we check gained === 0 explicitly, not !gained
@@ -112,7 +138,7 @@ export async function awardXPToProfile(deps, code, opts = {}) {
     category: opts.category || rule.category,
     amount: gained,
     label: opts.label || rule.label,
-    meta: opts.meta || null,
+    meta: opts.difficulty ? { ...(opts.meta||{}), difficulty: opts.difficulty } : (opts.meta || null),
     created_at: nowIsoStr(),
   });
 

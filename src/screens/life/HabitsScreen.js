@@ -19,7 +19,7 @@ import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { aiSuggestHabits, AIUnavailableError } from '../../lib/aiFeatures';
 import { confirmAlert, infoAlert } from '../../lib/alert';
-import { HABIT_CATEGORIES } from '../../config/constants';
+import { HABIT_CATEGORIES, HABIT_DIFFICULTIES, habitXpForDifficulty } from '../../config/constants';
 import { fonts, radius } from '../../config/theme';
 import { todayStr, dateStr, dayjs, mondayOf, nowIso, groupBy } from '../../lib/utils';
 import { useHubBack } from '../../hooks/useHubBack';
@@ -39,7 +39,7 @@ export function HabitsScreen({ navigation }) {
   const [logs, setLogs] = useState([]);
   const [confetti, setConfetti] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
+  const [form, setForm] = useState({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good', difficulty: 'medium' });
   const [editHabit, setEditHabit] = useState(null); // habit being edited (null = add mode)
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSuggests, setAiSuggests] = useState([]);
@@ -104,6 +104,7 @@ export function HabitsScreen({ navigation }) {
 
   const toggleToday = async (habit) => {
     const isBad = (habit.kind || 'good') === 'bad';
+    const difficulty = habit.difficulty || 'medium';
     const existing = logMap[`${habit.id}::${today}`];
     if (existing && existing.completed) {
       try {
@@ -112,7 +113,8 @@ export function HabitsScreen({ navigation }) {
         if (isBad) {
           await awardXP('HABIT_BAD_UNDO', { countActivity: false });
         } else {
-          await awardXP('HABIT_UNDO', { countActivity: false });
+          // FIX-HABIT-XP: undo reverses exact amount via same difficulty scaling
+          await awardXP('HABIT_UNDO', { countActivity: false, difficulty });
         }
       } catch (e) {
         infoAlert('Habit save fail hua', e?.message || 'Habit untick nahi ho paya — dobara try karo');
@@ -134,7 +136,8 @@ export function HabitsScreen({ navigation }) {
       if (isBad) {
         await awardXP('HABIT_BAD', { countActivity: false });
       } else {
-        const xpRes = await awardXP('HABIT');
+        // FIX-HABIT-XP: completion XP = base × tier via difficulty opt — same guards, ledger, anti-double-award
+        const xpRes = await awardXP('HABIT', { difficulty });
         if (xpRes) setConfetti(Date.now());
       }
     } catch (e) {
@@ -167,6 +170,7 @@ export function HabitsScreen({ navigation }) {
   const addHabit = async () => {
     if (!form.name.trim()) return;
     const targetTime = /^\d{1,2}:\d{2}$/.test((form.target_time || '').trim()) ? form.target_time.trim() : null;
+    const difficulty = form.difficulty || 'medium';
     if (editHabit) {
       await db.update('habits', editHabit.id, {
         name: form.name.trim(),
@@ -175,6 +179,7 @@ export function HabitsScreen({ navigation }) {
         part: form.part,
         target_time: targetTime,
         kind: form.kind || 'good',
+        difficulty,
       });
       setEditHabit(null);
     } else {
@@ -186,11 +191,12 @@ export function HabitsScreen({ navigation }) {
         target_time: targetTime,
         part: form.part,
         kind: form.kind || 'good',
+        difficulty,
         is_active: true,
         created_at: nowIso(),
       });
     }
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good', difficulty: 'medium' });
     setAddOpen(false);
     await load();
   };
@@ -222,6 +228,7 @@ export function HabitsScreen({ navigation }) {
       part: habit.part || 'morning',
       target_time: habit.target_time || '',
       kind: habit.kind || 'good',
+      difficulty: habit.difficulty || 'medium',
     });
     setAddOpen(true);
   };
@@ -230,7 +237,7 @@ export function HabitsScreen({ navigation }) {
     setEditHabit(null);
     setAiSuggests([]);
     setAiMsg('');
-    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good' });
+    setForm({ name: '', category: 'academic', icon: '🎯', part: 'morning', target_time: '', kind: 'good', difficulty: 'medium' });
     setAddOpen(true);
   };
 
@@ -256,6 +263,7 @@ export function HabitsScreen({ navigation }) {
       icon: s.icon,
       target_time: s.target_time,
       part: s.part,
+      difficulty: s.difficulty || 'medium',
       is_active: true,
       created_at: nowIso(),
     });
@@ -397,6 +405,13 @@ export function HabitsScreen({ navigation }) {
           <Chip label="✅ Good habit" small selected={(form.kind||'good')==='good'} onPress={() => setForm({ ...form, kind: 'good' })} mode="light" />
           <Chip label="🚫 Bad habit (avoid)" small selected={form.kind==='bad'} onPress={() => setForm({ ...form, kind: 'bad' })} mode="light" />
         </View>
+        <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Difficulty (XP scaling)</Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 10 }}>
+          {Object.entries(HABIT_DIFFICULTIES).map(([key, d]) => (
+            <Chip key={key} label={`${d.icon} ${d.label} ${d.multiplier}×`} small selected={form.difficulty === key} onPress={() => setForm({ ...form, difficulty: key })} mode="light" />
+          ))}
+        </View>
+        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginBottom: 10 }}>Easy 0.5×, Medium 1×, Hard 1.5×, Ultra 2× — base {10} XP × multiplier, round half up, min 1. XP = {habitXpForDifficulty(10, form.difficulty||'medium')} XP</Text>
         <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 13, color: '#64748B', marginBottom: 8 }}>Category</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
           {Object.entries(HABIT_CATEGORIES).map(([key, c]) => (
@@ -452,6 +467,7 @@ export function HabitsScreen({ navigation }) {
 
 const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, atRisk, freezes, frozenYesterday, onToggle, onFreeze, onEdit, onDelete }) {
   const cat = HABIT_CATEGORIES[habit.category] || HABIT_CATEGORIES.academic;
+  const diff = HABIT_DIFFICULTIES[habit.difficulty] || HABIT_DIFFICULTIES.medium;
   const isBad = (habit.kind || 'good') === 'bad';
   const doneToday = Boolean(logMap[`${habit.id}::${today}`]?.completed);
   const canFreeze = !isBad && atRisk && streak >= 2 && freezes > 0 && !doneToday;
@@ -489,7 +505,7 @@ const HabitRow = memo(function HabitRow({ habit, week, today, logMap, streak, at
 
       <View style={{ flex: 1.6 }}>
         <Text numberOfLines={2} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
-          {habit.name}
+          {habit.name} {diff ? `${diff.icon}` : ''} {isBad ? '' : `· ${diff.label} ${diff.multiplier}×`}
         </Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
           <Text style={{ fontSize: 10, marginRight: 4 }}>{cat.icon}</Text>

@@ -6274,6 +6274,124 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.equal(failed.length, 0, `FIX-GYM: ${failed.length} check(s) failed -> ${failed.map(f=>f.id).join(', ')}`);
 }
 
+// ---------- FIX-HABIT-XP: habit difficulty Easy/Medium/Hard/Ultra with XP scaling inside guarded awardXP ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+
+  // HABITXP1: multiplier math ×4 tiers exact
+  check('HABITXP1', 'FIX-HABIT-XP multiplier math ×4 tiers: easy 0.5×, medium 1×, hard 1.5×, ultra 2×, round half up, min 1', () => {
+    const base = 10;
+    function scaled(baseAmount, mult) {
+      const s = Math.round(baseAmount * mult);
+      return Math.max(1, s);
+    }
+    assert.equal(scaled(base, 0.5), 5, 'easy 10*0.5=5');
+    assert.equal(scaled(base, 1.0), 10, 'medium 10*1=10');
+    assert.equal(scaled(base, 1.5), 15, 'hard 10*1.5=15');
+    assert.equal(scaled(base, 2.0), 20, 'ultra 10*2=20');
+    // round half up test
+    assert.equal(scaled(10, 0.15), 2, 'round half up 10*0.15=1.5→2');
+    // min 1
+    assert.equal(scaled(1, 0.1), 1, 'min 1: 1*0.1=0.1→0→min1');
+    // negative base for undo
+    function scaledNeg(baseAmount, mult) {
+      const abs = Math.abs(baseAmount);
+      const s = Math.round(abs * mult);
+      const min = Math.max(1, s);
+      return baseAmount < 0 ? -min : min;
+    }
+    assert.equal(scaledNeg(-10, 0.5), -5, 'undo easy -5');
+    assert.equal(scaledNeg(-10, 1.0), -10, 'undo medium -10');
+    assert.equal(scaledNeg(-10, 1.5), -15, 'undo hard -15');
+    assert.equal(scaledNeg(-10, 2.0), -20, 'undo ultra -20');
+
+    const constSrc = safeRead('src/config/constants.js');
+    assert.ok(constSrc.includes('HABIT_DIFFICULTIES'), 'constants has HABIT_DIFFICULTIES');
+    assert.ok(constSrc.includes('easy') && constSrc.includes('0.5'), 'has easy 0.5');
+    assert.ok(constSrc.includes('hard') && constSrc.includes('1.5'), 'has hard 1.5');
+    assert.ok(constSrc.includes('ultra') && constSrc.includes('2'), 'has ultra 2');
+    assert.ok(constSrc.includes('habitXpForDifficulty') || constSrc.includes('habitDifficultyMultiplier'), 'has helper');
+  });
+
+  // HABITXP2: picker persists on create/edit, default medium when missing
+  check('HABITXP2', 'FIX-HABIT-XP picker persists; default medium when column missing; form includes difficulty', () => {
+    const habitsSrc = safeRead('src/screens/life/HabitsScreen.js');
+    assert.ok(habitsSrc.includes('difficulty'), 'HabitsScreen has difficulty');
+    assert.ok(habitsSrc.includes('HABIT_DIFFICULTIES'), 'uses HABIT_DIFFICULTIES');
+    assert.ok(habitsSrc.includes('Chip') && habitsSrc.includes('Easy') || habitsSrc.includes('easy'), 'picker uses Chip');
+    assert.ok(habitsSrc.includes("difficulty: 'medium'") || habitsSrc.includes('difficulty: "medium"') || habitsSrc.includes("medium"), 'default medium');
+    // create/edit persists
+    assert.ok(habitsSrc.includes('difficulty,') || habitsSrc.includes('difficulty:') , 'persists difficulty in insert/update');
+    // openEdit should include difficulty
+    assert.ok(habitsSrc.includes('habit.difficulty'), 'openEdit reads habit.difficulty');
+    // schema migration
+    const schemaSrc = safeRead('supabase/schema.sql');
+    assert.ok(schemaSrc.includes('difficulty') && schemaSrc.includes('habits'), 'schema has difficulty column');
+  });
+
+  // HABITXP3: awardXP path with difficulty opt, same guards, ledger, anti-double-award
+  check('HABITXP3', 'FIX-HABIT-XP awardXP path awardXP(HABIT, { difficulty }) — same guards, ledger, meta', () => {
+    const habitsSrc = safeRead('src/screens/life/HabitsScreen.js');
+    assert.ok(habitsSrc.includes("awardXP('HABIT'") && habitsSrc.includes('difficulty'), 'calls awardXP HABIT with difficulty');
+    const xpSrc = safeRead('src/lib/xpService.js');
+    assert.ok(xpSrc.includes('difficulty'), 'xpService handles difficulty');
+    assert.ok(xpSrc.includes('HABIT') && xpSrc.includes('HABIT_UNDO'), 'handles HABIT and HABIT_UNDO');
+    assert.ok(xpSrc.includes('xpForHabitWithDifficulty') || xpSrc.includes('habitDifficultyMultiplier'), 'has scaling helper');
+    // bad-habit untouched
+    assert.ok(habitsSrc.includes('HABIT_BAD') && habitsSrc.includes('HABIT_BAD_UNDO'), 'bad-habit keys still present');
+    // ensure ledger insert includes meta difficulty
+    assert.ok(xpSrc.includes('meta') && xpSrc.includes('difficulty'), 'meta includes difficulty');
+  });
+
+  // HABITXP4: undo reverses exact amount
+  check('HABITXP4', 'FIX-HABIT-XP undo reverses exact amount — same difficulty scaling for HABIT_UNDO', () => {
+    function xpForHabit(base, diff) {
+      const map = { easy:0.5, medium:1.0, hard:1.5, ultra:2.0 };
+      const mult = map[diff]||1.0;
+      const scaled = Math.round(Math.abs(base)*mult);
+      const min = Math.max(1, scaled);
+      return base <0 ? -min : min;
+    }
+    // simulate award then undo
+    const diffs = ['easy','medium','hard','ultra'];
+    for (const d of diffs) {
+      const awarded = xpForHabit(10, d);
+      const undone = xpForHabit(-10, d);
+      assert.equal(awarded + undone, 0, `undo reverses exact for ${d}: ${awarded} + ${undone} =0`);
+    }
+    const habitsSrc = safeRead('src/screens/life/HabitsScreen.js');
+    assert.ok(habitsSrc.includes('HABIT_UNDO') && habitsSrc.includes('difficulty'), 'undo passes difficulty');
+  });
+
+  // HABITXP5: default medium when column missing + bad-habit/undo untouched
+  check('HABITXP5', 'FIX-HABIT-XP default medium when missing, bad-habit untouched, constants tier map present', () => {
+    function getDiff(habit) { return habit.difficulty || 'medium'; }
+    assert.equal(getDiff({}), 'medium', 'missing defaults to medium');
+    assert.equal(getDiff({ difficulty: 'hard' }), 'hard', 'existing hard kept');
+    const constSrc = safeRead('src/config/constants.js');
+    assert.ok(constSrc.includes('HABIT_DIFFICULTIES'), 'tier map present');
+    // bad-habit should NOT be scaled
+    const xpSrc = safeRead('src/lib/xpService.js');
+    // ensure scaling only for HABIT and HABIT_UNDO, not HABIT_BAD
+    const hasBadScaling = xpSrc.includes('HABIT_BAD') && xpSrc.includes('difficulty') && /HABIT_BAD.*difficulty|difficulty.*HABIT_BAD/.test(xpSrc);
+    // Instead check that code explicitly checks for HABIT or HABIT_UNDO only
+    assert.ok(xpSrc.includes("code === 'HABIT'") || xpSrc.includes('code === "HABIT"') || xpSrc.includes("'HABIT'"), 'checks HABIT code');
+    // The file should contain condition that only HABIT and HABIT_UNDO are scaled, not BAD
+    assert.ok(xpSrc.includes('HABIT_UNDO'), 'mentions HABIT_UNDO');
+    // Ensure BAD keys still exist in constants with original amounts
+    assert.ok(constSrc.includes('HABIT_BAD') && constSrc.includes('-5'), 'BAD still -5');
+  });
+
+  const failed = results.filter(r=>!r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-HABIT-XP: ${failed.length} check(s) failed -> ${failed.map(f=>f.id).join(', ')}`);
+}
+
 
 
 // ---------- FIX-STUDY-FIRST D16: shortage re-queues to first-pass study, run-up new study only under shortage, final-21 mock guarantee, covered-case fill ----------

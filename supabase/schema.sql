@@ -168,6 +168,8 @@ create table if not exists public.habits (
   icon text default '🎯',
   part text default 'morning',            -- morning | afternoon | evening
   target_time text,
+  kind text default 'good',               -- good | bad
+  difficulty text default 'medium',       -- easy | medium | hard | ultra (FIX-HABIT-XP)
   is_active boolean default true,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -539,6 +541,7 @@ alter table public.users     add column if not exists school_exams jsonb default
 alter table public.users     add column if not exists olympiad_date date;
 -- arc already migrated above (keep existing statement, do not duplicate per R1 spec)
 alter table public.habits    add column if not exists kind text default 'good';
+alter table public.habits    add column if not exists difficulty text default 'medium';
 alter table public.users     add column if not exists gym_split jsonb default null;
 -- FIX-GYM: gym_overrides + custom_splits
 alter table public.users     add column if not exists gym_overrides jsonb default '{}'::jsonb;

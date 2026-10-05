@@ -300,6 +300,25 @@ export const HABIT_CATEGORIES = {
   productivity: { label: 'Productivity', color: '#F59E0B', icon: '⚡' },
 };
 
+// FIX-HABIT-XP: difficulty tiers with XP scaling
+export const HABIT_DIFFICULTIES = {
+  easy: { label: 'Easy', multiplier: 0.5, icon: '🟢', color: '#10B981' },
+  medium: { label: 'Medium', multiplier: 1.0, icon: '🟡', color: '#F59E0B' },
+  hard: { label: 'Hard', multiplier: 1.5, icon: '🔴', color: '#EF4444' },
+  ultra: { label: 'Ultra', multiplier: 2.0, icon: '💀', color: '#7C3AED' },
+};
+
+export function habitDifficultyMultiplier(diff) {
+  const key = (diff || 'medium').toLowerCase();
+  return HABIT_DIFFICULTIES[key]?.multiplier ?? 1.0;
+}
+
+export function habitXpForDifficulty(baseAmount, difficulty) {
+  const mult = habitDifficultyMultiplier(difficulty);
+  const scaled = Math.round(baseAmount * mult);
+  return Math.max(1, scaled);
+}
+
 // ============================================================
 // GYM / WORKOUT PLANS
 // ============================================================
