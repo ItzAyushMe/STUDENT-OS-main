@@ -7,7 +7,12 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "scheme": "studentos",
-    "backgroundColor": "#0D1117",
+    "backgroundColor": "#020304",
+    "splash": {
+      "image": "./assets/splash.png",
+      "backgroundColor": "#020304",
+      "resizeMode": "contain"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.studentos.app"
@@ -16,7 +21,7 @@
       "package": "com.studentos.app",
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "backgroundColor": "#0D1117",
+        "backgroundColor": "#020304",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
