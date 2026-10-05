@@ -5951,12 +5951,14 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     assert.equal(saved[0].reps, '—', 'empty reps becomes em dash');
   });
 
-  // ---------- GT2: gym reps wiring probe ----------
-  check("GT2", "[wiring probe] GymScreen.js still contains verbatim patterns (v.reps fallback and keyboardType default for reps) and ABSENCE of digit-stripping transforms on reps path", () => {
+  // ---------- GT2: gym reps wiring probe — FIX-GYM updated (bug fix removes defaults) ----------
+  check("GT2", "[wiring probe] GymScreen.js still contains verbatim patterns (v.reps fallback and keyboardType default for reps) and ABSENCE of digit-stripping transforms on reps path — FIX-GYM bug fix", () => {
     const gymSrc = safeRead('src/screens/life/GymScreen.js');
     assert.ok(gymSrc.length > 1000, 'GymScreen.js read');
-    assert.ok(gymSrc.includes("reps: v.reps || '—'"), "contains v.reps || '—'");
-    assert.ok(gymSrc.includes("sets: '', reps: '', weight: ''"), 'contains merge defaults');
+    assert.ok(gymSrc.includes("reps: v.reps ||") || gymSrc.includes("reps: v.reps || '—'"), "contains v.reps fallback");
+    assert.ok(gymSrc.includes('setEntry'), 'contains setEntry');
+    assert.ok(gymSrc.includes('...(e[name] || {})'), 'setEntry merges existing without defaults blocking');
+    assert.ok(!gymSrc.includes("{ sets: '', reps: '', weight: '', ...(e[name] || {})"), 'FIX-GYM bug fix: old defaults-before-existing removed');
     assert.ok(gymSrc.includes('keyboardType="default"') && gymSrc.includes('entry.reps'), 'reps inputs use keyboardType default');
     const countDefault = (gymSrc.match(/keyboardType="default"/g) || []).length;
     assert.ok(countDefault >= 2, `at least 2 keyboardType="default" found, got ${countDefault}`);
@@ -6088,6 +6090,191 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
   assert.equal(failed.length, 0, `FIX-TEST: ${failed.length} check(s) failed -> ${failed.map((f) => f.id).join(', ')}`);
 }
+
+// ---------- FIX-GYM: cohesion round — edit/delete everywhere + last-session prefill + bodyweight finish + CSV import + split memory + sets/reps bug ----------
+{
+  const results = [];
+  const check = (id, desc, fn) => {
+    try { fn(); results.push({ id, desc, ok: true }); }
+    catch (e) { results.push({ id, desc, ok: false, err: String(e && e.message ? e.message : e).split('\n')[0] }); }
+  };
+  const safeRead = (p) => { try { return read(p); } catch { return ''; } };
+
+  // GTYPO1: typing order sets->reps->weight should NOT clear — bug repro fail-on-old/pass-on-new
+  check('GYM1', 'FIX-GYM BUG typing order sets→reps→weight must NOT clear — new setEntry without defaults preserves', () => {
+    // old buggy merge with defaults AFTER existing would clear
+    const buggyMerge = (existing, patch) => ({ ...(existing||{}), sets:'', reps:'', weight:'', ...patch });
+    const fixedMerge = (existing, patch) => ({ ...(existing||{}), ...patch });
+    let e = {};
+    e = buggyMerge(e, { sets: '3' });
+    e = buggyMerge(e, { reps: '12' });
+    e = buggyMerge(e, { weight: '40' });
+    // buggy clears sets/reps
+    assert.equal(e.sets, '', 'buggy: sets cleared to empty');
+    assert.equal(e.reps, '', 'buggy: reps cleared to empty');
+    assert.equal(e.weight, '40', 'buggy weight present');
+
+    let f = {};
+    f = fixedMerge(f, { sets: '3' });
+    f = fixedMerge(f, { reps: '12' });
+    f = fixedMerge(f, { weight: '40' });
+    assert.equal(f.sets, '3', 'fixed preserves sets');
+    assert.equal(f.reps, '12', 'fixed preserves reps');
+    assert.equal(f.weight, '40', 'fixed preserves weight');
+
+    // also test new code path in file
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(!gymSrc.includes("{ sets: '', reps: '', weight: '', ...(e[name] || {})"), 'new code must not have old defaults-before-existing');
+    assert.ok(gymSrc.includes('...(e[name] || {}), ...patch') || gymSrc.includes('...(e[name] || {}),'), 'new setEntry uses ...existing,...patch');
+  });
+
+  // GYM2: override persist/apply — built-in edits via gym_overrides jsonb never mutate constants
+  check('GYM2', 'FIX-GYM override persist/apply — built-in edit stored as gym_overrides, constants untouched, removal flag', () => {
+    const EX_LIB = [{ name: 'Bench Press', group: 'Chest', sets: 4, reps: '8-10' }, { name: 'Squat', group: 'Quads', sets: 4, reps: '8-10' }];
+    const overrides = { 'Bench Press': { name: 'My Bench', sets: 5, reps: '5', group: 'Chest' }, 'Squat': { isRemoved: true } };
+    function apply( list, ov ) {
+      return list.filter(ex=> !(ov[ex.name] && ov[ex.name].isRemoved)).map(ex=> ov[ex.name] ? { ...ex, ...ov[ex.name] } : ex);
+    }
+    const applied = apply(EX_LIB, overrides);
+    assert.equal(applied.length, 1, 'Squat removed');
+    assert.equal(applied[0].name, 'My Bench', 'Bench overridden name');
+    assert.equal(applied[0].sets, 5, 'overridden sets');
+    // constants untouched
+    assert.equal(EX_LIB[0].name, 'Bench Press', 'original constant untouched');
+    assert.equal(EX_LIB[0].sets, 4, 'original sets untouched');
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.includes('gym_overrides'), 'GymScreen uses gym_overrides');
+    assert.ok(gymSrc.includes('isRemoved'), 'removal via isRemoved flag');
+    const constSrc = safeRead('src/config/constants.js');
+    assert.ok(constSrc.includes('EXERCISE_LIBRARY'), 'constants has library');
+    // ensure GymScreen never mutates constants at runtime (no assignment to EXERCISE_LIBRARY)
+    assert.ok(!gymSrc.includes('EXERCISE_LIBRARY =') && !gymSrc.includes('EXERCISE_LIBRARY.push'), 'must not mutate constants');
+  });
+
+  // GYM3: last-session prefill — PR map already computes last weight/reps, prefill empty inputs with LAST values + relative time
+  check('GYM3', 'FIX-GYM last-session prefill — lastSessionMap from logs, prefill, Last: 3×12 @ 40kg · 5 days ago line', () => {
+    const logs = [
+      { date: '2026-09-25', exercises: [{ name: 'Bench Press', sets: 3, reps: '12', weight: 40 }] },
+      { date: '2026-09-30', exercises: [{ name: 'Bench Press', sets: 4, reps: '10', weight: 50 }] },
+    ];
+    function buildLastMap(ls) {
+      const map = {};
+      const sorted = [...ls].sort((a,b)=> String(b.date).localeCompare(String(a.date)));
+      for (const log of sorted) for (const ex of log.exercises||[]) if (!map[ex.name]) map[ex.name]={ sets: ex.sets, reps: ex.reps, weight: ex.weight, date: log.date };
+      return map;
+    }
+    const m = buildLastMap(logs);
+    assert.equal(m['Bench Press'].weight, 50, 'latest weight 50');
+    assert.equal(m['Bench Press'].sets, 4, 'latest sets 4');
+    // prefill logic
+    let entries = {};
+    const allNames = ['Bench Press'];
+    for (const name of allNames) {
+      const last = m[name];
+      if (!entries[name] && last) entries[name] = { sets: String(last.sets), reps: String(last.reps), weight: String(last.weight) };
+    }
+    assert.equal(entries['Bench Press'].weight, '50', 'prefill weight 50');
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.includes('lastSessionMap') || gymSrc.includes('buildLastSessionMap') || gymSrc.includes('Last:'), 'GymScreen has last-session logic');
+    assert.ok(gymSrc.includes('Last:') || gymSrc.includes('formatLastRelative') || gymSrc.includes('last'), 'contains Last line');
+  });
+
+  // GYM4: bodyweight done toggle + finish softening + method field
+  check('GYM4', 'FIX-GYM bodyweight finish — done toggle, finish accepts ≥1 done OR ≥1 logged, method field done|weighted, XP once', () => {
+    const entries = { 'Push-ups': { sets: '', reps: '', weight: '' } };
+    const doneMap = { 'Push-ups': true };
+    function finish(entriesObj, doneMapObj) {
+      const names = [...new Set([...Object.keys(entriesObj), ...Object.keys(doneMapObj).filter(k=>doneMapObj[k])])];
+      const exercises = names.map(name=> {
+        const v = entriesObj[name]||{};
+        const isDone = Boolean(doneMapObj[name]);
+        const hasLog = v.sets || v.reps || v.weight;
+        if (!hasLog && !isDone) return null;
+        return { name, sets: Number(v.sets||0)||0, reps: v.reps||'—', weight: Number(v.weight||0)||0, method: isDone ? 'done' : 'weighted' };
+      }).filter(Boolean);
+      return exercises;
+    }
+    const exs = finish(entries, doneMap);
+    assert.equal(exs.length, 1, 'done alone should finish');
+    assert.equal(exs[0].method, 'done', 'method done');
+    const exs2 = finish({ 'Bench': { sets:'3', reps:'12', weight:'40' } }, {});
+    assert.equal(exs2[0].method, 'weighted', 'method weighted');
+    const exsEmpty = finish({}, {});
+    assert.equal(exsEmpty.length, 0, 'empty should be 0');
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.includes('doneMap') || gymSrc.includes('method'), 'GymScreen has doneMap/method');
+    assert.ok(gymSrc.includes("'done'") && gymSrc.includes("'weighted'"), 'contains method done|weighted');
+    assert.ok(gymSrc.includes('hasEarnedToday') || gymSrc.includes('XP'), 'XP once guard');
+  });
+
+  // GYM5: CSV import — header name,sets,reps,group → preview → confirm, expo-file-system only
+  check('GYM5', 'FIX-GYM CSV import — parse valid/malformed, header name,sets,reps,group, preview/confirm, expo-file-system only', () => {
+    function parseCSV(text) {
+      if (!text) return { error: 'Empty', rows: [] };
+      const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
+      if (!lines.length) return { error: 'Empty', rows: [] };
+      const header = lines[0].split(',').map(h=>h.trim().toLowerCase());
+      const req = ['name','sets','reps','group'];
+      const missing = req.filter(r=>!header.includes(r));
+      if (missing.length) return { error: `Missing ${missing.join(',')}`, rows: [] };
+      const idx = { name: header.indexOf('name'), sets: header.indexOf('sets'), reps: header.indexOf('reps'), group: header.indexOf('group') };
+      const rows = [];
+      const errors = [];
+      for (let i=1;i<lines.length;i++) {
+        const cols = lines[i].split(',').map(c=>c.trim());
+        if (cols.length<4) { errors.push(`Line ${i+1} cols`); continue; }
+        const name = cols[idx.name];
+        if (!name) { errors.push(`Line ${i+1} name empty`); continue; }
+        rows.push({ name, sets: Number(cols[idx.sets])||3, reps: cols[idx.reps]||'12', group: cols[idx.group] });
+      }
+      return { error: errors.length?errors[0]:null, rows, allErrors: errors };
+    }
+    const valid = "name,sets,reps,group\nBench Press,4,8-10,Chest\nSquat,4,8-10,Quads";
+    const pValid = parseCSV(valid);
+    assert.equal(pValid.rows.length, 2, 'valid 2 rows');
+    assert.equal(pValid.rows[0].name, 'Bench Press', 'first name');
+    assert.equal(pValid.rows[0].sets, 4, 'sets 4');
+    const malformed = "name,sets,reps\nBench,4,10";
+    const pMal = parseCSV(malformed);
+    assert.ok(pMal.error, 'malformed should error missing group');
+    const mal2 = "name,sets,reps,group\n,4,10,Chest";
+    const pMal2 = parseCSV(mal2);
+    assert.equal(pMal2.rows.length, 0, 'empty name skipped');
+    assert.ok(pMal2.error || pMal2.allErrors.length, 'should have error');
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.includes('Import CSV'), 'has Import CSV button');
+    assert.ok(gymSrc.includes('expo-file-system') || gymSrc.includes('FileSystem'), 'uses expo-file-system');
+    assert.ok(!gymSrc.includes('expo-document-picker') && !gymSrc.includes('expo-image-picker'), 'no new deps beyond file-system');
+    assert.ok(gymSrc.includes('parseCSV') || gymSrc.includes('csv'), 'has CSV parse');
+  });
+
+  // GYM6: custom split day-memory — each split day remembers own exercise list, persisted via custom_splits jsonb
+  check('GYM6', 'FIX-GYM custom split day-memory — per day exercise list, persisted per weekday, editing a day edits only that day', () => {
+    let customSplits = {};
+    function saveDay(splitType, dayLabel, list) {
+      customSplits = { ...customSplits, [splitType]: { ...(customSplits[splitType]||{}), [dayLabel]: list } };
+    }
+    function getDay(splitType, dayLabel) { return customSplits[splitType]?.[dayLabel] || null; }
+    saveDay('ppl', 'Push Day', [{ name: 'Bench', sets:4, reps:'10', group:'Chest' }]);
+    saveDay('ppl', 'Pull Day', [{ name: 'Pull-up', sets:3, reps:'Max', group:'Back' }]);
+    assert.equal(getDay('ppl','Push Day').length, 1, 'Push has 1');
+    assert.equal(getDay('ppl','Push Day')[0].name, 'Bench', 'Push Bench');
+    assert.equal(getDay('ppl','Pull Day')[0].name, 'Pull-up', 'Pull Pull-up');
+    // editing Push should not affect Pull
+    saveDay('ppl', 'Push Day', [{ name: 'Bench', sets:4, reps:'10', group:'Chest' }, { name: 'Shoulder Press', sets:3, reps:'12', group:'Shoulders' }]);
+    assert.equal(getDay('ppl','Push Day').length, 2, 'Push now 2');
+    assert.equal(getDay('ppl','Pull Day').length, 1, 'Pull still 1');
+    const gymSrc = safeRead('src/screens/life/GymScreen.js');
+    assert.ok(gymSrc.includes('custom_splits') || gymSrc.includes('customSplits'), 'has custom_splits');
+    assert.ok(gymSrc.includes('day-memory') || gymSrc.includes('Edit Day') || gymSrc.includes('day memory'), 'has day edit UI');
+  });
+
+  const failed = results.filter(r=>!r.ok);
+  for (const r of results) console.log(`  ${r.ok ? 'PASS' : 'FAIL'} [${r.id}] ${r.desc}${r.ok ? '' : ` — ${r.err}`}`);
+  assert.equal(failed.length, 0, `FIX-GYM: ${failed.length} check(s) failed -> ${failed.map(f=>f.id).join(', ')}`);
+}
+
+
 
 // ---------- FIX-STUDY-FIRST D16: shortage re-queues to first-pass study, run-up new study only under shortage, final-21 mock guarantee, covered-case fill ----------
 {

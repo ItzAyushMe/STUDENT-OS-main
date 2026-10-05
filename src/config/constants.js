@@ -487,6 +487,23 @@ export const EXERCISE_LIBRARY = [
   { name: 'Mountain Climbers', group: 'Abs/Core', gym: false, home: true, sets: 3, reps: '30 sec' },
 ];
 
+// ============================================================
+// FIX-GYM data shapes (PO migration: gym_overrides + custom_splits)
+// gym_overrides jsonb: { [originalName]: { name?, sets?, reps?, group?, isRemoved? } } — built-in edits never mutate constants
+// custom_splits jsonb: { [splitType]: { [dayLabel]: Exercise[] } } — per-day memory, persisted per weekday
+// Exercise: { name, sets, reps, group, originalName?, _isOverridden? }
+// Method: 'done' | 'weighted' for bodyweight finish
+// ============================================================
+export const GYM_OVERRIDE_SHAPE = {
+  // example: { "Bench Press": { name: "My Bench", sets: 5, reps: "5", group: "Chest" } }
+  // removal: { "Bench Press": { isRemoved: true } }
+};
+
+export const CUSTOM_SPLITS_SHAPE = {
+  // example: { ppl: { "Push Day": [{ name, sets, reps, group }], "Pull Day": [...] }, custom: { "Day 1": [...] } }
+};
+
+export const GYM_CSV_HEADER = ['name','sets','reps','group'];
 
 // ============================================================
 // QUOTES (Daily wisdom — works fully offline)

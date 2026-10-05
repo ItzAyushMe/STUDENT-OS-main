@@ -540,6 +540,9 @@ alter table public.users     add column if not exists olympiad_date date;
 -- arc already migrated above (keep existing statement, do not duplicate per R1 spec)
 alter table public.habits    add column if not exists kind text default 'good';
 alter table public.users     add column if not exists gym_split jsonb default null;
+-- FIX-GYM: gym_overrides + custom_splits
+alter table public.users     add column if not exists gym_overrides jsonb default '{}'::jsonb;
+alter table public.users     add column if not exists custom_splits jsonb default '{}'::jsonb;
 
 -- ============================================================
 -- FIX-S S5: session progression (Class 10 -> Class 11)
