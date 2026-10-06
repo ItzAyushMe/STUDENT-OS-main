@@ -7693,6 +7693,71 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 }
 
 
+// ---- FIX-FASTGEN golden byte-identical test ----
+console.log('--- FIX-FASTGEN golden test ---');
+{
+  const { execSync } = await import('node:child_process');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const urlMod = await import('node:url');
+  const __dirnameFast = pathMod.dirname(urlMod.fileURLToPath(import.meta.url));
+  const tmpOld = '/tmp/fastgen-old.js';
+  const oldDest = pathMod.join(__dirnameFast, '..', 'src/lib/scheduleGenerator.old.js');
+  try {
+    execSync(`git show 7b80959:src/lib/scheduleGenerator.js > ${tmpOld}`, { stdio: 'pipe' });
+  } catch (e) {
+    console.log('FASTGEN: git show failed, trying fallback /tmp/oldGen.js');
+    // fallback: if git show fails, use existing /tmp/oldGen.js if present
+    try { fsMod.copyFileSync('/tmp/oldGen.js', tmpOld); } catch {}
+  }
+  // copy to src/lib for correct relative imports (./utils)
+  try { fsMod.copyFileSync(tmpOld, oldDest); } catch (e) { console.log('copy failed', e); }
+  const { generateSchedule: genOld } = await import('../src/lib/scheduleGenerator.old.js');
+  const { generateSchedule: genNew } = await import('../src/lib/scheduleGenerator.js');
+
+  const mkSFast = (id, subject, chapter, over={})=>({id, subject, chapter, weightage:3, estimated_hours:4, status:'locked', track:'class', progress_percent:0, archived:false, ...over});
+  const makeFixtureFast = (n, track) => Array.from({length:n}, (_,i)=> mkSFast(track+'-'+i, 'Sub'+(i%12), 'Ch-'+track+'-'+i+' - Topic', { estimated_hours: 6, weightage: (i%5)+1, track, deadline: null }));
+  const syllabusFast = [...makeFixtureFast(195,'class'), ...makeFixtureFast(98,'olympiad'), ...makeFixtureFast(98,'exam')];
+  const fixtureFast = {
+    syllabus: syllabusFast,
+    dailyHours:6,
+    weekdayHours:6,
+    weekendHours:8,
+    preferredTime:'Morning',
+    daysOff:[],
+    lightDay:6,
+    weeks:80,
+    userId:'u-fastgen',
+    today:'2026-10-01',
+    createdAt:'2026-10-01T00:00:00.000Z',
+    examDate:'2028-04-15',
+    olympiadDate:'2027-11-15',
+    hoursMultiplier:2,
+    olympiadMultiplier:3,
+    examMultiplier:2,
+  };
+
+  console.time('FASTGEN old');
+  const oldRows = genOld(fixtureFast);
+  console.timeEnd('FASTGEN old');
+  console.time('FASTGEN new');
+  const newRows = genNew(fixtureFast);
+  console.timeEnd('FASTGEN new');
+
+  assert.equal(oldRows.length, newRows.length, `FASTGEN golden length old ${oldRows.length} new ${newRows.length}`);
+  let mism = 0;
+  for (let i=0;i<oldRows.length;i++){
+    const a = JSON.stringify(oldRows[i]);
+    const b = JSON.stringify(newRows[i]);
+    if (a!==b){ mism++; if(mism<=3){ console.log(`mismatch at ${i}\n old ${a.slice(0,500)}\n new ${b.slice(0,500)}`);} }
+  }
+  assert.equal(mism, 0, `FASTGEN byte-identical mismatches ${mism}`);
+  console.log(`FASTGEN GOLDEN PASS rows ${oldRows.length} byte-identical`);
+
+  try { fsMod.unlinkSync(oldDest); } catch {}
+  try { fsMod.unlinkSync(tmpOld); } catch {}
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
 
 

@@ -46,6 +46,108 @@ import dayjs from 'dayjs';
 import { SESSION_TYPES, TRACK_PRIORITY, CLASS_SESSION_END, isArchivedRow } from '../config/constants';
 import { minutesToTime, todayStr, dateStr, nowIso } from './utils';
 
+// ---- FASTGEN perf-only helpers (byte-identical, no behavior change) ----
+const _ORD_CACHE = new Map();
+const _STR_CACHE = new Map();
+const _DATESTR_CACHE = new Map();
+const _CHAPTER_KEY_CACHE = new Map();
+const _DEADLINE_DAYS_CACHE = new Map();
+const _CHAPTER_CAP_CACHE = new Map();
+
+function isDateStrFast(s){
+  if(typeof s !== 'string' || s.length!==10) return false;
+  if(s[4]!=='-' || s[7]!=='-') return false;
+  for(let i=0;i<10;i++){
+    if(i===4||i===7) continue;
+    const c=s.charCodeAt(i);
+    if(c<48||c>57) return false;
+  }
+  return true;
+}
+function toOrdinalFast(s){
+  let v=_ORD_CACHE.get(s);
+  if(v!==undefined) return v;
+  // fast parse YYYY-MM-DD
+  const y = (s.charCodeAt(0)-48)*1000 + (s.charCodeAt(1)-48)*100 + (s.charCodeAt(2)-48)*10 + (s.charCodeAt(3)-48);
+  const m = (s.charCodeAt(5)-48)*10 + (s.charCodeAt(6)-48);
+  const d = (s.charCodeAt(8)-48)*10 + (s.charCodeAt(9)-48);
+  v = Math.floor(Date.UTC(y,m-1,d)/86400000);
+  _ORD_CACHE.set(s,v);
+  return v;
+}
+function fromOrdinalFast(ord){
+  let s=_STR_CACHE.get(ord);
+  if(s) return s;
+  const dt=new Date(ord*86400000);
+  const y=dt.getUTCFullYear();
+  const mo=dt.getUTCMonth()+1;
+  const da=dt.getUTCDate();
+  s=`${String(y).padStart(4,'0')}-${String(mo).padStart(2,'0')}-${String(da).padStart(2,'0')}`;
+  _STR_CACHE.set(ord,s);
+  _ORD_CACHE.set(s,ord);
+  return s;
+}
+function addDaysFast(dateStrIn, n){
+  if(!isDateStrFast(dateStrIn)) return dateStrIn;
+  return fromOrdinalFast(toOrdinalFast(dateStrIn)+n);
+}
+function diffDaysFast(a,b){
+  if(!isDateStrFast(a) || !isDateStrFast(b)) return 0;
+  return toOrdinalFast(b)-toOrdinalFast(a);
+}
+function weekdayFast(dateStrIn){
+  // 0=Sun ..6=Sat
+  const ord=toOrdinalFast(dateStrIn);
+  return (ord+4)%7;
+}
+function fastDateStr(d){
+  if(typeof d==='string'){
+    if(isDateStrFast(d)) return d;
+    const cached=_DATESTR_CACHE.get(d);
+    if(cached) return cached;
+    try{
+      const s=dayjs(d).format('YYYY-MM-DD');
+      _DATESTR_CACHE.set(d,s);
+      return s;
+    }catch{
+      return d;
+    }
+  }
+  if(d && typeof d.format==='function'){
+    return d.format('YYYY-MM-DD');
+  }
+  try{
+    return dayjs(d).format('YYYY-MM-DD');
+  }catch{
+    return '';
+  }
+}
+function getChapterCapKeysCached(subject, topic){
+  const cacheKey = `${subject}|${topic}`;
+  let v=_CHAPTER_KEY_CACHE.get(cacheKey);
+  if(v) return v;
+  let chapForCapRaw=String(topic||'');
+  const parenMatch=chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+  if(parenMatch){
+    chapForCapRaw=parenMatch[1].trim();
+  }else{
+    const colonMatch=chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+    if(colonMatch) chapForCapRaw=colonMatch[1].trim();
+  }
+  const subjForCap=String(subject||'').trim();
+  const chapterCapKey=`${subjForCap}|${chapForCapRaw}`;
+  const chapMatch=String(topic||'').match(/:\s*(.+?)(?:\s*\(|—|$)/);
+  const chapForPush=chapMatch?chapMatch[1].trim():String(topic||'').trim();
+  v={chapForCapRaw, subjForCap, chapterCapKey, chapForPush};
+  _CHAPTER_KEY_CACHE.set(cacheKey,v);
+  return v;
+}
+function getSubjectChapterKey(subject, chapter){
+  return `${subject}|${chapter}`;
+}
+// ---- end FASTGEN helpers ----
+
+
 const PREFERRED_START = {
   early: 5 * 60,
   morning: 8 * 60,
@@ -108,7 +210,7 @@ function normalizeSchoolExam(e) {
 
 // Nearest upcoming school exam (by range START) on/after a date
 function nextSchoolExamOnOrAfter(schoolExams = [], date) {
-  const valid = allSchoolExams(schoolExams).filter((e) => !dayjs(e.start).isBefore(dayjs(date), 'day'));
+  const valid = allSchoolExams(schoolExams).filter((e) => !(e.start < date));
   if (!valid.length) return null;
   return valid[0];
 }
@@ -209,10 +311,10 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
   for (const [track, rows] of Object.entries(byTrack)) {
     if (!rows.length) continue;
     const target = track === 'class' && nextSchool
-      ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'))
+      ? addDaysFast(nextSchool.start, -(SCHOOL_EXAM_BUFFER_DAYS))
       : examDate;
     if (!target) continue;
-    const totalDays = Math.max(1, dayjs(target).diff(dayjs(today), 'day'));
+    const totalDays = Math.max(1, diffDaysFast(today, target));
     const capacityHours = totalDays * Math.max(0.5, dailyHours) * 0.85;
     const totalHours = rows.reduce((a, r) => a + (r.estimated_hours || 4), 0) || 1;
     const sorted = [...rows].sort((a, b) => {
@@ -227,7 +329,7 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
         totalDays - 1,
         Math.max(0, Math.round((consumed * capacityHours) / Math.max(0.5, dailyHours)))
       );
-      deadlines[row.id] = dateStr(dayjs(today).add(dayOffset, 'day'));
+      deadlines[row.id] = addDaysFast(today, dayOffset);
     }
   }
   return deadlines;
@@ -264,7 +366,7 @@ const SPACED_REVISION_MIN = 25;  // 20–30 min per spaced revision
 
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const clampNum = (v, lo, hi) => Math.min(hi, Math.max(lo, num(v, lo)));
-const isDateStr = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const isDateStr = (v) => isDateStrFast(v);
 const round1 = (v) => Math.round(num(v, 0) * 10) / 10;
 
 /**
@@ -297,7 +399,19 @@ export function planCapacityMinutes(dailyHours) {
 /** Days left before an item is due (>= 1). No deadline => the plan horizon. */
 export function daysUntilDeadline(item, today, fallbackDays) {
   if (!item || !isDateStr(item.deadline)) return Math.max(1, num(fallbackDays, HORIZON_CAP_DAYS));
-  return Math.max(1, dayjs(item.deadline).diff(dayjs(today), 'day'));
+  if (typeof item.deadlineDays === 'number') return item.deadlineDays;
+  if (!isDateStr(today)) return Math.max(1, num(fallbackDays, HORIZON_CAP_DAYS));
+  const cacheKey = `${item.deadline}|${today}`;
+  let v=_DEADLINE_DAYS_CACHE.get(cacheKey);
+  if(v!==undefined) return v;
+  try{
+    v = diffDaysFast(today, item.deadline);
+    v = Math.max(1, v);
+  }catch{
+    v = Math.max(1, num(fallbackDays, HORIZON_CAP_DAYS));
+  }
+  _DEADLINE_DAYS_CACHE.set(cacheKey, v);
+  return v;
 }
 
 /**
@@ -313,8 +427,8 @@ export function daysUntilDeadline(item, today, fallbackDays) {
  */
 export function compareUrgency(a, b, ctx) {
   const c = ctx || {};
-  const da = daysUntilDeadline(a, c.today, c.horizonDays);
-  const db = daysUntilDeadline(b, c.today, c.horizonDays);
+  const da = typeof a.deadlineDays === 'number' ? a.deadlineDays : daysUntilDeadline(a, c.today, c.horizonDays);
+  const db = typeof b.deadlineDays === 'number' ? b.deadlineDays : daysUntilDeadline(b, c.today, c.horizonDays);
   if (!!a.overdue !== !!b.overdue) return a.overdue ? -1 : 1;
   if (da !== db) return da - db;
   // D6: weightage drives order — within same deadline bucket, higher weightage first
@@ -388,8 +502,10 @@ export function buildSubjectRotation(pendingRows, startDate, numDays) {
 
   const byDate = {};
   const n = order.length;
+  // FASTGEN: precompute dates via fast add
+  const startOrd = isDateStrFast(start) ? toOrdinalFast(start) : toOrdinalFast(fastDateStr(start));
   for (let i = 0; i < days; i++) {
-    const date = dateStr(dayjs(start).add(i, 'day'));
+    const date = fromOrdinalFast(startOrd + i);
     if (n === 0) { byDate[date] = []; continue; }
     if (n === 1) { byDate[date] = [order[0]]; continue; }
     const first = order[(2 * i) % n];
@@ -502,10 +618,10 @@ export function buildWorkItems(input) {
   const exams = Array.isArray(schoolExams) ? schoolExams : allSchoolExams(schoolExams);
   const nextSchool = nextSchoolExamOnOrAfter(exams, today);
   const classTarget = nextSchool
-    ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day'))
+    ? addDaysFast(nextSchool.start, -(SCHOOL_EXAM_BUFFER_DAYS))
     : (examDate ? dateStr(dayjs(examDate)) : null);
-  const olyTarget = olympiadDate ? dateStr(dayjs(olympiadDate).subtract(1, 'day')) : null;
-  const examTarget = examDate ? dateStr(dayjs(examDate).subtract(1, 'day')) : null;
+  const olyTarget = olympiadDate ? addDaysFast(olympiadDate, -(1)) : null;
+  const examTarget = examDate ? addDaysFast(examDate, -(1)) : null;
 
   // minutes already spent on a chapter, taken from EXISTING completed sessions
   const credit = new Map();
@@ -610,6 +726,7 @@ export function buildWorkItems(input) {
       plannedMinutes: 0,
       deadline,
       overdue: !!(deadline && deadline < today),
+      deadlineDays: deadline && isDateStrFast(deadline) && isDateStrFast(today) ? Math.max(1, diffDaysFast(today, deadline)) : (deadline ? 9999 : 9999),
       creditedMinutes: credited,
       baseHours: rawHours,
       effectiveHours,
@@ -712,14 +829,15 @@ export function planSchedule(input) {
   const totalDays = clampNum(horizon.diff(dayjs(today), 'day'), 1, HORIZON_CAP_DAYS);
 
   // every day inside a school exam RANGE is an exam day; the 14 days before it
-  // through its end are protected — no NEW class study goes in there
+  // through its end are protected — no NEW class study goes in there — FASTGEN
   const schoolExamDates = new Set();
   const protectedDates = new Set();
   for (const e of exams) {
-    const days = clampNum(dayjs(e.end).diff(dayjs(e.start), 'day'), 0, 30);
-    for (let i = 0; i <= days; i++) schoolExamDates.add(dateStr(dayjs(e.start).add(i, 'day')));
+    const days = clampNum(diffDaysFast(e.start, e.end), 0, 30);
+    const startOrd = toOrdinalFast(e.start);
+    for (let i = 0; i <= days; i++) schoolExamDates.add(fromOrdinalFast(startOrd + i));
     for (let i = 0; i <= SCHOOL_EXAM_BUFFER_DAYS + days; i++) {
-      protectedDates.add(dateStr(dayjs(e.start).subtract(SCHOOL_EXAM_BUFFER_DAYS - i, 'day')));
+      protectedDates.add(fromOrdinalFast(startOrd - (SCHOOL_EXAM_BUFFER_DAYS - i)));
     }
   }
 
@@ -752,11 +870,13 @@ export function planSchedule(input) {
   // to avoid breaking priority tests that have examDate null and ratio 1.68 (tight capacity)
   // D17: weekly blend for available
   const totalRequiredMin = items.reduce((a, it) => a + (it.remainingMinutes || 0), 0);
-  // D17: compute totalAvailableMin as blend of weekday/weekend across horizon
+  // D17: compute totalAvailableMin as blend of weekday/weekend across horizon — FASTGEN precompute
   let totalAvailableMinBlend = 0;
+  const todayOrdForBlend = isDateStrFast(today) ? toOrdinalFast(today) : toOrdinalFast(fastDateStr(today));
+  const todayWeekdayForBlend = weekdayFast(today);
   for (let d = 0; d < totalDays; d++) {
-    const dDate = dateStr(dayjs(today).add(d, 'day'));
-    const wd = (dayjs(dDate).day() + 6) % 7; // 0=Mon
+    const wdSun = (todayWeekdayForBlend + d) % 7; // 0=Sun
+    const wd = (wdSun + 6) % 7; // 0=Mon
     const isWeekend = wd === 5 || wd === 6;
     totalAvailableMinBlend += isWeekend ? weekendCapacityMin : weekdayCapacityMin;
   }
@@ -838,7 +958,7 @@ export function planSchedule(input) {
         exam: e.label || 'School exam',
         start: e.start,
         end: e.end,
-        windowStart: dateStr(dayjs(e.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')),
+        windowStart: addDaysFast(e.start, -(SCHOOL_EXAM_BUFFER_DAYS)),
         dueSubjects: subjects,
         dueChapters: due.map((it) => ({ subject: it.subject, chapter: it.chapter, deadline: it.deadline })),
       };
@@ -846,8 +966,9 @@ export function planSchedule(input) {
     .filter((r) => r.dueSubjects.length > 0);
   const runUpFor = (date) => {
     let hit = null;
+    const dateOrd = isDateStrFast(date) ? toOrdinalFast(date) : toOrdinalFast(fastDateStr(date));
     for (const r of runUps) {
-      const diff = dayjs(r.start).diff(dayjs(date), 'day');
+      const diff = toOrdinalFast(r.start) - dateOrd;
       if (diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS && (!hit || r.start < hit.start)) hit = r;
     }
     return hit;
@@ -872,7 +993,7 @@ export function planSchedule(input) {
     const track = c.track || 'class';
     if (!allocatable.includes(track)) { pipelineSkippedTrack += 1; continue; } // track not planned at all
     const base = isDateStr(c.completedAt) ? c.completedAt : today; // no completed_at -> conquered today
-    const ageDays = dayjs(today).diff(dayjs(base), 'day');
+    const ageDays = diffDaysFast(base, today);
     if (ageDays > SPACED_REVISION_OFFSETS[SPACED_REVISION_OFFSETS.length - 1]) {
       // conquered longer ago than the whole ladder: one honest catch-up revision,
       // not four sessions pretending the chapter was finished yesterday
@@ -890,7 +1011,7 @@ export function planSchedule(input) {
       })),
     ];
     for (const step of ladder) {
-      const target = dateStr(dayjs(base).add(step.off, 'day'));
+      const target = isDateStrFast(base) ? addDaysFast(base, step.off) : fastDateStr(dayjs(base).add(step.off, 'day'));
       pipeline.push({
         // a step that already fell in the past clamps to today — never scheduled backwards
         date: target < today ? today : target,
@@ -947,36 +1068,44 @@ export function planSchedule(input) {
   const hasLightDay = opts.lightDay != null && Number.isFinite(Number(opts.lightDay));
   const lightDayIdx = hasLightDay ? Number(opts.lightDay) : 6;
   const LIGHT_DAY_FACTOR = 0.5;
+  // FASTGEN: precompute horizon dates and weekdays early for movedWaveDates and dayCapacity
+  const todayOrd = isDateStrFast(today) ? toOrdinalFast(today) : toOrdinalFast(fastDateStr(today));
+  const todayWeekdaySun = weekdayFast(today);
+  const horizonDates = new Array(totalDays);
+  const horizonWeekdaysMon = new Array(totalDays);
+  for(let _d=0;_d<totalDays;_d++){
+    horizonDates[_d]=fromOrdinalFast(todayOrd+_d);
+    const wdSun = (todayWeekdaySun+_d)%7;
+    horizonWeekdaysMon[_d]=(wdSun+6)%7;
+  }
   // FIX-DAYSOFF D20b: declared days_off become 50% light days, never zero (PO law: never EVER keep any day free)
-  // FIX-WEEKSPLIT D17 updated: dayCapacity uses day-type value (Sat+Sun weekend), days off =50% of own day-type, light day =50% of own day-type
+  // FIX-WEEKSPLIT D17 updated: dayCapacity uses day-type value (Sat+Sun weekend), days off =50% of own day-type, light day =50% of own day-type — FASTGEN
   const dayCapacity = (date, isDayOff, isLightDay, weekdayIdx) => {
     if (noCapacity) return 0;
-    // determine base by day-type
     let wd = weekdayIdx;
     if (wd == null) {
-      try { wd = (dayjs(date).day() + 6) % 7; } catch { wd = 0; }
+      try { wd = isDateStrFast(date) ? (weekdayFast(date)+6)%7 : (weekdayFast(date) + 6) % 7; } catch { wd = 0; }
     }
     const isWeekend = wd === 5 || wd === 6;
     let base = isWeekend ? weekendCapacityMin : weekdayCapacityMin;
-    // fallback to legacy capacityMin if both new are 0 but legacy has value (migration)
     if (base === 0 && capacityMin > 0) base = capacityMin;
-    // D20b: days off 50% of own day-type quota, same factor as light day, never zero while hours>0
     if (isDayOff || (hasLightDay && isLightDay)) base = Math.round(base * LIGHT_DAY_FACTOR);
     return Math.max(0, base - num(loadByDate[date], 0));
   };
 
-  // FIX-FILL: revision-wave day on reduced day (days_off/light) stays — 50% quota, no move needed
-  const movedWaveDates = new Map(); // day before -> the day-off date it carries
+  // FIX-FILL: revision-wave day on reduced day (days_off/light) stays — 50% quota, no move needed — FASTGEN
+  const movedWaveDates = new Map();
   if (offDays.size && runUps.length) {
     for (let d = 1; d < totalDays; d++) {
-      const offDate = dateStr(dayjs(today).add(d, 'day'));
-      const weekday = (dayjs(offDate).day() + 6) % 7;
+      const offDate = horizonDates[d];
+      const weekday = horizonWeekdaysMon[d];
       if (!offDays.has(weekday)) continue;
+      const offOrd = todayOrd + d;
       if (!runUps.some((r) => {
-        const diff = dayjs(r.start).diff(dayjs(offDate), 'day');
+        const diff = toOrdinalFast(r.start) - offOrd;
         return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS;
       })) continue;
-      const before = dateStr(dayjs(today).add(d - 1, 'day'));
+      const before = horizonDates[d-1];
       if (!movedWaveDates.has(before)) movedWaveDates.set(before, offDate);
     }
   }
@@ -1031,19 +1160,22 @@ export function planSchedule(input) {
   let finishedTopics = 0;
   let studyCapacityMin = 0;
   let studyDays = 0;
+  // studiedByTrack index to avoid full studied.filter per filler block — FASTGEN (horizonDates already precomputed earlier)
+  const studiedByTrack = { class: [], olympiad: [], exam: [] };
+  const _ensureTrackArr = (t)=>{ if(!studiedByTrack[t]) studiedByTrack[t]=[]; return studiedByTrack[t]; };
 
   for (let d = 0; d < totalDays; d++) {
-    const date = dateStr(dayjs(today).add(d, 'day'));
-    const weekday = (dayjs(date).day() + 6) % 7; // 0=Mon
+    const date = horizonDates[d];
+    const weekday = horizonWeekdaysMon[d]; // 0=Mon
     const isDayOff = offDays.has(weekday);
     const isLightDay = hasLightDay && weekday === lightDayIdx; // FIX-FILL: light day independent, days_off also 50% (both reduced)
     const isReducedDay = isDayOff || isLightDay; // 50% quota, revision/mock/practice only
-    const daysToExam = examDate ? dayjs(examDate).diff(dayjs(date), 'day') : null;
+    const daysToExam = examDate ? diffDaysFast(date, examDate) : null;
     const schoolExamToday = schoolExamDates.has(date);
-    const dayBeforeSchoolExam = exams.some((e) => dateStr(dayjs(e.start).subtract(1, 'day')) === date);
-    // revision wave: the 14 days before each school exam RANGE START
+    const dayBeforeSchoolExam = exams.some((e) => addDaysFast(e.start, -1) === date);
+    // revision wave: the 14 days before each school exam RANGE START — FASTGEN
     const inSchoolExamRev = exams.some((e) => {
-      const diff = dayjs(e.start).diff(dayjs(date), 'day');
+      const diff = toOrdinalFast(e.start) - toOrdinalFast(date);
       return diff > 0 && diff <= SCHOOL_EXAM_BUFFER_DAYS;
     });
     // FIX-S S4: a mock driven by the olympiad date is prep FOR that olympiad — it
@@ -1055,7 +1187,7 @@ export function planSchedule(input) {
       !schoolExamToday &&
       ((weekday === 6 && (examDate != null ? daysToExam > 0 && daysToExam <= 180 : olympiadAhead)) ||
         dayBeforeSchoolExam ||
-        (olympiadDate && dateStr(dayjs(olympiadDate).subtract(2, 'day')) === date));
+        (olympiadDate && addDaysFast(olympiadDate, -(2)) === date));
     // FIX-STUDY-FIRST D16: shortage → biweekly mocks, final 21 days guardrail keeps weekly
     let isMockDay = isMockDayBase;
     if (shortage && !isFinal21Days) {
@@ -1131,7 +1263,7 @@ export function planSchedule(input) {
     // FIX-S S1/S2: today's class subject pair (rotation order, exam run-up aware)
     const classPair = classPairFor(date);
     const isUrgentNow = (it) => !!it.overdue
-      || (isDateStr(it.deadline) && dayjs(it.deadline).diff(dayjs(date), 'day') <= URGENT_LEAD_DAYS);
+      || (isDateStr(it.deadline) && diffDaysFast(date, it.deadline) <= URGENT_LEAD_DAYS);
 
     let cursor = startM;
     let capacity = dayCapacity(date, isDayOff, isLightDay, weekday);
@@ -1152,23 +1284,14 @@ export function planSchedule(input) {
     const push = (subject, topic, type, minutes, track, priority) => {
       const m = Math.min(Math.floor(num(minutes, 0)), Math.floor(capacity));
       if (m < MIN_BLOCK_MIN) return 'small';
-      // FIX-FILLDUP: cap same-topic blocks per day at 2 (for all types)
       const cnt = dayTopicCounts.get(topic) || 0;
-      if (cnt >= 2) return 'cap'; // over cap, try next
-      // FIX-PROPORT1: shared same-chapter cap 2/day across ALL emitters (mock, timed-practice, buffer, etc.)
-      // Extract chapter from topic: try inside parens at end, else after colon
-      let chapForCapRaw = String(topic || '');
-      const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-      if (parenMatch) {
-        chapForCapRaw = parenMatch[1].trim();
-      } else {
-        const colonMatch = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-        if (colonMatch) chapForCapRaw = colonMatch[1].trim();
-      }
-      const subjForCap = String(subject || '').trim();
-      // Only apply cap when we have a real subject and chapter (skip generic like Buffer, Mock Test, etc.)
+      if (cnt >= 2) return 'cap';
+      // FASTGEN: cached chapter extraction
+      const _capKeys = getChapterCapKeysCached(subject, topic);
+      const chapForCapRaw = _capKeys.chapForCapRaw;
+      const subjForCap = _capKeys.subjForCap;
       if (subjForCap && chapForCapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw) && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(subjForCap)) {
-        const chapterCapKey = `${subjForCap}|${chapForCapRaw}`;
+        const chapterCapKey = _capKeys.chapterCapKey;
         const chapCnt = dayChapterCounts.get(chapterCapKey) || 0;
         if (chapCnt >= 2) return 'cap';
       }
@@ -1183,18 +1306,12 @@ export function planSchedule(input) {
       }
       existingKeys.add(key);
       dayTopicCounts.set(topic, cnt + 1);
-      // FIX-PROPORT1: increment chapter cap counter
       {
-        let chapForCapRaw2 = String(topic || '');
-        const parenMatch2 = chapForCapRaw2.match(/\(\s*([^)]+?)\s*\)\s*$/);
-        if (parenMatch2) chapForCapRaw2 = parenMatch2[1].trim();
-        else {
-          const colonMatch2 = chapForCapRaw2.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-          if (colonMatch2) chapForCapRaw2 = colonMatch2[1].trim();
-        }
-        const subjForCap2 = String(subject || '').trim();
+        const _capKeys2 = _capKeys;
+        const chapForCapRaw2 = _capKeys2.chapForCapRaw;
+        const subjForCap2 = _capKeys2.subjForCap;
         if (subjForCap2 && chapForCapRaw2 && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw2) && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(subjForCap2)) {
-          const chapterCapKey2 = `${subjForCap2}|${chapForCapRaw2}`;
+          const chapterCapKey2 = _capKeys2.chapterCapKey;
           dayChapterCounts.set(chapterCapKey2, (dayChapterCounts.get(chapterCapKey2) || 0) + 1);
         }
       }
@@ -1215,9 +1332,7 @@ export function planSchedule(input) {
       cursor += m + BREATH_MIN;
       capacity = Math.max(0, capacity - (m + BREATH_MIN));
       blocks += 1;
-      // FIX-VARIETY D19 + FIX-MAINT D19b: track for prev-day avoidance, type variety, LRU and same-day chapter avoidance
-      const chapMatchForPush = String(topic || '').match(/:\s*(.+?)(?:\s*\(|—|$)/);
-      const chapForPush = chapMatchForPush ? chapMatchForPush[1].trim() : String(topic || '').trim();
+      const chapForPush = _capKeys.chapForPush;
       const subjectForPush = String(subject || '');
       const trackForPush = String(track || 'class');
       const chapterKey = `${trackForPush}|${subjectForPush}|${chapForPush}`;
@@ -1277,6 +1392,7 @@ export function planSchedule(input) {
         it.remainingMinutes = Math.max(0, it.remainingMinutes - block);
         it.plannedMinutes += block;
         studied.push({ subject: it.subject, chapter: it.chapter, date, track, classLevelNum: it.classLevelNum });
+        _ensureTrackArr(track).push({ subject: it.subject, chapter: it.chapter, date, track, classLevelNum: it.classLevelNum });
         if (it.remainingMinutes > 0 && it.remainingMinutes < MIN_BLOCK_MIN) {
           it.absorbedMinutes = it.remainingMinutes;
           it.remainingMinutes = 0;
@@ -1382,7 +1498,7 @@ export function planSchedule(input) {
 
     // Revision wave before school exams: no NEW topics, revise the done ones.
     // FIX-SCHED6: allow pipeline on wave days as well (light revision)
-    if (inSchoolExamRev && pipeline.length && studied.some((s) => s.track === 'class')) {
+    if (inSchoolExamRev && pipeline.length && ((studiedByTrack['class']||[]).length>0)) {
       while (pipeline.length && pipeline[0].date <= date && capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY) {
         const sPipe = pipeline[0];
         const pkey = [sPipe.subject, sPipe.topic, sPipe.type].join('|');
@@ -1400,8 +1516,8 @@ export function planSchedule(input) {
     // FIX-S S2: inside the run-up the chapters DUE BEFORE that exam lead the wave
     // FIX-STUDY-FIRST D16: shortage → halve wave quota, allow new study INCLUDING run-up days
     // D14b: block wave when classOff (no above-signup after base)
-    if (inSchoolExamRev && !classPaused && !classOff && studied.some((s) => s.track === 'class')) {
-      const classTopics = studied.filter((s) => s.track === 'class');
+    if (inSchoolExamRev && !classPaused && !classOff && ((studiedByTrack['class']||[]).length>0)) {
+      const classTopics = ((studiedByTrack['class']||[]).slice());
       const recent = classTopics.slice(-REV_WAVE_PICKS);
       const run = runUpFor(date);
       const dueAll = run ? classTopics.filter((t) => run.dueSubjects.includes(t.subject)) : [];
@@ -1453,7 +1569,7 @@ export function planSchedule(input) {
     // D14b: after base cutoff, only above-signup studied allowed for class maintenance
     // FIX-VARIETY D19: subject rotation independent of type rotation (blockCounter*2), avoid same as prev day
     const fillerForTrack = (track, blockCounter = 0, forcedType = null) => {
-      let pool = studied.filter(s => s.track === track);
+      let pool = ((studiedByTrack[track]||[]).slice());
       if (track === 'class' && date > cutoff) {
         if (!hasAboveSignupRows) {
           pool = []; // no above at all => no class filler after base
@@ -1804,9 +1920,10 @@ export function planSchedule(input) {
       const q = queues[track];
       if (!q || !q.length) return 0;
       let need = 0;
+      const dateOrdForNeed = toOrdinalFast(date);
       for (const it of q) {
         if (!isDateStr(it.deadline)) continue;
-        const days = dayjs(it.deadline).diff(dayjs(date), 'day');
+        const days = toOrdinalFast(it.deadline) - dateOrdForNeed;
         if (days > URGENT_LEAD_DAYS) continue;
         need += num(it.remainingMinutes, 0) / Math.max(1, days);
       }
@@ -2231,7 +2348,7 @@ export function planSchedule(input) {
       if (sortedDates.length) lastPlanDateStr = sortedDates[sortedDates.length - 1];
     }
     if (lastPlanDateStr < examDate) {
-      const stretchStartStr = dateStr(dayjs(lastPlanDateStr).add(1, 'day'));
+      const stretchStartStr = addDaysFast(lastPlanDateStr, 1);
       const stretchEndStr = examDate;
       let cur = dayjs(stretchStartStr);
       const end = dayjs(stretchEndStr);
@@ -2329,7 +2446,7 @@ export function planSchedule(input) {
         };
 
         const fillerForTrackTail = (track, blockCounter, forcedType) => {
-          let pool = studied.filter(s => s.track === track);
+          let pool = ((studiedByTrack[track]||[]).slice());
           if (!pool.length) pool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
           if (!pool.length) return null;
           // FIX-DRAINSHARE: avoid prev day's last pick when any alternative exists
@@ -2596,9 +2713,9 @@ export function planSchedule(input) {
         started: perTrack[t].started,
       })),
     nextSchoolExam: nextSchool,
-    classDoneBy: nextSchool ? dateStr(dayjs(nextSchool.start).subtract(SCHOOL_EXAM_BUFFER_DAYS, 'day')) : null,
-    olympiadDoneBy: olympiadDate ? dateStr(dayjs(olympiadDate).subtract(1, 'day')) : null,
-    examDoneBy: examDate ? dateStr(dayjs(examDate).subtract(1, 'day')) : null,
+    classDoneBy: nextSchool ? addDaysFast(nextSchool.start, -(SCHOOL_EXAM_BUFFER_DAYS)) : null,
+    olympiadDoneBy: olympiadDate ? addDaysFast(olympiadDate, -(1)) : null,
+    examDoneBy: examDate ? addDaysFast(examDate, -(1)) : null,
     totalRequiredHours,
     totalAvailableHours,
     requiredPerDay,
@@ -2676,8 +2793,8 @@ export function autoRescheduleMissed(scheduleRows, { dailyHours = 3, schoolExams
   const exams = allSchoolExams(schoolExams);
   const examDates = new Set();
   for (const e of exams) {
-    const days = dayjs(e.end).diff(dayjs(e.start), 'day');
-    for (let i = 0; i <= Math.min(days, 30); i++) examDates.add(dateStr(dayjs(e.start).add(i, 'day')));
+    const days = diffDaysFast(e.start, e.end);
+    for (let i = 0; i <= Math.min(days, 30); i++) examDates.add(addDaysFast(e.start, i));
   }
   const isExamDay = (d) => examDates.has(d);
 
