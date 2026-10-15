@@ -19,7 +19,7 @@ import { Input } from '../../components/ui/Input';
 import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
-import { generateSchedule, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
+import { generateSchedule, generateScheduleAsync, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
 import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds } from '../../lib/scheduleSave';
 import { uuid } from '../../lib/utils';
 import { usePromotion } from '../../hooks/usePromotion';
@@ -62,6 +62,11 @@ export function ScheduleScreen({ navigation, route }) {
   const genRunRef = useRef(0);
   const genBusyRef = useRef(false);
   const lastTickRef = useRef(Date.now()); // FIX-E: guard to auto-roll only once per screen load session
+  // FIX-PLANB: abort + watchdog + progress detail
+  const genAbortRef = useRef(false);
+  const genStartRef = useRef(0);
+  const [showSlowDialog, setShowSlowDialog] = useState(false);
+  const [genProgressDetail, setGenProgressDetail] = useState('');
 
   // human-readable priority line for the generate modal (reads the
   // student's own priority settings — FIX B)
@@ -372,10 +377,25 @@ export function ScheduleScreen({ navigation, route }) {
         !r.deadline && computedDeadlines[r.id] ? { ...r, deadline: computedDeadlines[r.id] } : r
       );
 
-      tick('Planning till 25 Feb…');
+            tick('Planning till 25 Feb…');
       await yieldPaint();
       if (isStale()) return;
-      const rows = generateSchedule({
+      // FIX-PLANB: async yielding generation with progress + cancel + watchdog
+      genAbortRef.current = false;
+      genStartRef.current = Date.now();
+      let slowWatchdog = null;
+      const clearSlowWatchdog = () => { if (slowWatchdog) { clearTimeout(slowWatchdog); slowWatchdog = null; } };
+      const startSlowWatchdog = () => {
+        clearSlowWatchdog();
+        slowWatchdog = setTimeout(() => {
+          // 20s exceeded — honest dialog
+          setShowSlowDialog(true);
+        }, 20000);
+      };
+      startSlowWatchdog();
+      let rows;
+      try {
+        rows = await generateScheduleAsync({
         syllabus: plannedSyllabus,
         deadlines: computedDeadlines,
         existing: kept,
@@ -426,7 +446,28 @@ export function ScheduleScreen({ navigation, route }) {
           return Math.min(160, Math.max(6, weeksNeeded));
         })(),
         userId: profile.id,
+        // FIX-PLANB progress + abort + yieldEvery
+        yieldEvery: 14,
+        onProgress: (done, total) => {
+          const pct = total ? Math.round((done/total)*100) : 0;
+          setGenProgressDetail(`Planning… day ${done}/${total} (${pct}%)`);
+          tick(`Planning… day ${done}/${total} (${pct}%)`);
+        },
+        shouldAbort: () => genAbortRef.current || isStale(),
       });
+      } finally {
+        clearSlowWatchdog();
+        setShowSlowDialog(false);
+      }
+      // FIX-PLANB abort check — clean exit, nothing saved, old plan untouched
+      if (genAbortRef.current || rows?.aborted) {
+        tick('Cancelled — old plan untouched');
+        setGenProgressDetail('Cancelled');
+        // brief pause then clear busy
+        await new Promise(r => setTimeout(r, 300));
+        return;
+      }
+      if (isStale()) return;
       if (isStale()) return;
       setCoverage(rows.coverage || null);
 
@@ -1242,16 +1283,6 @@ export function ScheduleScreen({ navigation, route }) {
                   {coverage.unscheduled.length > 4 ? ` +${coverage.unscheduled.length - 4} more` : ''}
                 </Text>
               ) : null}
-              {coverage.overloaded && Array.isArray(coverage.unscheduled) && coverage.unscheduled.length ? (
-                <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 6, lineHeight: 16 }}>
-                  Not scheduled yet:{' '}
-                  {coverage.unscheduled
-                    .slice(0, 4)
-                    .map((u) => `${u.chapter} (${u.remainingHours}h${u.deadline ? `, due ${u.deadline}` : ''})`)
-                    .join(', ')}
-                  {coverage.unscheduled.length > 4 ? ` +${coverage.unscheduled.length - 4} more` : ''}
-                </Text>
-              ) : null}
               {Array.isArray(coverage.partial) && coverage.partial.length ? (
                 <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#991B1B', marginTop: 4, lineHeight: 16 }}>
                   Started but unfinished: {coverage.partial.length} chapter(s) —{' '}
@@ -1353,9 +1384,24 @@ export function ScheduleScreen({ navigation, route }) {
         <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#5B21B6', marginTop: 10, marginBottom: 4, lineHeight: 17 }}>
           Priority: {prioritySummary()}. Revision waves + mocks + timed practice included. Shortfall honestly reported, never fabricated.
         </Text>
-        {genBusy && genProgress ? (
+        {genBusy && (genProgress || genProgressDetail) ? (
           <View style={{ backgroundColor: '#F0FDF4', borderWidth: 1, borderColor: '#BBF7D0', borderRadius: 8, padding: 8, marginBottom: 10 }}>
-            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#166534' }}>{genProgress}</Text>
+            <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#166534' }}>{genProgressDetail || genProgress}</Text>
+            {genBusy ? (
+              <View style={{ flexDirection: 'row', marginTop: 8 }}>
+                <Button title="Cancel" size="sm" variant="secondary" mode="light" onPress={() => { genAbortRef.current = true; genRunRef.current += 1; setGenBusy(false); setGenProgress('Cancelled'); setGenProgressDetail('Cancelled — old plan untouched'); }} />
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+        {showSlowDialog ? (
+          <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#92400E', marginBottom: 6 }}>Unusually slow — Keep waiting / Cancel</Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#92400E', marginBottom: 10, lineHeight: 16 }}>Generation is taking longer than 20s. This can happen on large syllabi. You can keep waiting or cancel and try a smaller date range.</Text>
+            <View style={{ flexDirection: 'row' }}>
+              <Button title="Keep waiting" size="sm" mode="light" style={{ flex: 1, marginRight: 8 }} onPress={() => setShowSlowDialog(false)} />
+              <Button title="Cancel" size="sm" variant="secondary" mode="light" style={{ flex: 1 }} onPress={() => { genAbortRef.current = true; genRunRef.current += 1; setShowSlowDialog(false); setGenBusy(false); setGenProgress('Cancelled'); setGenProgressDetail('Cancelled — old plan untouched'); }} />
+            </View>
           </View>
         ) : null}
         {genError ? (

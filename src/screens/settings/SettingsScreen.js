@@ -25,6 +25,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setDevDateOffset, getDevDateOffset, loadDevDateOffset, todayStr } from '../../lib/utils';
 import { clearXpOnceCache } from '../../lib/xpOnce';
 import { sha256Hex } from '../../lib/hash';
+import { gatherBackupData, backupToJsonString } from '../../lib/backup';
 
 // FIX-DEV: access-code mechanism — plaintext never in source, only SHA-256 hash embedded.
 // PO keeps code private, sends ONLY 64-hex hash to X. This is an access/obscurity gate, NOT cryptographic security.
@@ -924,6 +925,15 @@ export function SettingsScreen({ navigation }) {
         </>
       ) : null}
 
+      {/* FIX-PLANB: Backup & Export */}
+      <SectionTitle mode="light">💾 Backup & Export</SectionTitle>
+      <Card mode="light" style={{ marginBottom: 16 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 12.5, color: '#475569', lineHeight: 18, marginBottom: 10 }}>
+          Export my data — gathers profile, syllabus, schedule, habits, workout logs, XP, focus sessions as JSON. File saved via expo-file-system + share sheet via expo-sharing (PO-approved deps). Restore out of scope.
+        </Text>
+        <BackupExportButton profile={profile} />
+      </Card>
+
       {/* Data & account */}
       <SectionTitle mode="light">🗄️ Data & Account</SectionTitle>
       <Card mode="light" style={{ marginBottom: 16 }}>
@@ -1046,6 +1056,74 @@ export function SettingsScreen({ navigation }) {
         </View>
       </ModalSheet>
     </Screen>
+  );
+}
+
+function BackupExportButton({ profile }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const doExport = async () => {
+    setBusy(true);
+    setMsg('');
+    try {
+      // gather all collections via db.list — pure gatherBackupData tested separately
+      const userId = profile?.id;
+      const tables = ['syllabus', 'schedule', 'habits', 'habit_logs', 'workout_logs', 'xp_events', 'focus_sessions', 'content', 'flashcards', 'mood_logs', 'deadlines'];
+      const results = {};
+      for (const t of tables) {
+        try {
+          const list = await db.list(t, userId ? { eq: { user_id: userId } } : {});
+          results[t] = Array.isArray(list) ? list : [];
+        } catch {
+          results[t] = [];
+        }
+      }
+      // also try without user filter for global tables fallback
+      const backupObj = gatherBackupData({
+        profile,
+        syllabus: results.syllabus,
+        schedule: results.schedule,
+        habits: results.habits,
+        habit_logs: results.habit_logs,
+        workout_logs: results.workout_logs,
+        xp_events: results.xp_events,
+        focus_sessions: results.focus_sessions,
+        content: results.content,
+        flashcards: results.flashcards,
+        mood_logs: results.mood_logs,
+        deadlines: results.deadlines,
+      });
+      const jsonStr = backupToJsonString(backupObj);
+      // write via expo-file-system
+      const FileSystem = await import('expo-file-system');
+      const fileName = `studentos-backup-${new Date().toISOString().slice(0,10)}.json`;
+      const fileUri = (FileSystem.documentDirectory || FileSystem.cacheDirectory || '') + fileName;
+      await FileSystem.writeAsStringAsync(fileUri, jsonStr, { encoding: 'utf8' });
+      // share via expo-sharing
+      try {
+        const Sharing = await import('expo-sharing');
+        const canShare = await Sharing.isAvailableAsync();
+        if (canShare) {
+          await Sharing.shareAsync(fileUri, { mimeType: 'application/json', dialogTitle: 'Export my data' });
+          setMsg(`Exported ${fileName} (${Math.round(jsonStr.length/1024)}KB) — share sheet opened`);
+        } else {
+          setMsg(`Saved to ${fileUri} (${Math.round(jsonStr.length/1024)}KB) — sharing not available on this device`);
+        }
+      } catch (shareErr) {
+        setMsg(`Saved to ${fileUri} (${Math.round(jsonStr.length/1024)}KB) — ${shareErr?.message || ''}`);
+      }
+    } catch (e) {
+      setMsg(`Export failed: ${e?.message || 'unknown'}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View>
+      <Button title={busy ? 'Exporting…' : 'Export my data 📤'} mode="light" loading={busy} onPress={doExport} />
+      {msg ? <Text style={{ fontFamily: fonts.body, fontSize: 11.5, color: '#334155', marginTop: 8, lineHeight: 16 }}>{msg}</Text> : null}
+      <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 6, lineHeight: 14 }}>Includes profile, syllabus, schedule, habits, workout logs, XP, focus, content. JSON via expo-file-system + expo-sharing (PO-approved). Restore out of scope.</Text>
+    </View>
   );
 }
 
