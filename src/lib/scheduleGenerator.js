@@ -127,17 +127,43 @@ function getChapterCapKeysCached(subject, topic){
   let v=_CHAPTER_KEY_CACHE.get(cacheKey);
   if(v) return v;
   let chapForCapRaw=String(topic||'');
-  const parenMatch=chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-  if(parenMatch){
-    chapForCapRaw=parenMatch[1].trim();
+  const colonMatchRaw=chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+  if(colonMatchRaw){
+    chapForCapRaw=colonMatchRaw[1].trim();
+    if (/Qs|in 25 min/i.test(chapForCapRaw)) {
+      const parenForQs=String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if(parenForQs) chapForCapRaw=parenForQs[1].trim();
+    }
   }else{
-    const colonMatch=chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-    if(colonMatch) chapForCapRaw=colonMatch[1].trim();
+    const parenMatch=chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+    if(parenMatch){
+      const inside=parenMatch[1].trim();
+      if (!/mixed practice|olympiad|exam/i.test(inside)) {
+        chapForCapRaw=inside;
+      }
+    }
   }
   const subjForCap=String(subject||'').trim();
   const chapterCapKey=`${subjForCap}|${chapForCapRaw}`;
-  const chapMatch=String(topic||'').match(/:\s*(.+?)(?:\s*\(|—|$)/);
-  const chapForPush=chapMatch?chapMatch[1].trim():String(topic||'').trim();
+  let chapForPush=chapForCapRaw;
+  const colonMatch=String(topic||'').match(/:\s*(.+?)(?:\s*\(|—|$)/);
+  if(colonMatch){
+    let cand=colonMatch[1].trim();
+    if (/Qs|in 25 min/i.test(cand)) {
+      const parenForQs=String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if(parenForQs) cand=parenForQs[1].trim();
+    }
+    chapForPush=cand;
+  }else{
+    const parenOnly=String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+    if(parenOnly){
+      const inside=parenOnly[1].trim();
+      if (!/mixed practice|olympiad|exam/i.test(inside)) chapForPush=inside;
+      else chapForPush=String(topic||'').trim();
+    }else{
+      chapForPush=String(topic||'').trim();
+    }
+  }
   v={chapForCapRaw, subjForCap, chapterCapKey, chapForPush};
   _CHAPTER_KEY_CACHE.set(cacheKey,v);
   return v;
@@ -1131,10 +1157,12 @@ export function planSchedule(input) {
   const studied = [];              // {subject, chapter, date, track} for revision cycles
   // FIX-VARIETY D19: track previous day's last subject+chapter to avoid repeat
   let prevDayLastPickKey = null; // e.g., "Science|Life Processes"
+  let prevDayPickedSet = new Set(); // FIX-FINAL3A: all picks previous day for D+1 exclusion
   // FIX-MAINT D19b: LRU tracking for revision/quiz final stretch
   const chapterLastUsed = new Map(); // key: track|subject|chapter -> last date string
   // FIX-DRAINSHARE: per post-drain day diagnostics
   const drainshareDiag = [];
+  const maintProbeDiag = []; // FIX-FINAL3A: diag.MAINT_PROBE per maintenance day
   const leftover = {};
   for (const t of allocatable) leftover[t] = 0;
 
@@ -1574,50 +1602,78 @@ export function planSchedule(input) {
     // D14b: after base cutoff, only above-signup studied allowed for class maintenance
     // FIX-VARIETY D19: subject rotation independent of type rotation (blockCounter*2), avoid same as prev day
     const fillerForTrack = (track, blockCounter = 0, forcedType = null) => {
-      let pool = ((studiedByTrack[track]||[]).slice());
+      // FIX-FINAL3A: dedup to unique subject|chapter, hard 2/day unconditional, D+1 exclusion unless pool<1, stale-pool guard
+      let rawPool = ((studiedByTrack[track]||[]).slice());
       if (track === 'class' && date > cutoff) {
         if (!hasAboveSignupRows) {
-          pool = []; // no above at all => no class filler after base
+          rawPool = [];
         } else {
-          // only above-signup studied allowed after base
-          pool = pool.filter(s => {
+          rawPool = rawPool.filter(s => {
             if (s.classLevelNum == null) return false;
             if (signupClassNum == null) return true;
             return s.classLevelNum > signupClassNum;
           });
         }
       }
+      if (!rawPool.length) return null;
+      // dedup to unique subject|chapter
+      const seen = new Set();
+      const deduped = [];
+      for (const it of rawPool) {
+        const k = `${it.subject}|${it.chapter}`;
+        if (!seen.has(k)) { seen.add(k); deduped.push(it); }
+      }
+      let pool = deduped;
+      const poolSize = pool.length;
       if (!pool.length) return null;
-      // D19: when pool allows (≥3 alternatives), avoid picking same subject+chapter as previous day's last pick — filter out entirely for the day
-      // FIX-DRAINSHARE: strengthen to avoid repeat when any alternative exists (≥1), to satisfy VARIETY3 with proportional 4-block target
-      if (prevDayLastPickKey) {
-        const filtered = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
-        if (filtered.length >= 1 && (pool.length >= 3 || filtered.length >= 1)) {
-          // keep at least 1 alternative; if original pool >=3 require >=2 left, else >=1 is enough
-          if (pool.length >= 3) {
-            if (filtered.length >= 2) pool = filtered;
-          } else {
-            pool = filtered;
+
+      // D+1 exclusion: exclude all picks from previous day unless would drop below 1
+      let eligibleAfterD1 = pool;
+      if (prevDayPickedSet && prevDayPickedSet.size > 0) {
+        const filteredAll = pool.filter(s => !prevDayPickedSet.has(`${s.subject}|${s.chapter}`));
+        if (filteredAll.length >= 1) {
+          eligibleAfterD1 = filteredAll;
+        }
+        // else guard: would drop below 1, keep original pool
+      } else if (prevDayLastPickKey) {
+        const filteredLast = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
+        if (filteredLast.length >= 1) {
+          eligibleAfterD1 = filteredLast;
+        }
+      }
+      pool = eligibleAfterD1;
+
+      // FIX-FINAL3A (c): never keep 1-chapter stale pool when alternative exists in studied
+      if (pool.length === 1 && rawPool.length >= 1) {
+        // check if studiedByTrack has >1 unique alternative
+        const allUnique = deduped;
+        if (allUnique.length > 1) {
+          // if the single remaining is the prev day's last pick and alternative exists not capped, try alternative
+          const singleKey = `${pool[0].subject}|${pool[0].chapter}`;
+          if (prevDayLastPickKey && singleKey === prevDayLastPickKey) {
+            const alt = allUnique.find(it => {
+              const k = `${it.subject}|${it.chapter}`;
+              return k !== singleKey && (dayChapterCounts.get(k) || 0) < 2 && (!prevDayPickedSet || !prevDayPickedSet.has(k));
+            });
+            if (alt) pool = [alt];
           }
         }
       }
-      // FIX-MAINT D19b: LRU + same-day avoidance for final stretch
-      // FIX-PROPORT1: shared cap 2 per chapter per day across ALL emitters — filter out capped chapters when pool allows
-      if (pool.length) {
+
+      // HARD 2/day UNCONDITIONAL
+      {
         const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
-        if (notCapped.length >= 2) {
-          pool = notCapped;
-        } else if (notCapped.length === 1 && pool.length >= 3) {
-          pool = notCapped;
-        }
+        if (!notCapped.length) return null;
+        pool = notCapped;
       }
+
+      const eligibleSize = pool.length;
+
       if (pool.length >= 3) {
-        // same-day avoidance
         const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
         if (notUsedToday.length >= 2) {
           pool = notUsedToday;
         }
-        // LRU sort: least recently used first — FIX-DRAINSHARE cross-track via subject|chapter fallback
         pool = [...pool].sort((a,b)=>{
           const ka = `${a.track}|${a.subject}|${a.chapter}`;
           const kb = `${b.track}|${b.subject}|${b.chapter}`;
@@ -1630,14 +1686,31 @@ export function planSchedule(input) {
         });
       }
       if (!pool.length) return null;
-      // D19: independent subject rotation hash extended: *2, but LRU takes precedence when pool>=3
       let idx = 0;
       if (pool.length >= 3) {
-        idx = 0; // LRU already sorted, pick least recent
+        idx = 0;
       } else {
         idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
       }
       let pick = pool[idx] || pool[pool.length-1];
+
+      // MAINT_PROBE per post-drain maintenance day
+      try {
+        if (track === 'class' && typeof maintProbeDiag !== 'undefined') {
+          // post-drain detection: class queue drained (no remaining) and date past some threshold, or simply any maintenance day with studied
+          const isPostDrain = (queues && queues['class'] && queues['class'].length === 0) || studied.length > 0;
+          if (isPostDrain) {
+            maintProbeDiag.push({
+              date,
+              poolSize,
+              eligibleSize,
+              pickedKey: `${pick.subject}|${pick.chapter}`,
+              prevDayKey: prevDayLastPickKey || null
+            });
+          }
+        }
+      } catch {}
+
       const resolveType = () => {
         if (forcedType) return forcedType;
         if (track === 'class') {
@@ -2338,9 +2411,10 @@ export function planSchedule(input) {
         }
       }
     }
-    // FIX-VARIETY D19: update prev day's last pick for avoidance
+    // FIX-VARIETY D19: update prev day's last pick for avoidance + FIX-FINAL3A D+1 all picks
     if (lastPickKeyToday) {
       prevDayLastPickKey = lastPickKeyToday;
+      try { prevDayPickedSet = new Set(dayChaptersUsed); } catch {}
     }
   }
 
@@ -2383,11 +2457,19 @@ export function planSchedule(input) {
           const cnt = dayTopicCounts.get(topic) || 0;
           if (cnt >= 2) return 'cap';
           let chapForCapRaw = String(topic || '');
-          const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-          if (parenMatch) chapForCapRaw = parenMatch[1].trim();
-          else {
-            const colonMatch = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-            if (colonMatch) chapForCapRaw = colonMatch[1].trim();
+          const colonMatchRaw = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+          if (colonMatchRaw) {
+            chapForCapRaw = colonMatchRaw[1].trim();
+            if (/Qs|in 25 min/i.test(chapForCapRaw)) {
+              const parenForQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+              if (parenForQs) chapForCapRaw = parenForQs[1].trim();
+            }
+          } else {
+            const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+            if (parenMatch) {
+              const inside = parenMatch[1].trim();
+              if (!/mixed practice|olympiad|exam/i.test(inside)) chapForCapRaw = inside;
+            }
           }
           const subjForCap = String(subject || '').trim();
           if (subjForCap && chapForCapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw)) {
@@ -2407,11 +2489,19 @@ export function planSchedule(input) {
           dayTopicCounts.set(topic, cnt + 1);
           {
             let chapRaw = String(topic || '');
-            const pm = chapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-            if (pm) chapRaw = pm[1].trim();
-            else {
-              const cm = chapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-              if (cm) chapRaw = cm[1].trim();
+            const colonRaw = chapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+            if (colonRaw) {
+              chapRaw = colonRaw[1].trim();
+              if (/Qs|in 25 min/i.test(chapRaw)) {
+                const parenForQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+                if (parenForQs) chapRaw = parenForQs[1].trim();
+              }
+            } else {
+              const pm = chapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+              if (pm) {
+                const inside = pm[1].trim();
+                if (!/mixed practice|olympiad|exam/i.test(inside)) chapRaw = inside;
+              }
             }
             const subj = String(subject || '').trim();
             if (subj && chapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapRaw)) {
@@ -2451,8 +2541,33 @@ export function planSchedule(input) {
         };
 
         const fillerForTrackTail = (track, blockCounter, forcedType) => {
-          let pool = ((studiedByTrack[track]||[]).slice());
-          if (!pool.length) pool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          // FIX-FINAL3A: dedup, hard 2/day, D+1 exclusion
+          let rawPool = ((studiedByTrack[track]||[]).slice());
+          if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          const seenTail = new Set();
+          const dedupedTail = [];
+          for (const it of rawPool) {
+            const k = `${it.subject}|${it.chapter}`;
+            if (!seenTail.has(k)) { seenTail.add(k); dedupedTail.push(it); }
+          }
+          let pool = dedupedTail;
+          const poolSizeTail = pool.length;
+          if (!pool.length) return null;
+          // D+1 exclusion
+          if (prevDayPickedSet && prevDayPickedSet.size > 0) {
+            const filtered = pool.filter(s => !prevDayPickedSet.has(`${s.subject}|${s.chapter}`));
+            if (filtered.length >= 1) pool = filtered;
+          } else if (prevDayLastPickKey) {
+            const filtered = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
+            if (filtered.length >= 1) pool = filtered;
+          }
+          // hard 2/day
+          {
+            const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
+            if (!notCapped.length) return null;
+            pool = notCapped;
+          }
+          const eligibleSizeTail = pool.length;
           if (!pool.length) return null;
           // FIX-DRAINSHARE: avoid prev day's last pick when any alternative exists
           if (prevDayLastPickKey) {
@@ -2688,6 +2803,7 @@ export function planSchedule(input) {
   const coverage = {
     STRETCH: stretchDiag,
     DRAINSHARE: drainshareDiag,
+    MAINT_PROBE: maintProbeDiag,
     priorityOrder: allocatable,
     timeSplit: prio.timeSplit,
     finalClass: finalClassNum,
@@ -3165,10 +3281,12 @@ export async function planScheduleAsync(input) {
   const studied = [];              // {subject, chapter, date, track} for revision cycles
   // FIX-VARIETY D19: track previous day's last subject+chapter to avoid repeat
   let prevDayLastPickKey = null; // e.g., "Science|Life Processes"
+  let prevDayPickedSet = new Set(); // FIX-FINAL3A: all picks previous day for D+1 exclusion
   // FIX-MAINT D19b: LRU tracking for revision/quiz final stretch
   const chapterLastUsed = new Map(); // key: track|subject|chapter -> last date string
   // FIX-DRAINSHARE: per post-drain day diagnostics
   const drainshareDiag = [];
+  const maintProbeDiag = []; // FIX-FINAL3A: diag.MAINT_PROBE per maintenance day
   const leftover = {};
   for (const t of allocatable) leftover[t] = 0;
 
@@ -3608,50 +3726,78 @@ export async function planScheduleAsync(input) {
     // D14b: after base cutoff, only above-signup studied allowed for class maintenance
     // FIX-VARIETY D19: subject rotation independent of type rotation (blockCounter*2), avoid same as prev day
     const fillerForTrack = (track, blockCounter = 0, forcedType = null) => {
-      let pool = ((studiedByTrack[track]||[]).slice());
+      // FIX-FINAL3A: dedup to unique subject|chapter, hard 2/day unconditional, D+1 exclusion unless pool<1, stale-pool guard
+      let rawPool = ((studiedByTrack[track]||[]).slice());
       if (track === 'class' && date > cutoff) {
         if (!hasAboveSignupRows) {
-          pool = []; // no above at all => no class filler after base
+          rawPool = [];
         } else {
-          // only above-signup studied allowed after base
-          pool = pool.filter(s => {
+          rawPool = rawPool.filter(s => {
             if (s.classLevelNum == null) return false;
             if (signupClassNum == null) return true;
             return s.classLevelNum > signupClassNum;
           });
         }
       }
+      if (!rawPool.length) return null;
+      // dedup to unique subject|chapter
+      const seen = new Set();
+      const deduped = [];
+      for (const it of rawPool) {
+        const k = `${it.subject}|${it.chapter}`;
+        if (!seen.has(k)) { seen.add(k); deduped.push(it); }
+      }
+      let pool = deduped;
+      const poolSize = pool.length;
       if (!pool.length) return null;
-      // D19: when pool allows (≥3 alternatives), avoid picking same subject+chapter as previous day's last pick — filter out entirely for the day
-      // FIX-DRAINSHARE: strengthen to avoid repeat when any alternative exists (≥1), to satisfy VARIETY3 with proportional 4-block target
-      if (prevDayLastPickKey) {
-        const filtered = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
-        if (filtered.length >= 1 && (pool.length >= 3 || filtered.length >= 1)) {
-          // keep at least 1 alternative; if original pool >=3 require >=2 left, else >=1 is enough
-          if (pool.length >= 3) {
-            if (filtered.length >= 2) pool = filtered;
-          } else {
-            pool = filtered;
+
+      // D+1 exclusion: exclude all picks from previous day unless would drop below 1
+      let eligibleAfterD1 = pool;
+      if (prevDayPickedSet && prevDayPickedSet.size > 0) {
+        const filteredAll = pool.filter(s => !prevDayPickedSet.has(`${s.subject}|${s.chapter}`));
+        if (filteredAll.length >= 1) {
+          eligibleAfterD1 = filteredAll;
+        }
+        // else guard: would drop below 1, keep original pool
+      } else if (prevDayLastPickKey) {
+        const filteredLast = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
+        if (filteredLast.length >= 1) {
+          eligibleAfterD1 = filteredLast;
+        }
+      }
+      pool = eligibleAfterD1;
+
+      // FIX-FINAL3A (c): never keep 1-chapter stale pool when alternative exists in studied
+      if (pool.length === 1 && rawPool.length >= 1) {
+        // check if studiedByTrack has >1 unique alternative
+        const allUnique = deduped;
+        if (allUnique.length > 1) {
+          // if the single remaining is the prev day's last pick and alternative exists not capped, try alternative
+          const singleKey = `${pool[0].subject}|${pool[0].chapter}`;
+          if (prevDayLastPickKey && singleKey === prevDayLastPickKey) {
+            const alt = allUnique.find(it => {
+              const k = `${it.subject}|${it.chapter}`;
+              return k !== singleKey && (dayChapterCounts.get(k) || 0) < 2 && (!prevDayPickedSet || !prevDayPickedSet.has(k));
+            });
+            if (alt) pool = [alt];
           }
         }
       }
-      // FIX-MAINT D19b: LRU + same-day avoidance for final stretch
-      // FIX-PROPORT1: shared cap 2 per chapter per day across ALL emitters — filter out capped chapters when pool allows
-      if (pool.length) {
+
+      // HARD 2/day UNCONDITIONAL
+      {
         const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
-        if (notCapped.length >= 2) {
-          pool = notCapped;
-        } else if (notCapped.length === 1 && pool.length >= 3) {
-          pool = notCapped;
-        }
+        if (!notCapped.length) return null;
+        pool = notCapped;
       }
+
+      const eligibleSize = pool.length;
+
       if (pool.length >= 3) {
-        // same-day avoidance
         const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
         if (notUsedToday.length >= 2) {
           pool = notUsedToday;
         }
-        // LRU sort: least recently used first — FIX-DRAINSHARE cross-track via subject|chapter fallback
         pool = [...pool].sort((a,b)=>{
           const ka = `${a.track}|${a.subject}|${a.chapter}`;
           const kb = `${b.track}|${b.subject}|${b.chapter}`;
@@ -3664,14 +3810,31 @@ export async function planScheduleAsync(input) {
         });
       }
       if (!pool.length) return null;
-      // D19: independent subject rotation hash extended: *2, but LRU takes precedence when pool>=3
       let idx = 0;
       if (pool.length >= 3) {
-        idx = 0; // LRU already sorted, pick least recent
+        idx = 0;
       } else {
         idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
       }
       let pick = pool[idx] || pool[pool.length-1];
+
+      // MAINT_PROBE per post-drain maintenance day
+      try {
+        if (track === 'class' && typeof maintProbeDiag !== 'undefined') {
+          // post-drain detection: class queue drained (no remaining) and date past some threshold, or simply any maintenance day with studied
+          const isPostDrain = (queues && queues['class'] && queues['class'].length === 0) || studied.length > 0;
+          if (isPostDrain) {
+            maintProbeDiag.push({
+              date,
+              poolSize,
+              eligibleSize,
+              pickedKey: `${pick.subject}|${pick.chapter}`,
+              prevDayKey: prevDayLastPickKey || null
+            });
+          }
+        }
+      } catch {}
+
       const resolveType = () => {
         if (forcedType) return forcedType;
         if (track === 'class') {
@@ -4372,9 +4535,10 @@ export async function planScheduleAsync(input) {
         }
       }
     }
-    // FIX-VARIETY D19: update prev day's last pick for avoidance
+    // FIX-VARIETY D19: update prev day's last pick for avoidance + FIX-FINAL3A D+1 all picks
     if (lastPickKeyToday) {
       prevDayLastPickKey = lastPickKeyToday;
+      try { prevDayPickedSet = new Set(dayChaptersUsed); } catch {}
     }
   }
 
@@ -4417,11 +4581,19 @@ export async function planScheduleAsync(input) {
           const cnt = dayTopicCounts.get(topic) || 0;
           if (cnt >= 2) return 'cap';
           let chapForCapRaw = String(topic || '');
-          const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-          if (parenMatch) chapForCapRaw = parenMatch[1].trim();
-          else {
-            const colonMatch = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-            if (colonMatch) chapForCapRaw = colonMatch[1].trim();
+          const colonMatchRaw = chapForCapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+          if (colonMatchRaw) {
+            chapForCapRaw = colonMatchRaw[1].trim();
+            if (/Qs|in 25 min/i.test(chapForCapRaw)) {
+              const parenForQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+              if (parenForQs) chapForCapRaw = parenForQs[1].trim();
+            }
+          } else {
+            const parenMatch = chapForCapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+            if (parenMatch) {
+              const inside = parenMatch[1].trim();
+              if (!/mixed practice|olympiad|exam/i.test(inside)) chapForCapRaw = inside;
+            }
           }
           const subjForCap = String(subject || '').trim();
           if (subjForCap && chapForCapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapForCapRaw)) {
@@ -4441,11 +4613,19 @@ export async function planScheduleAsync(input) {
           dayTopicCounts.set(topic, cnt + 1);
           {
             let chapRaw = String(topic || '');
-            const pm = chapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
-            if (pm) chapRaw = pm[1].trim();
-            else {
-              const cm = chapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
-              if (cm) chapRaw = cm[1].trim();
+            const colonRaw = chapRaw.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+            if (colonRaw) {
+              chapRaw = colonRaw[1].trim();
+              if (/Qs|in 25 min/i.test(chapRaw)) {
+                const parenForQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+                if (parenForQs) chapRaw = parenForQs[1].trim();
+              }
+            } else {
+              const pm = chapRaw.match(/\(\s*([^)]+?)\s*\)\s*$/);
+              if (pm) {
+                const inside = pm[1].trim();
+                if (!/mixed practice|olympiad|exam/i.test(inside)) chapRaw = inside;
+              }
             }
             const subj = String(subject || '').trim();
             if (subj && chapRaw && !/^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(chapRaw)) {
@@ -4485,8 +4665,33 @@ export async function planScheduleAsync(input) {
         };
 
         const fillerForTrackTail = (track, blockCounter, forcedType) => {
-          let pool = ((studiedByTrack[track]||[]).slice());
-          if (!pool.length) pool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          // FIX-FINAL3A: dedup, hard 2/day, D+1 exclusion
+          let rawPool = ((studiedByTrack[track]||[]).slice());
+          if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          const seenTail = new Set();
+          const dedupedTail = [];
+          for (const it of rawPool) {
+            const k = `${it.subject}|${it.chapter}`;
+            if (!seenTail.has(k)) { seenTail.add(k); dedupedTail.push(it); }
+          }
+          let pool = dedupedTail;
+          const poolSizeTail = pool.length;
+          if (!pool.length) return null;
+          // D+1 exclusion
+          if (prevDayPickedSet && prevDayPickedSet.size > 0) {
+            const filtered = pool.filter(s => !prevDayPickedSet.has(`${s.subject}|${s.chapter}`));
+            if (filtered.length >= 1) pool = filtered;
+          } else if (prevDayLastPickKey) {
+            const filtered = pool.filter(s => `${s.subject}|${s.chapter}` !== prevDayLastPickKey);
+            if (filtered.length >= 1) pool = filtered;
+          }
+          // hard 2/day
+          {
+            const notCapped = pool.filter(s => (dayChapterCounts.get(`${s.subject}|${s.chapter}`) || 0) < 2);
+            if (!notCapped.length) return null;
+            pool = notCapped;
+          }
+          const eligibleSizeTail = pool.length;
           if (!pool.length) return null;
           // FIX-DRAINSHARE: avoid prev day's last pick when any alternative exists
           if (prevDayLastPickKey) {
@@ -4722,6 +4927,7 @@ export async function planScheduleAsync(input) {
   const coverage = {
     STRETCH: stretchDiag,
     DRAINSHARE: drainshareDiag,
+    MAINT_PROBE: maintProbeDiag,
     priorityOrder: allocatable,
     timeSplit: prio.timeSplit,
     finalClass: finalClassNum,
