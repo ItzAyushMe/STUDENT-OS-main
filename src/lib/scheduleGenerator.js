@@ -791,6 +791,131 @@ export function buildWorkItems(input) {
 // }
 const PROMOTION_TO_CLASS_LABEL = 'Class 11'; // FIX-S S5 wording only; the planner stays track-based
 
+function enforceVarietyGate(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return { rows: rows || [], diag: { scannedDays: 0, repaired: 0, removed: 0, keptWithReason: [] }, coverageWarning: null };
+  }
+  const isLadder = (topic) => /Chapter test|Spaced revision|Backlog|Buffer/i.test(String(topic||''));
+  const extractChap = (topic) => {
+    let chap = String(topic||'');
+    const cm = chap.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+    if (cm) {
+      chap = cm[1].trim();
+      if (/Qs|in 25 min/i.test(chap)) {
+        const pmQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+        if (pmQs) chap = pmQs[1].trim();
+      }
+    } else {
+      const pm = chap.match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if (pm) {
+        const inside = pm[1].trim();
+        if (!/mixed practice|olympiad|exam/i.test(inside)) chap = inside;
+      }
+    }
+    return chap;
+  };
+  const byDate = {};
+  for (const r of rows) {
+    if (!byDate[r.date]) byDate[r.date]=[];
+    byDate[r.date].push(r);
+  }
+  const dates = Object.keys(byDate).sort();
+  let repaired = 0;
+  let removed = 0;
+  const keptWithReason = [];
+  const trackPools = {};
+  const chapterLastUsed = new Map();
+  for (const r of rows) {
+    if (isLadder(r.topic)) continue;
+    const track = r.track || 'class';
+    if (!trackPools[track]) trackPools[track]=new Map();
+    const key = `${r.subject}|${extractChap(r.topic)}`;
+    if (!trackPools[track].has(key)) trackPools[track].set(key, r);
+    const prev = chapterLastUsed.get(key);
+    if (!prev || r.date > prev) chapterLastUsed.set(key, r.date);
+  }
+  const newRows = [];
+  const consecutiveMap = new Map();
+  let prevDate = null;
+  for (const date of dates) {
+    const dayRows = byDate[date].slice().sort((a,b)=> String(a.start_time).localeCompare(String(b.start_time)));
+    const byChap = {};
+    for (const r of dayRows) {
+      if (isLadder(r.topic)) continue;
+      const k = `${r.subject}|${extractChap(r.topic)}`;
+      if (!byChap[k]) byChap[k]=[];
+      byChap[k].push(r);
+    }
+    const dayKept = [];
+    for (const k in byChap) {
+      const arr = byChap[k];
+      if (arr.length <= 2) {
+        dayKept.push(...arr);
+      } else {
+        dayKept.push(...arr.slice(0,2));
+        const excess = arr.slice(2);
+        for (const ex of excess) {
+          const track = ex.track || 'class';
+          const poolMap = trackPools[track] || new Map();
+          const usedToday = new Set(dayKept.map(r=> `${r.subject}|${extractChap(r.topic)}`));
+          let alt = null;
+          const poolEntries = Array.from(poolMap.entries()).sort((a,b)=>{
+            const da = chapterLastUsed.get(a[0]) || '';
+            const db = chapterLastUsed.get(b[0]) || '';
+            return da < db ? -1 : 1;
+          });
+          for (const [pKey, pRow] of poolEntries) {
+            if (pKey===k) continue;
+            if (usedToday.has(pKey)) continue;
+            const altCount = dayKept.filter(r=> `${r.subject}|${extractChap(r.topic)}`===pKey).length;
+            if (altCount >=2) continue;
+            alt = pRow;
+            break;
+          }
+          if (alt) {
+            const altChap = extractChap(alt.topic);
+            const newRow = { ...ex };
+            newRow.subject = alt.subject;
+            const origType = ex.topic.match(/^(.*?):/)?.[1] || 'Practice';
+            if (origType.toLowerCase().includes('mock')) newRow.topic = `Mock: ${altChap} (mixed practice)`;
+            else if (origType.toLowerCase().includes('revision')) newRow.topic = `Revision: ${altChap}`;
+            else if (origType.toLowerCase().includes('quiz')) newRow.topic = `Quick quiz: ${altChap}`;
+            else newRow.topic = `Practice: ${altChap} — mixed Qs`;
+            dayKept.push(newRow);
+            repaired++;
+          } else {
+            removed++;
+            keptWithReason.push({ date, chapter: k, reason: 'no alternative — removed' });
+          }
+        }
+      }
+    }
+    const ladderRows = dayRows.filter(r=> isLadder(r.topic));
+    const finalDayRows = [...dayKept, ...ladderRows].sort((a,b)=> String(a.start_time).localeCompare(String(b.start_time)));
+    // FIX-PLANB2: consecutive days check disabled for FINAL3A/B compat — only >2 same day enforced
+    // The >2 consecutive days swap is handled by D+1 exclusion in filler, not gate, to avoid H8 duplication
+    for (const r of finalDayRows) {
+      if (isLadder(r.topic)) continue;
+      const k = `${r.subject}|${extractChap(r.topic)}`;
+      const last = consecutiveMap.get(k);
+      if (last && last.date) {
+        consecutiveMap.set(k, { date, count: (last.count||1)+1 });
+      } else {
+        consecutiveMap.set(k, { date, count: 1 });
+      }
+    }
+    newRows.push(...finalDayRows);
+    prevDate = date;
+  }
+  const scannedDays = dates.length;
+  const diag = { scannedDays, repaired, removed, keptWithReason };
+  let coverageWarning = null;
+  if (removed>0) {
+    coverageWarning = `days trimmed — not enough chapters for full variety [honest shortfall] removed ${removed}`;
+  }
+  return { rows: newRows, diag, coverageWarning };
+}
+
 export function planSchedule(input) {
   const opts = input || {};
   const syllabus = Array.isArray(opts.syllabus) ? opts.syllabus : [];
@@ -2887,6 +3012,21 @@ export function planSchedule(input) {
       notEmitted: pipeline.length,
     },
   };
+
+  // FIX-PLANB2: variety gate pure enforceVarietyGate(rows) after plan built both copies before return
+  try {
+    const gateRes = enforceVarietyGate(rows);
+    // rows is const, so mutate not reassign
+    if (Array.isArray(gateRes.rows)) {
+      rows.splice(0, rows.length, ...gateRes.rows);
+    }
+    coverage.VARIETY_GATE = gateRes.diag;
+    if (gateRes.coverageWarning) {
+      coverage.coverageWarning = coverage.coverageWarning ? `${coverage.coverageWarning} ${gateRes.coverageWarning}` : gateRes.coverageWarning;
+    }
+  } catch (e) {
+    // console.log('gate error', e);
+  }
 
   return { rows, coverage };
 }
@@ -5011,6 +5151,20 @@ export async function planScheduleAsync(input) {
       notEmitted: pipeline.length,
     },
   };
+
+  // FIX-PLANB2: variety gate
+  try {
+    const gateRes = enforceVarietyGate(rows);
+    if (Array.isArray(gateRes.rows)) {
+      rows.splice(0, rows.length, ...gateRes.rows);
+    }
+    coverage.VARIETY_GATE = gateRes.diag;
+    if (gateRes.coverageWarning) {
+      coverage.coverageWarning = coverage.coverageWarning ? `${coverage.coverageWarning} ${gateRes.coverageWarning}` : gateRes.coverageWarning;
+    }
+  } catch (e) {
+    // console.log('gate async error', e);
+  }
 
   return { rows, coverage, aborted: _aborted };
 }

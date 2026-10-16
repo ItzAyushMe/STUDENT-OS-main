@@ -61,6 +61,9 @@ export function ScheduleScreen({ navigation, route }) {
   // FIX-FINAL3B: resume-save state
   const [resumeInfo, setResumeInfo] = useState(null); // { rows, total, stored, missingRows }
   const [resumeBusy, setResumeBusy] = useState(false);
+  // FIX-PLANB2: save stash state
+  const [stashInfo, setStashInfo] = useState(null); // { rows, total, stored }
+  const [stashBusy, setStashBusy] = useState(false);
   const autoRolledRef = useRef(false);
   const genRunRef = useRef(0);
   const genBusyRef = useRef(false);
@@ -180,6 +183,33 @@ export function ScheduleScreen({ navigation, route }) {
       }
     })();
   }, [sessions, loading, profile?.school_exams, profile?.daily_study_hours]);
+
+  // FIX-PLANB2: on mount if stash exists banner "Unfinished plan save (X/Y) — Finish saving / Discard" survives kill
+  useEffect(() => {
+    (async () => {
+      try {
+        const { readStash, getStashCounts } = await import('../../lib/saveStash');
+        const stashed = await readStash();
+        if (Array.isArray(stashed) && stashed.length) {
+          // compute stored vs total by listing current
+          let storedList = [];
+          try {
+            const allDates = stashed.map(r=>r.date).filter(Boolean).sort();
+            const first = allDates[0], last = allDates[allDates.length-1];
+            if (first && last) {
+              storedList = await db.list('schedule', {
+                eq: { user_id: profile?.id, status: 'pending' },
+                gte: { date: first },
+                lte: { date: last },
+              });
+            }
+          } catch {}
+          const counts = getStashCounts ? getStashCounts(stashed, storedList) : { total: stashed.length, stored: Array.isArray(storedList)?storedList.length:0 };
+          setStashInfo({ rows: stashed, total: counts.total, stored: counts.stored });
+        }
+      } catch {}
+    })();
+  }, []);
 
   // Reset guard when screen refocuses (so next visit can auto-roll again)
   useFocusEffect(useCallback(() => {
@@ -497,6 +527,12 @@ export function ScheduleScreen({ navigation, route }) {
       for (const r of rows) {
         if (!r.id) r.id = uuid();
       }
+      // FIX-PLANB2: save stash before cloud save stash full rows JSON AsyncStorage key planb_save_stash
+      try {
+        const { stashSave } = await import('../../lib/saveStash');
+        await stashSave(rows);
+        setStashInfo({ rows, total: rows.length, stored: 0 });
+      } catch {}
       {
         const seen = new Set();
         for (const r of rows) {
@@ -569,7 +605,8 @@ export function ScheduleScreen({ navigation, route }) {
         };
 
         const onProgress = (completed, total) => {
-          tick(`Saving schedule (${completed}/${total})…`);
+          const pct = total ? Math.round((completed/total)*100) : 0;
+          tick(`Saving… chunk ${completed}/${total} (${pct}%)`);
         };
 
         let savedCount = 0;
@@ -579,7 +616,7 @@ export function ScheduleScreen({ navigation, route }) {
         // FIX-VERIFY3: receipt-based + range-count sentinel for chunk1
         // FIX-VERIFY5: timeline chunkReceipt + chunkWindowCount recorded in insertAndVerifyReceipt
         if (totalChunks >= 1) {
-          tick(`Saving schedule (1/${totalChunks})…`);
+          tick(`Saving… chunk 1/${totalChunks} (${Math.round((1/totalChunks)*100)}%)`);
           await yieldPaint();
           if (isStale()) return;
           try {
@@ -1003,6 +1040,12 @@ export function ScheduleScreen({ navigation, route }) {
       } catch (e) {
         console.log('🩺 diagnostics build failed', e?.message);
       }
+      // FIX-PLANB2: clear after verify success
+      try {
+        const { clearStash } = await import('../../lib/saveStash');
+        await clearStash();
+        setStashInfo(null);
+      } catch {}
       setGenOpen(false);
       setRegenChoiceOpen(false);
       clearWatchdog();
@@ -1050,6 +1093,7 @@ export function ScheduleScreen({ navigation, route }) {
         const storedCount = Array.isArray(storedList) ? storedList.length : 0;
         if (storedCount >= rowsToResume.length) {
           // success
+          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); setStashInfo(null); } catch {}
           setResumeInfo(null);
           await load();
           setGenOpen(false);
@@ -1058,6 +1102,7 @@ export function ScheduleScreen({ navigation, route }) {
         }
         const missingRows = getMissingRows(rowsToResume, storedList);
         if (!missingRows.length) {
+          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); setStashInfo(null); } catch {}
           setResumeInfo(null);
           await load();
           return;
@@ -1093,6 +1138,73 @@ export function ScheduleScreen({ navigation, route }) {
     } finally {
       setResumeBusy(false);
     }
+  };
+
+  // FIX-PLANB2: stash finish saving — app died mid-save? next open asks "Finish saving?" resume missing only no re-gen no delete survives kill
+  const handleStashFinish = async () => {
+    if (!stashInfo || !stashInfo.rows || !stashInfo.rows.length) return;
+    setStashBusy(true);
+    try {
+      const rowsToResume = stashInfo.rows;
+      const allDates = rowsToResume.map(r=>r.date).filter(Boolean).sort();
+      const first = allDates[0], last = allDates[allDates.length-1];
+      if (!first || !last) return;
+      let iter=0;
+      while (iter<5) {
+        iter++;
+        let storedList=[];
+        try {
+          storedList = await db.list('schedule', {
+            eq: { user_id: profile.id, status: 'pending' },
+            gte: { date: first },
+            lte: { date: last },
+          });
+        } catch {}
+        const storedCount = Array.isArray(storedList)?storedList.length:0;
+        if (storedCount >= rowsToResume.length) {
+          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
+          setStashInfo(null);
+          await load();
+          return;
+        }
+        const missing = getMissingRows(rowsToResume, storedList);
+        if (!missing.length) {
+          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
+          setStashInfo(null);
+          await load();
+          return;
+        }
+        const missChunks = chunkRows(missing, 250);
+        for (const ch of missChunks) {
+          try { await db.insertMany('schedule', ch); } catch {}
+        }
+      }
+      // final check
+      let finalList=[];
+      try {
+        finalList = await db.list('schedule', {
+          eq: { user_id: profile.id, status: 'pending' },
+          gte: { date: first },
+          lte: { date: last },
+        });
+      } catch {}
+      const finalCount = Array.isArray(finalList)?finalList.length:0;
+      if (finalCount >= rowsToResume.length) {
+        try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
+        setStashInfo(null);
+        await load();
+      } else {
+        const stillMissing = getMissingRows(rowsToResume, finalList);
+        setStashInfo({ rows: rowsToResume, total: rowsToResume.length, stored: finalCount, missingRows: stillMissing });
+      }
+    } finally {
+      setStashBusy(false);
+    }
+  };
+
+  const handleStashDiscard = async () => {
+    try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
+    setStashInfo(null);
   };
 
   // AI-assisted catch-up: heuristic moves first, then Professor Byte
@@ -1509,6 +1621,20 @@ export function ScheduleScreen({ navigation, route }) {
         {genError ? (
           <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, padding: 8, marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#B91C1C' }}>{genError}</Text>
+          </View>
+        ) : null}
+        {stashInfo ? (
+          <View style={{ backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#FCD34D', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#92400E', marginBottom: 6 }}>
+              Unfinished plan save ({stashInfo.stored || 0}/{stashInfo.total || 0}) — Finish saving / Discard
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#92400E', marginBottom: 10, lineHeight: 16 }}>
+              App died mid-save? Resume missing only, no re-gen, no delete, survives kill. Tap Finish saving to complete.
+            </Text>
+            <View style={{ flexDirection: 'row' }}>
+              <Button title={stashBusy ? 'Finishing…' : 'Finish saving'} size="sm" mode="light" loading={stashBusy} style={{ flex: 1, marginRight: 8 }} onPress={handleStashFinish} />
+              <Button title="Discard" size="sm" variant="secondary" mode="light" style={{ flex: 1 }} onPress={handleStashDiscard} />
+            </View>
           </View>
         ) : null}
         {resumeInfo ? (
