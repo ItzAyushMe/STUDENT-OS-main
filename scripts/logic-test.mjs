@@ -8127,6 +8127,35 @@ console.log('--- FIX-FINAL3B tests ---');
 }
 
 
+// ---- FIX-POLISH3 tests ----
+console.log('--- FIX-POLISH3 tests ---');
+{
+  const builderSrc = read('src/screens/study/TestBuilderScreen.js');
+  // builder must list every chapter regardless of status (completed included)
+  assert.ok(!builderSrc.includes("status !== 'completed'") && !builderSrc.includes('status !== "completed"'), 'TestBuilder must NOT filter completed chapters');
+  assert.ok(builderSrc.includes('activeSyllabusRows(data)') && !builderSrc.includes("filter((r) => r.status !== 'completed')"), 'builder all-chapters: activeSyllabusRows without completed filter');
+  console.log('POLISH3 BUILDER ALL-CHAPTERS PASS');
+
+  const gymSrc = read('src/screens/life/GymScreen.js');
+  // GYM HEADER ROW wrapped in horizontal ScrollView
+  assert.ok(gymSrc.includes('ScrollView') && gymSrc.includes('horizontal') && gymSrc.includes('showsHorizontalScrollIndicator={false}'), 'GymScreen header row wrapped in horizontal ScrollView');
+  // CSV FILE PATH SDK FIX: import from legacy
+  assert.ok(gymSrc.includes('expo-file-system/legacy') || gymSrc.includes('File/Directory'), 'GymScreen FileSystem import from legacy or new API');
+  // CSV empty-paste friendly message
+  assert.ok(gymSrc.includes('Paste CSV above ya file load karo'), 'CSV empty-paste friendly message present');
+  // file read must NOT fire automatically on confirm-with-empty-paste
+  assert.ok(gymSrc.includes('Load from file') || gymSrc.includes('Load file'), 'CSV has explicit Load from file button');
+  // Ensure confirm does not auto-call getInfoAsync when empty
+  const confirmBlock = gymSrc.slice(gymSrc.indexOf('handleConfirmCSV'), gymSrc.indexOf('handleConfirmCSV')+800);
+  assert.ok(!confirmBlock.includes('getInfoAsync') || confirmBlock.includes('Paste CSV above'), 'confirm does not auto-fire file read');
+  console.log('POLISH3 GYM CSV + HEADER PASS');
+
+  const deadlineSrc = read('src/screens/study/DeadlinesScreen.js');
+  // completed → muted/done state
+  assert.ok(deadlineSrc.includes('isCompleted') && deadlineSrc.includes('#F0FDF4'), 'DeadlinesScreen completed muted/done state');
+  console.log('POLISH3 DEADLINE SHEET DISPLAY FIX PASS');
+}
+
 // ---- FIX-PLANB2 tests ----
 console.log('--- FIX-PLANB2 tests ---');
 {

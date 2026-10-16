@@ -171,8 +171,9 @@ export function TestBuilderScreen({ navigation }) {
     if (!profile?.id) return;
     try {
       const data = await db.list('syllabus', { eq: { user_id: profile.id } });
-      // FIX-S S5: a test paper is built from the ACTIVE map — archived chapters out
-      setRows(activeSyllabusRows(data).filter((r) => r.status !== 'completed'));
+      // FIX-POLISH3: builder all-chapters — ALWAYS list every syllabus chapter regardless of status (completed included)
+      // Previously filtered completed out, now includes all active (archived still out per S5), optionally tag completed visually
+      setRows(activeSyllabusRows(data));
     } catch (e) {
       console.warn('[F6] TestBuilder load failed', e?.message);
       setError(e?.message?.includes('Session expired') ? 'Session expired — please login again' : 'Syllabus load nahi ho paya — dobara try karo');
@@ -417,7 +418,7 @@ export function TestBuilderScreen({ navigation }) {
           {shownRows.map((r) => (
             <Chip
               key={r.id}
-              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}`}
+              label={`${picked.includes(r.id) ? '✓ ' : ''}${r.chapter}${r.status === 'completed' ? ' ✅' : ''}`}
               mode="light"
               selected={picked.includes(r.id)}
               onPress={() => toggleChapter(r.id)}

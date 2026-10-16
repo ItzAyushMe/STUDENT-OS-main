@@ -5,7 +5,7 @@ import { Pressable, Text, TextInput, View, useWindowDimensions, ScrollView } fro
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useAuth } from '../../context/AuthContext';
 import { useGame } from '../../context/GameContext';
 import { Screen } from '../../components/ui/Screen';
@@ -480,6 +480,10 @@ export function GymScreen({ navigation }) {
   };
 
   const handleConfirmCSV = async () => {
+    if (!csvText.trim() && (!csvPreview || !csvPreview.rows?.length)) {
+      infoAlert('CSV empty', 'Paste CSV above ya file load karo');
+      return;
+    }
     if (!csvPreview || !csvPreview.rows?.length) { infoAlert('CSV empty', 'Pehle valid CSV parse karo'); return; }
     try {
       // add to custom_exercises
@@ -634,16 +638,18 @@ export function GymScreen({ navigation }) {
         </View>
       </Card>
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-        <Chip label="🏋️ Split Mode" selected={mode==='split'} onPress={() => setMode('split')} mode="light" />
-        <Chip label="📋 Classic Plans" selected={mode==='classic'} onPress={() => setMode('classic')} mode="light" />
-        <Pressable onPress={() => { setWizardOpen(true); setWizardStep(1); }} style={{ marginLeft: 8, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
-          <Ionicons name="settings-outline" size={16} color="#6D28D9" />
-        </Pressable>
-        <Pressable onPress={() => setCsvOpen(true)} style={{ marginLeft: 8, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7 }}>
-          <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#1D4ED8' }}>Import CSV</Text>
-        </Pressable>
-      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Chip label="🏋️ Split Mode" selected={mode==='split'} onPress={() => setMode('split')} mode="light" />
+          <Chip label="📋 Classic Plans" selected={mode==='classic'} onPress={() => setMode('classic')} mode="light" />
+          <Pressable onPress={() => { setWizardOpen(true); setWizardStep(1); }} style={{ marginLeft: 8, backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 10, padding: 7 }}>
+            <Ionicons name="settings-outline" size={16} color="#6D28D9" />
+          </Pressable>
+          <Pressable onPress={() => setCsvOpen(true)} style={{ marginLeft: 8, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 11, color: '#1D4ED8' }}>Import CSV</Text>
+          </Pressable>
+        </View>
+      </ScrollView>
 
       {mode === 'split' && gymSplit ? (
         <>

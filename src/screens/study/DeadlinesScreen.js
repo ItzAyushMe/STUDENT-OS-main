@@ -255,47 +255,48 @@ function SummaryCard({ label, value, color, icon }) {
 }
 
 function MissionRow({ row, today, onEdit, onOpen }) {
+  const isCompleted = row.status === 'completed';
   const daysLeft = row.deadline ? daysBetween(today, row.deadline) : null;
-  const late = daysLeft != null && daysLeft < 0;
-  const soon = daysLeft != null && daysLeft >= 0 && daysLeft <= 3;
+  const late = !isCompleted && daysLeft != null && daysLeft < 0;
+  const soon = !isCompleted && daysLeft != null && daysLeft >= 0 && daysLeft <= 3;
   return (
     <Pressable
       onPress={onOpen}
       style={({ pressed }) => ({
-        backgroundColor: '#FFFFFF',
+        backgroundColor: isCompleted ? '#F0FDF4' : '#FFFFFF',
         borderWidth: 1,
-        borderColor: late ? '#FECACA' : '#E2E8F0',
+        borderColor: isCompleted ? '#BBF7D0' : late ? '#FECACA' : '#E2E8F0',
         borderRadius: radius.md,
         padding: 11,
         marginBottom: 8,
         flexDirection: 'row',
         alignItems: 'center',
-        opacity: pressed ? 0.7 : 1,
+        opacity: pressed ? 0.7 : isCompleted ? 0.8 : 1,
       })}
     >
       <View style={{ flex: 1 }}>
-        <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: '#1E293B' }}>
+        <Text numberOfLines={1} style={{ fontFamily: fonts.bodyMedium, fontSize: 13.5, color: isCompleted ? '#166534' : '#1E293B' }}>
           {row.chapter}
         </Text>
-        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: '#64748B', marginTop: 2 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 11, color: isCompleted ? '#15803D' : '#64748B', marginTop: 2 }}>
           {row.subject}
         </Text>
-        <ProgressBar progress={(row.progress_percent || 0) / 100} mode="light" height={5} style={{ marginTop: 7, borderWidth: 0, backgroundColor: '#F1F5F9' }} color="#0891B2" />
+        <ProgressBar progress={(row.progress_percent || 0) / 100} mode="light" height={5} style={{ marginTop: 7, borderWidth: 0, backgroundColor: isCompleted ? '#DCFCE7' : '#F1F5F9' }} color={isCompleted ? '#10B981' : '#0891B2'} />
       </View>
       <Pressable onPress={onEdit} hitSlop={8} style={{ alignItems: 'flex-end', marginLeft: 10 }}>
         <Text
           style={{
             fontFamily: fonts.bodySemiBold,
             fontSize: 12,
-            color: late ? '#DC2626' : soon ? '#D97706' : '#64748B',
+            color: isCompleted ? '#10B981' : late ? '#DC2626' : soon ? '#D97706' : '#64748B',
           }}
         >
-          {row.deadline ? (late ? `${Math.abs(daysLeft)}d late` : daysLeft === 0 ? 'Today!' : `${daysLeft}d left`) : 'No date'}
+          {isCompleted ? 'Completed' : row.deadline ? (late ? `${Math.abs(daysLeft)}d late` : daysLeft === 0 ? 'Today!' : `${daysLeft}d left`) : 'No date'}
         </Text>
-        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 2 }}>
-          {row.deadline || 'tap to set'}
+        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: isCompleted ? '#6EE7B7' : '#94A3B8', marginTop: 2 }}>
+          {isCompleted ? (row.deadline ? `was ${row.deadline}` : 'done') : row.deadline || 'tap to set'}
         </Text>
-        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: '#94A3B8', marginTop: 2 }}>
+        <Text style={{ fontFamily: fonts.body, fontSize: 10.5, color: isCompleted ? '#10B981' : '#94A3B8', marginTop: 2 }}>
           {row.status === 'completed' ? '✅ done' : `${row.progress_percent || 0}%`}
         </Text>
       </Pressable>
