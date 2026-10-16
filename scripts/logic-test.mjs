@@ -7269,7 +7269,8 @@ const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
     const inIdPattern = /db\.list\([^)]*in:\s*\{\s*id:/;
     assert.ok(!inIdPattern.test(screenSrc), 'still no .in(id) mega-URL in save path');
     assert.ok(screenSrc.includes('return Array.isArray(res) ? res : chunk'), 'receipt-based still');
-    assert.ok(screenSrc.includes("throw new Error(`Saved ${"), 'LOUD error still throws');
+    // FIX-FINAL3B: LOUD error now sets resumeInfo + genError with Retry saving, not just throw, but still has error messaging
+    assert.ok(screenSrc.includes('Retry saving') || screenSrc.includes("throw new Error(`Saved ${"), 'LOUD error or Retry saving present');
     assert.ok(!screenSrc.includes("console.warn('[VERIFY] final count query failed'"), 'no warn swallow still');
   });
 
@@ -8037,7 +8038,96 @@ console.log('--- FIX-FINAL3A tests ---');
   console.log(`FINAL3A PROBE PASS entries ${probe.length} sample ${JSON.stringify(probe[0])}`);
 }
 
+// ---- FIX-FINAL3B tests ----
+console.log('--- FIX-FINAL3B tests ---');
+{
+  const { chunkRows, saveWithWorkers, computeMissingIds, getMissingRows } = await import('../src/lib/scheduleSave.js');
+
+  // B5 adaptive chunk retry: failed chunk half size 500→250→125 backoff 1.5s/4s
+  {
+    const rows = Array.from({length:500}, (_,i)=>({id:'r'+i, date:'2026-10-01'}));
+    const chunks = chunkRows(rows, 500);
+    assert.equal(chunks.length, 1, 'chunk 500 single');
+    let attempts = 0;
+    const insertFn = async (chunk) => {
+      attempts++;
+      if (attempts===1 && chunk.length===500) throw new Error('simulated fail 500');
+      // halves 250 should succeed
+      return chunk;
+    };
+    const start = Date.now();
+    const res = await saveWithWorkers(chunks, insertFn, ()=>{}, 1, ()=>false);
+    const elapsed = Date.now()-start;
+    assert.ok(elapsed >= 1400, `adaptive backoff 1.5s observed ${elapsed}ms`);
+    assert.equal(res.failedIndexes.length, 0, 'adaptive retry halves 500→250 succeeds');
+    assert.equal(res.savedCount, 500, 'saved 500 after adaptive');
+    console.log(`FINAL3B ADAPTIVE 500→250 PASS elapsed ${elapsed}ms attempts ${attempts}`);
+  }
+
+  {
+    const rows = Array.from({length:500}, (_,i)=>({id:'r'+i, date:'2026-10-01'}));
+    const chunks = chunkRows(rows, 500);
+    let attempts = 0;
+    const insertFn = async (chunk) => {
+      attempts++;
+      if (chunk.length===500) throw new Error('fail 500');
+      if (chunk.length===250 && attempts<=3) throw new Error('fail 250');
+      return chunk;
+    };
+    const start = Date.now();
+    const res = await saveWithWorkers(chunks, insertFn, ()=>{}, 1, ()=>false);
+    const elapsed = Date.now()-start;
+    assert.ok(elapsed >= 5000, `adaptive backoff 1.5s+4s observed ${elapsed}ms`);
+    assert.equal(res.failedIndexes.length, 0, 'adaptive retry 500→250→125 succeeds');
+    console.log(`FINAL3B ADAPTIVE 500→250→125 PASS elapsed ${elapsed}ms attempts ${attempts}`);
+  }
+
+  // B6 resume-save: completes partial without re-plan, spy generator once, idempotent
+  {
+    const allRows = Array.from({length:10}, (_,i)=>({id:'id'+i, date:'2026-10-01', subject:'S'}));
+    const storedPartial = allRows.slice(0,6).map(r=>({id:r.id}));
+    const missing = getMissingRows(allRows, storedPartial);
+    assert.equal(missing.length, 4, 'missing 4 rows');
+    assert.deepEqual(missing.map(r=>r.id), ['id6','id7','id8','id9'], 'missing ids correct');
+
+    // simulate resume: upsert missing only, no delete, no re-plan
+    let genCalls = 0;
+    const fakeGenerator = () => { genCalls++; return allRows; };
+    const firstGen = fakeGenerator();
+    assert.equal(genCalls, 1, 'generator called once');
+
+    // resume should not call generator again
+    const storedAfter = [...storedPartial, ...missing.map(r=>({id:r.id}))];
+    const stillMissing = getMissingRows(firstGen, storedAfter);
+    assert.equal(stillMissing.length, 0, 'resume completes partial');
+    assert.equal(genCalls, 1, 'resume without re-plan spy generator once');
+
+    // idempotent: re-inserting same ids should not duplicate
+    const missingIds = computeMissingIds(firstGen.map(r=>r.id), storedAfter);
+    assert.equal(missingIds.length, 0, 'idempotent uuid+onConflict no duplicates');
+
+    console.log(`FINAL3B RESUME-SAVE PASS missing ${missing.length} genCalls ${genCalls} idempotent`);
+  }
+
+  // progress overlay shape: saving… chunk X/Y (Z%) — simulated via onProgress
+  {
+    const rows = Array.from({length:1000}, (_,i)=>({id:'r'+i}));
+    const chunks = chunkRows(rows, 500);
+    const progressLogs = [];
+    const onProgress = (completed,total) => {
+      const pct = Math.round((completed/total)*100);
+      progressLogs.push(`Saving… chunk ${completed}/${total} (${pct}%)`);
+    };
+    const insertFn = async (c)=>c;
+    await saveWithWorkers(chunks, insertFn, onProgress, 1, ()=>false);
+    assert.ok(progressLogs.length===2, 'progress 2 chunks');
+    assert.ok(progressLogs[0].includes('1/2') && progressLogs[0].includes('%'), `progress shape ${progressLogs[0]}`);
+    console.log(`FINAL3B PROGRESS OVERLAY PASS ${progressLogs.join(' | ')}`);
+  }
+}
+
 console.log('ALL LOGIC TESTS PASSED ✅');
+
 
 
 

@@ -281,7 +281,20 @@ export function isRunStale(currentRun, myRun) {
   return currentRun !== myRun;
 }
 
-// Worker-pool save: runs insertFn(chunk) with concurrency, reports progress
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+export function getMissingRows(sentRows, storedRowsOrIds) {
+  if (!Array.isArray(sentRows) || !sentRows.length) return [];
+  const sentIds = sentRows.map((r) => r.id).filter(Boolean);
+  const missingIds = computeMissingIds(sentIds, storedRowsOrIds);
+  if (!missingIds.length) return [];
+  const missingSet = new Set(missingIds);
+  return sentRows.filter((r) => missingSet.has(r.id));
+}
+
+// Worker-pool save with adaptive chunk retry: 500→250→125 backoff 1.5s/4s
 // insertFn: async (chunk, index) => void
 // onProgress: (completed, total) => void
 // shouldAbort: () => boolean — if true, stops early
@@ -293,24 +306,62 @@ export async function saveWithWorkers(chunks, insertFn, onProgress, concurrency 
   const failedIndexes = [];
   let nextIdx = 0;
 
+  const adaptiveInsert = async (chunk, idx) => {
+    // try full chunk
+    try {
+      await insertFn(chunk, idx);
+      return { ok: true, saved: chunk.length };
+    } catch (e) {
+      // backoff 1.5s then try halves 500→250
+      await sleep(1500);
+      if (chunk.length > 250) {
+        try {
+          const mid = Math.ceil(chunk.length / 2);
+          const halves = [chunk.slice(0, mid), chunk.slice(mid)];
+          let totalHalfSaved = 0;
+          for (const half of halves) {
+            try {
+              await insertFn(half, idx);
+              totalHalfSaved += half.length;
+            } catch (eHalf) {
+              // backoff 4s then try quarters 250→125
+              await sleep(4000);
+              if (half.length > 125) {
+                const mid2 = Math.ceil(half.length / 2);
+                const quarters = [half.slice(0, mid2), half.slice(mid2)];
+                let quarterSaved = 0;
+                for (const q of quarters) {
+                  try {
+                    await insertFn(q, idx);
+                    quarterSaved += q.length;
+                  } catch (eQ) {
+                    throw eQ;
+                  }
+                }
+                totalHalfSaved += quarterSaved;
+              } else {
+                throw eHalf;
+              }
+            }
+          }
+          return { ok: true, saved: totalHalfSaved };
+        } catch (eFinal) {
+          // fall through to failed
+        }
+      }
+      return { ok: false, saved: 0 };
+    }
+  };
+
   const worker = async () => {
     while (true) {
       if (shouldAbort()) break;
       const cur = nextIdx++;
       if (cur >= total) break;
       const chunk = chunks[cur];
-      try {
-        await insertFn(chunk, cur);
-        savedCount += chunk.length;
-      } catch (e) {
-        // retry once
-        try {
-          await insertFn(chunk, cur);
-          savedCount += chunk.length;
-        } catch (e2) {
-          failedIndexes.push(cur);
-        }
-      }
+      const res = await adaptiveInsert(chunk, cur);
+      if (res.ok) savedCount += res.saved;
+      else failedIndexes.push(cur);
       completed += 1;
       if (typeof onProgress === 'function') {
         try { onProgress(completed, total); } catch {}
@@ -321,4 +372,9 @@ export async function saveWithWorkers(chunks, insertFn, onProgress, concurrency 
   const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
   await Promise.all(workers);
   return { savedCount, totalRows: chunks.reduce((a, c) => a + c.length, 0), failedIndexes, completed };
+}
+
+// Pure helper for resume-save: returns missing rows only, idempotent
+export function getMissingRowsForResume(sentRows, storedRows) {
+  return getMissingRows(sentRows, storedRows);
 }

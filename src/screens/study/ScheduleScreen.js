@@ -20,7 +20,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, generateScheduleAsync, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
-import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds } from '../../lib/scheduleSave';
+import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds, getMissingRows } from '../../lib/scheduleSave';
 import { uuid } from '../../lib/utils';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
@@ -58,6 +58,9 @@ export function ScheduleScreen({ navigation, route }) {
   const [coverageExpanded, setCoverageExpanded] = useState(false); // FIX-QA-UI
   const [genError, setGenError] = useState('');
   const [autoRollMsg, setAutoRollMsg] = useState('');
+  // FIX-FINAL3B: resume-save state
+  const [resumeInfo, setResumeInfo] = useState(null); // { rows, total, stored, missingRows }
+  const [resumeBusy, setResumeBusy] = useState(false);
   const autoRolledRef = useRef(false);
   const genRunRef = useRef(0);
   const genBusyRef = useRef(false);
@@ -840,7 +843,15 @@ export function ScheduleScreen({ navigation, route }) {
                   setDiagnostics(diag);
                   console.log('🩺 Plan diagnostics (final verify failed + repair)', diag);
                 } catch {}
-                throw new Error(`Saved ${diagFinalCount}/${rows.length} — tap Generate again.`);
+                // FIX-FINAL3B: resume-save — set resumeInfo instead of throwing, UI Retry saving
+                try {
+                  const missRows = getMissingRows(rows, diagReloaded || []);
+                  setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: missRows.length ? missRows : rows.slice(0, Math.max(0, rows.length - diagFinalCount)) });
+                } catch {
+                  setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: [] });
+                }
+                setGenError(`Saved ${diagFinalCount}/${rows.length} — tap Retry saving to complete missing only (idempotent).`);
+                return;
               }
             }
 
@@ -875,7 +886,15 @@ export function ScheduleScreen({ navigation, route }) {
                 setDiagnostics(diag);
                 console.log('🩺 Plan diagnostics (final verify failed)', diag);
               } catch {}
-              throw new Error(`Saved ${diagFinalCount}/${rows.length} — tap Generate again.`);
+              // FIX-FINAL3B: resume-save
+              try {
+                const missRows = getMissingRows(rows, diagReloaded || []);
+                setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: missRows.length ? missRows : rows.slice(0, Math.max(0, rows.length - diagFinalCount)) });
+              } catch {
+                setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: [] });
+              }
+              setGenError(`Saved ${diagFinalCount}/${rows.length} — tap Retry saving to complete missing only (idempotent).`);
+              return;
             }
           }
         }
@@ -913,7 +932,15 @@ export function ScheduleScreen({ navigation, route }) {
             setDiagnostics(diag);
             console.log('🩺 Plan diagnostics (partial save)', diag);
           } catch {}
-          throw new Error(`Schedule saved ${savedCount}/${rows.length} — tap Generate again to rebuild. Old completed days are kept. Failed chunks: ${failed.map((i)=>i+1).join(',')}`);
+          // FIX-FINAL3B: adaptive retry failed chunks, set resumeInfo for retry saving missing only
+          try {
+            const missRows = getMissingRows(rows, diagReloaded || []);
+            setResumeInfo({ rows, total: rows.length, stored: savedCount, missingRows: missRows.length ? missRows : rows.slice(savedCount) });
+          } catch {
+            setResumeInfo({ rows, total: rows.length, stored: savedCount, missingRows: [] });
+          }
+          setGenError(`Schedule saved ${savedCount}/${rows.length} — tap Retry saving to complete missing only. Failed chunks: ${failed.map((i)=>i+1).join(',')}`);
+          return;
         }
       }
 
@@ -990,6 +1017,81 @@ export function ScheduleScreen({ navigation, route }) {
         setGenProgress('');
         genBusyRef.current = false;
       }
+    }
+  };
+
+  // FIX-FINAL3B: resume-save — re-runs verify + upserts MISSING only, idempotent, no delete, no re-plan, loops until stored==total
+  const handleResumeSave = async () => {
+    if (!resumeInfo || !resumeInfo.rows || !resumeInfo.rows.length) return;
+    setResumeBusy(true);
+    setGenError('');
+    try {
+      const rowsToResume = resumeInfo.rows;
+      const allDates = rowsToResume.map((r) => r.date).filter(Boolean).sort();
+      const firstDate = allDates[0] || null;
+      const lastDate = allDates[allDates.length - 1] || null;
+      if (!firstDate || !lastDate) {
+        setGenError('No dates to resume');
+        return;
+      }
+      let iterations = 0;
+      const maxIter = 5;
+      while (iterations < maxIter) {
+        iterations++;
+        // verify current stored
+        let storedList = [];
+        try {
+          storedList = await db.list('schedule', {
+            eq: { user_id: profile.id, status: 'pending' },
+            gte: { date: firstDate },
+            lte: { date: lastDate },
+          });
+        } catch {}
+        const storedCount = Array.isArray(storedList) ? storedList.length : 0;
+        if (storedCount >= rowsToResume.length) {
+          // success
+          setResumeInfo(null);
+          await load();
+          setGenOpen(false);
+          setGenError('');
+          return;
+        }
+        const missingRows = getMissingRows(rowsToResume, storedList);
+        if (!missingRows.length) {
+          setResumeInfo(null);
+          await load();
+          return;
+        }
+        // upsert missing only — idempotent uuid+onConflict, no delete
+        const missChunks = chunkRows(missingRows, 250);
+        for (const chunk of missChunks) {
+          try {
+            await db.insertMany('schedule', chunk);
+          } catch {}
+        }
+        // loop again to verify
+      }
+      // after max iter, check again
+      try {
+        const finalList = await db.list('schedule', {
+          eq: { user_id: profile.id, status: 'pending' },
+          gte: { date: firstDate },
+          lte: { date: lastDate },
+        });
+        const finalCount = Array.isArray(finalList) ? finalList.length : 0;
+        if (finalCount >= rowsToResume.length) {
+          setResumeInfo(null);
+          await load();
+        } else {
+          const stillMissing = getMissingRows(rowsToResume, finalList);
+          setResumeInfo({ rows: rowsToResume, total: rowsToResume.length, stored: finalCount, missingRows: stillMissing });
+          setGenError(`Still saved ${finalCount}/${rowsToResume.length} after resume — tap Retry saving again.`);
+        }
+      } catch (e) {
+        setGenError(`Resume failed: ${e?.message || e}`);
+      }
+    } finally {
+      setResumeBusy(false);
     }
   };
 
@@ -1407,6 +1509,20 @@ export function ScheduleScreen({ navigation, route }) {
         {genError ? (
           <View style={{ backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 8, padding: 8, marginBottom: 10 }}>
             <Text style={{ fontFamily: fonts.bodyMedium, fontSize: 12, color: '#B91C1C' }}>{genError}</Text>
+          </View>
+        ) : null}
+        {resumeInfo ? (
+          <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <Text style={{ fontFamily: fonts.bodySemiBold, fontSize: 13, color: '#92400E', marginBottom: 6 }}>
+              Unfinished plan save ({resumeInfo.stored || 0}/{resumeInfo.total || 0}) — Retry saving
+            </Text>
+            <Text style={{ fontFamily: fonts.body, fontSize: 12, color: '#92400E', marginBottom: 10, lineHeight: 16 }}>
+              Some rows failed to save. Tap Retry saving to upsert only the missing rows (idempotent, no delete, no re-plan) until stored==total.
+            </Text>
+            <View style={{ flexDirection: 'row' }}>
+              <Button title={resumeBusy ? 'Retrying…' : 'Retry saving'} size="sm" mode="light" loading={resumeBusy} style={{ flex: 1, marginRight: 8 }} onPress={handleResumeSave} />
+              <Button title="Discard" size="sm" variant="secondary" mode="light" style={{ flex: 1 }} onPress={() => { setResumeInfo(null); setGenError(''); }} />
+            </View>
           </View>
         ) : null}
         <Button
