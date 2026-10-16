@@ -366,6 +366,127 @@ export function autoSetDeadlines(syllabusRows, examDate, dailyHours = 3, schoolE
   return deadlines;
 }
 
+export function deriveDeadlinesFromPlan(planRows, syllabusRows, fallbackDeadlines = {}) {
+  // FIX-DEADLINE: deadline(chapter) := LAST date that chapter is scheduled in the generated plan
+  // Pure helper: for each syllabus row, find all plan rows matching (subject|chapter via FINAL3A colon-first extraction)
+  // deadline = max(date). No plan match → keep existing deadline if any; else fallback value; else no deadline
+  // Also ensures no date carries >4 deadlines (PO-real pileup guard) by spreading ties
+  if (!Array.isArray(syllabusRows) || !syllabusRows.length) return {};
+  const extractChap = (topic) => {
+    let chap = String(topic||'');
+    const cm = chap.match(/:\s*(.+?)(?:\s*\(|—|$)/);
+    if (cm) {
+      chap = cm[1].trim();
+      if (/Qs|in 25 min/i.test(chap)) {
+        const pmQs = String(topic||'').match(/\(\s*([^)]+?)\s*\)\s*$/);
+        if (pmQs) chap = pmQs[1].trim();
+      }
+    } else {
+      const pm = chap.match(/\(\s*([^)]+?)\s*\)\s*$/);
+      if (pm) {
+        const inside = pm[1].trim();
+        if (!/mixed practice|olympiad|exam/i.test(inside)) chap = inside;
+      }
+    }
+    return chap;
+  };
+  // Build map of plan rows by subject|chapter key -> {maxDate, firstDate}
+  const planMaxDateByKey = new Map();
+  const planFirstDateByKey = new Map();
+  if (Array.isArray(planRows)) {
+    for (const pr of planRows) {
+      const subj = String(pr.subject||'').trim();
+      const chap = extractChap(pr.topic);
+      if (!subj || !chap) continue;
+      const key = `${subj}|${chap}`;
+      const existingMax = planMaxDateByKey.get(key);
+      if (!existingMax || pr.date > existingMax) planMaxDateByKey.set(key, pr.date);
+      const existingFirst = planFirstDateByKey.get(key);
+      if (!existingFirst || pr.date < existingFirst) planFirstDateByKey.set(key, pr.date);
+    }
+  }
+  const result = {};
+  const fallbackObj = (fallbackDeadlines && typeof fallbackDeadlines === 'object' && !Array.isArray(fallbackDeadlines)) ? fallbackDeadlines : {};
+
+  for (const syl of syllabusRows) {
+    const sylId = syl.id;
+    if (!sylId) continue;
+    const sylSubj = String(syl.subject||'').trim();
+    const sylChap = String(syl.chapter||'').trim();
+    const key = `${sylSubj}|${sylChap}`;
+    const maxDate = planMaxDateByKey.get(key);
+    if (maxDate) {
+      result[sylId] = maxDate;
+    } else {
+      if (syl.deadline) result[sylId] = syl.deadline;
+      else if (fallbackObj[sylId]) result[sylId] = fallbackObj[sylId];
+    }
+  }
+
+  // Pileup guard: no date >4 deadlines — ensure ≤4 per date by spreading across all plan dates
+  // Build all unique plan dates sorted
+  const allPlanDates = Array.isArray(planRows) ? [...new Set(planRows.map(r=>r.date).filter(Boolean))].sort() : [];
+  // Build date counts from current result
+  const byDate = {};
+  for (const id in result) {
+    const d = result[id];
+    if (!byDate[d]) byDate[d]=[];
+    byDate[d].push(id);
+  }
+  // If any date >4, redistribute using all plan dates as potential slots
+  // Sort syllabus ids by last date descending, then subject for tie ordering
+  const idsSorted = Object.keys(result).sort((a,b)=>{
+    const sylA = syllabusRows.find(r=>r.id===a);
+    const sylB = syllabusRows.find(r=>r.id===b);
+    const lastA = planMaxDateByKey.get(`${sylA?.subject}|${sylA?.chapter}`) || result[a];
+    const lastB = planMaxDateByKey.get(`${sylB?.subject}|${sylB?.chapter}`) || result[b];
+    if (lastA !== lastB) return lastB.localeCompare(lastA);
+    return String(sylA?.subject||'').localeCompare(String(sylB?.subject||''));
+  });
+
+  // Reset byDate counts and reassign with ≤4 guard
+  const newByDate = {};
+  const newResult = {};
+  for (const id of idsSorted) {
+    const syl = syllabusRows.find(r=>r.id===id);
+    const first = planFirstDateByKey.get(`${syl?.subject}|${syl?.chapter}`) || result[id];
+    const last = planMaxDateByKey.get(`${syl?.subject}|${syl?.chapter}`) || result[id];
+    // Find latest date within [first,last] that has <4, preferring last
+    let assigned = null;
+    // Try from last backwards to first
+    for (let i = allPlanDates.length-1; i>=0; i--) {
+      const cand = allPlanDates[i];
+      if (cand < first || cand > last) continue;
+      if ((newByDate[cand]||[]).length <4) {
+        assigned = cand;
+        break;
+      }
+    }
+    // If no slot within bounds, try any date with <4 (even outside bounds) to satisfy ≤4
+    if (!assigned) {
+      for (let i = allPlanDates.length-1; i>=0; i--) {
+        const cand = allPlanDates[i];
+        if ((newByDate[cand]||[]).length <4) {
+          assigned = cand;
+          break;
+        }
+      }
+    }
+    // If still no slot (all dates have 4), create new date by using last (will exceed 4 but we try to keep ≤4 by allowing overflow only if necessary)
+    // For PO-real 106 chapters across 176 days, we have enough capacity (176*4=704 slots) so should find slot
+    if (!assigned) assigned = last;
+    if (!newByDate[assigned]) newByDate[assigned]=[];
+    newByDate[assigned].push(id);
+    newResult[id]=assigned;
+  }
+  // Merge fallback for ids not in result (should be none)
+  for (const id in result) {
+    if (!newResult[id]) newResult[id]=result[id];
+  }
+
+  return newResult;
+}
+
 
 // ---------- FIX-H: planner constants ----------
 const MIN_BLOCK_MIN = 15;        // never emit a block shorter than this

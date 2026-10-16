@@ -19,7 +19,7 @@ import { Input } from '../../components/ui/Input';
 import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
-import { generateSchedule, generateScheduleAsync, autoRescheduleMissed, autoSetDeadlines, classSessionCutoff } from '../../lib/scheduleGenerator';
+import { generateSchedule, generateScheduleAsync, autoRescheduleMissed, autoSetDeadlines, deriveDeadlinesFromPlan, classSessionCutoff } from '../../lib/scheduleGenerator';
 import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds, getMissingRows } from '../../lib/scheduleSave';
 import { uuid } from '../../lib/utils';
 import { usePromotion } from '../../hooks/usePromotion';
@@ -981,22 +981,32 @@ export function ScheduleScreen({ navigation, route }) {
         }
       }
 
-      if (syllabus.length && Object.keys(computedDeadlines).length) {
-        tick('Saving deadlines…');
-        await yieldPaint();
-        if (isStale()) return;
-        const deadlineUpdates = Object.entries(computedDeadlines).map(([id, deadline]) => ({
-          id,
-          patch: { deadline },
-        }));
-        if (typeof db.updateMany === 'function') {
-          await db.updateMany('syllabus', deadlineUpdates);
-        } else {
-          const chunkSize = 20;
-          for (let i = 0; i < deadlineUpdates.length; i += chunkSize) {
-            if (isStale()) return;
-            const chunk = deadlineUpdates.slice(i, i + chunkSize);
-            await Promise.all(chunk.map(({ id, patch }) => db.update('syllabus', id, patch)));
+      if (syllabus.length) {
+        // FIX-DEADLINE: deadline(chapter) := LAST date that chapter is scheduled in the generated plan
+        // Derive from real plan, fallback to autoSetDeadlines for chapters absent from plan
+        let deadlinesToSave = {};
+        try {
+          deadlinesToSave = deriveDeadlinesFromPlan(rows, syllabus, computedDeadlines);
+        } catch {
+          deadlinesToSave = computedDeadlines;
+        }
+        if (Object.keys(deadlinesToSave).length) {
+          tick('Saving deadlines…');
+          await yieldPaint();
+          if (isStale()) return;
+          const deadlineUpdates = Object.entries(deadlinesToSave).map(([id, deadline]) => ({
+            id,
+            patch: { deadline },
+          }));
+          if (typeof db.updateMany === 'function') {
+            await db.updateMany('syllabus', deadlineUpdates);
+          } else {
+            const chunkSize = 20;
+            for (let i = 0; i < deadlineUpdates.length; i += chunkSize) {
+              if (isStale()) return;
+              const chunk = deadlineUpdates.slice(i, i + chunkSize);
+              await Promise.all(chunk.map(({ id, patch }) => db.update('syllabus', id, patch)));
+            }
           }
         }
       }
