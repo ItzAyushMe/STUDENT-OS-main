@@ -1984,23 +1984,23 @@ export function planSchedule(input) {
         if (notUsedToday.length >= 2) {
           pool = notUsedToday;
         }
-        pool = [...pool].sort((a,b)=>{
-          const ka = `${a.track}|${a.subject}|${a.chapter}`;
-          const kb = `${b.track}|${b.subject}|${b.chapter}`;
-          const ka2 = `${a.subject}|${a.chapter}`;
-          const kb2 = `${b.subject}|${b.chapter}`;
-          const da = chapterLastUsed.get(ka) || chapterLastUsed.get(ka2) || '';
-          const db = chapterLastUsed.get(kb) || chapterLastUsed.get(kb2) || '';
-          if (da !== db) return da < db ? -1 : 1;
-          return 0;
-        });
+        // FIX-TAILPOOL-2: no LRU sort, use seeded-shuffled order (existing _stableSeed infra), D1-D13 studied-only pool preserved
+      }
+      // FIX-TAILPOOL-2: seeded rotation mirroring stretch scheme
+      if (pool.length >= 2) {
+        try {
+          pool = seededShuffle(pool, _stableSeed + hashString(track) + 7919);
+        } catch {}
       }
       if (!pool.length) return null;
       let idx = 0;
-      if (pool.length >= 3) {
+      const _dayIdxMain = typeof d === 'number' ? d : 0;
+      if (pool.length < 2) {
         idx = 0;
+      } else if (pool.length <= 2) {
+        idx = _dayIdxMain % pool.length;
       } else {
-        idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
+        idx = (_dayIdxMain * 2 + blockCounter) % pool.length;
       }
       let pick = pool[idx] || pool[pool.length-1];
 
@@ -2092,12 +2092,14 @@ export function planSchedule(input) {
       const fillerTracks = priorityOrder.length ? priorityOrder : allocatable;
       const varietyTypes = ['mock', 'revision', 'practice', 'quiz'];
       const getVarietyType = (counter, seq) => {
-        let t = varietyTypes[counter % varietyTypes.length];
+        // FIX-TAILPOOL-2: include day index for rotation to avoid identical consecutive days
+        const _dIdx = typeof d === 'number' ? d : 0;
+        let t = varietyTypes[(counter + _dIdx) % varietyTypes.length];
         // (a) never >2 consecutive same type
         if (seq.length >= 2 && seq[seq.length-1] === t && seq[seq.length-2] === t) {
           // rotate to next type that breaks streak
           for (let k = 1; k < varietyTypes.length; k++) {
-            const alt = varietyTypes[(counter + k) % varietyTypes.length];
+            const alt = varietyTypes[(counter + _dIdx + k) % varietyTypes.length];
             if (alt !== t) { t = alt; break; }
           }
         }
@@ -2951,7 +2953,7 @@ export function planSchedule(input) {
           };
           let blockCounter = 0;
           let attempts = 0;
-          while (capacity >= MIN_BLOCK_MIN && blocks < TAIL_MAX_BLOCKS_PER_DAY && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
+          while (capacity >= MIN_BLOCK_MIN && blocks < ( (_widenedPools && _widenedPools['exam'] && _widenedPools['exam'].length <= 2) ? 2 : TAIL_MAX_BLOCKS_PER_DAY) && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
             let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
@@ -4173,23 +4175,23 @@ export async function planScheduleAsync(input) {
         if (notUsedToday.length >= 2) {
           pool = notUsedToday;
         }
-        pool = [...pool].sort((a,b)=>{
-          const ka = `${a.track}|${a.subject}|${a.chapter}`;
-          const kb = `${b.track}|${b.subject}|${b.chapter}`;
-          const ka2 = `${a.subject}|${a.chapter}`;
-          const kb2 = `${b.subject}|${b.chapter}`;
-          const da = chapterLastUsed.get(ka) || chapterLastUsed.get(ka2) || '';
-          const db = chapterLastUsed.get(kb) || chapterLastUsed.get(kb2) || '';
-          if (da !== db) return da < db ? -1 : 1;
-          return 0;
-        });
+        // FIX-TAILPOOL-2: no LRU sort, use seeded-shuffled order (existing _stableSeed infra), D1-D13 studied-only pool preserved
+      }
+      // FIX-TAILPOOL-2: seeded rotation mirroring stretch scheme
+      if (pool.length >= 2) {
+        try {
+          pool = seededShuffle(pool, _stableSeed + hashString(track) + 7919);
+        } catch {}
       }
       if (!pool.length) return null;
       let idx = 0;
-      if (pool.length >= 3) {
+      const _dayIdxMain = typeof d === 'number' ? d : 0;
+      if (pool.length < 2) {
         idx = 0;
+      } else if (pool.length <= 2) {
+        idx = _dayIdxMain % pool.length;
       } else {
-        idx = (studied.length + d * 3 + blockCounter * 2) % pool.length;
+        idx = (_dayIdxMain * 2 + blockCounter) % pool.length;
       }
       let pick = pool[idx] || pool[pool.length-1];
 
@@ -4281,12 +4283,14 @@ export async function planScheduleAsync(input) {
       const fillerTracks = priorityOrder.length ? priorityOrder : allocatable;
       const varietyTypes = ['mock', 'revision', 'practice', 'quiz'];
       const getVarietyType = (counter, seq) => {
-        let t = varietyTypes[counter % varietyTypes.length];
+        // FIX-TAILPOOL-2: include day index for rotation to avoid identical consecutive days
+        const _dIdx = typeof d === 'number' ? d : 0;
+        let t = varietyTypes[(counter + _dIdx) % varietyTypes.length];
         // (a) never >2 consecutive same type
         if (seq.length >= 2 && seq[seq.length-1] === t && seq[seq.length-2] === t) {
           // rotate to next type that breaks streak
           for (let k = 1; k < varietyTypes.length; k++) {
-            const alt = varietyTypes[(counter + k) % varietyTypes.length];
+            const alt = varietyTypes[(counter + _dIdx + k) % varietyTypes.length];
             if (alt !== t) { t = alt; break; }
           }
         }
@@ -5140,7 +5144,7 @@ export async function planScheduleAsync(input) {
           };
           let blockCounter = 0;
           let attempts = 0;
-          while (capacity >= MIN_BLOCK_MIN && blocks < TAIL_MAX_BLOCKS_PER_DAY && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
+          while (capacity >= MIN_BLOCK_MIN && blocks < ( (_widenedPools && _widenedPools['exam'] && _widenedPools['exam'].length <= 2) ? 2 : TAIL_MAX_BLOCKS_PER_DAY) && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
             let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
