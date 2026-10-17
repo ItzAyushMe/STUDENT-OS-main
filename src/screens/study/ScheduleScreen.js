@@ -20,7 +20,7 @@ import { Confetti } from '../../components/gamer/Confetti';
 import { Loading } from '../../components/ui/EmptyState';
 import { db } from '../../lib/db';
 import { generateSchedule, generateScheduleAsync, autoRescheduleMissed, autoSetDeadlines, deriveDeadlinesFromPlan, classSessionCutoff } from '../../lib/scheduleGenerator';
-import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds, getMissingRows } from '../../lib/scheduleSave';
+import { chunkRows, isRunStale, saveWithWorkers, buildPlanDiagnostics, computeMissingIds, getMissingRows, runResumeSave, pagedFetchAll } from '../../lib/scheduleSave';
 import { uuid } from '../../lib/utils';
 import { usePromotion } from '../../hooks/usePromotion';
 import { PromotionSheet } from '../../components/study/PromotionSheet';
@@ -513,6 +513,9 @@ export function ScheduleScreen({ navigation, route }) {
       let diagVerifyPerChunk = [];
       let diagVerifyRetries = 0;
       let diagFinalCount = null;
+      let diagVerifyPages = 0;
+      let diagVerifyStoredCountSource = 'exact-count';
+      let diagFinalIdList = [];
       // FIX-VERIFY5: timeline
       let diagTimeline = {
         deleteDone: typeof diagTimelineDeleteDone !== 'undefined' ? diagTimelineDeleteDone : null,
@@ -739,12 +742,29 @@ export function ScheduleScreen({ navigation, route }) {
           const firstDate = allDates[0] || null;
           const lastDate = allDates[allDates.length - 1] || null;
           if (firstDate && lastDate) {
-            const finalList = await db.list('schedule', {
-              eq: { user_id: profile.id, status: 'pending' },
-              gte: { date: firstDate },
-              lte: { date: lastDate },
-            });
-            diagFinalCount = Array.isArray(finalList) ? finalList.length : 0;
+            // FIX-VERIFYPAGE: banner count via extended db.count (exact, not truncated at Max Rows=1000)
+            // missing-set via paginated id-only db.list (select:'id') which now paginates internally
+            let finalCountViaCount = null;
+            let finalIdList = [];
+            try {
+              finalCountViaCount = await db.count('schedule', {
+                eq: { user_id: profile.id, status: 'pending' },
+                gte: { date: firstDate },
+                lte: { date: lastDate },
+              });
+            } catch {}
+            try {
+              finalIdList = await db.list('schedule', {
+                eq: { user_id: profile.id, status: 'pending' },
+                gte: { date: firstDate },
+                lte: { date: lastDate },
+                select: 'id',
+              });
+            } catch {}
+            diagFinalCount = typeof finalCountViaCount === 'number' ? finalCountViaCount : (Array.isArray(finalIdList) ? finalIdList.length : 0);
+            diagFinalIdList = finalIdList;
+            diagVerifyPages = Math.max(1, Math.ceil(diagFinalCount / 500));
+            diagVerifyStoredCountSource = 'exact-count';
             diagTimeline.finalCountDone = Date.now();
 
             // FIX-VERIFY4: finalCountAnyUser — NO user filter, pending + date range
@@ -832,13 +852,28 @@ export function ScheduleScreen({ navigation, route }) {
                   } catch {}
                 }
                 try {
-                  const finalList2 = await db.list('schedule', {
-                    eq: { user_id: profile.id, status: 'pending' },
-                    gte: { date: firstDate },
-                    lte: { date: lastDate },
-                  });
-                  finalAfterRepair = Array.isArray(finalList2) ? finalList2.length : 0;
+                  // FIX-VERIFYPAGE: use exact count for repair final check
+                  let finalCount2 = null;
+                  let finalIdList2 = [];
+                  try {
+                    finalCount2 = await db.count('schedule', {
+                      eq: { user_id: profile.id, status: 'pending' },
+                      gte: { date: firstDate },
+                      lte: { date: lastDate },
+                    });
+                  } catch {}
+                  try {
+                    finalIdList2 = await db.list('schedule', {
+                      eq: { user_id: profile.id, status: 'pending' },
+                      gte: { date: firstDate },
+                      lte: { date: lastDate },
+                      select: 'id',
+                    });
+                  } catch {}
+                  finalAfterRepair = typeof finalCount2 === 'number' ? finalCount2 : (Array.isArray(finalIdList2) ? finalIdList2.length : 0);
                   diagFinalCount = finalAfterRepair;
+                  diagFinalIdList = finalIdList2;
+                  diagVerifyPages = Math.max(1, Math.ceil(diagFinalCount / 500));
                   diagTimeline.finalCountDone = Date.now();
                 } catch {}
                 if (finalAfterRepair === rows.length) break;
@@ -867,7 +902,7 @@ export function ScheduleScreen({ navigation, route }) {
                     deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
                     totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
                     totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
-                    verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+                    verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount, pages: diagVerifyPages, storedCountSource: diagVerifyStoredCountSource },
                     finalCountAnyUser: diagFinalCountAnyUser,
                     finalCountAnyStatus: diagFinalCountAnyStatus,
                     sampleOrphans: diagSampleOrphans,
@@ -882,7 +917,7 @@ export function ScheduleScreen({ navigation, route }) {
                 } catch {}
                 // FIX-FINAL3B: resume-save — set resumeInfo instead of throwing, UI Retry saving
                 try {
-                  const missRows = getMissingRows(rows, diagReloaded || []);
+                  const missRows = getMissingRows(rows, diagFinalIdList.length ? diagFinalIdList : diagReloaded || []);
                   setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: missRows.length ? missRows : rows.slice(0, Math.max(0, rows.length - diagFinalCount)) });
                 } catch {
                   setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: [] });
@@ -910,7 +945,7 @@ export function ScheduleScreen({ navigation, route }) {
                   deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
                   totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
                   totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
-                  verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+                  verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount, pages: diagVerifyPages, storedCountSource: diagVerifyStoredCountSource },
                   finalCountAnyUser: diagFinalCountAnyUser,
                   finalCountAnyStatus: diagFinalCountAnyStatus,
                   sampleOrphans: diagSampleOrphans,
@@ -925,7 +960,7 @@ export function ScheduleScreen({ navigation, route }) {
               } catch {}
               // FIX-FINAL3B: resume-save
               try {
-                const missRows = getMissingRows(rows, diagReloaded || []);
+                const missRows = getMissingRows(rows, diagFinalIdList.length ? diagFinalIdList : diagReloaded || []);
                 setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: missRows.length ? missRows : rows.slice(0, Math.max(0, rows.length - diagFinalCount)) });
               } catch {
                 setResumeInfo({ rows, total: rows.length, stored: diagFinalCount, missingRows: [] });
@@ -956,7 +991,7 @@ export function ScheduleScreen({ navigation, route }) {
               deleteDeletedCount: typeof diagDeleteCount !== 'undefined' ? diagDeleteCount : null,
               totalAnyBefore: typeof diagTotalAnyBefore !== 'undefined' ? diagTotalAnyBefore : null,
               totalMineBefore: typeof diagTotalMineBefore !== 'undefined' ? diagTotalMineBefore : null,
-              verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount },
+              verifyInfo: { perChunk: diagVerifyPerChunk, retries: diagVerifyRetries, finalCount: diagFinalCount, pages: diagVerifyPages, storedCountSource: diagVerifyStoredCountSource },
               finalCountAnyUser: diagFinalCountAnyUser,
               finalCountAnyStatus: diagFinalCountAnyStatus,
               sampleOrphans: diagSampleOrphans,
@@ -971,7 +1006,7 @@ export function ScheduleScreen({ navigation, route }) {
           } catch {}
           // FIX-FINAL3B: adaptive retry failed chunks, set resumeInfo for retry saving missing only
           try {
-            const missRows = getMissingRows(rows, diagReloaded || []);
+            const missRows = getMissingRows(rows, diagFinalIdList.length ? diagFinalIdList : diagReloaded || []);
             setResumeInfo({ rows, total: rows.length, stored: savedCount, missingRows: missRows.length ? missRows : rows.slice(savedCount) });
           } catch {
             setResumeInfo({ rows, total: rows.length, stored: savedCount, missingRows: [] });
@@ -1015,7 +1050,7 @@ export function ScheduleScreen({ navigation, route }) {
       await yieldPaint();
       if (isStale()) return;
       const reloaded = await load();
-      // FIX-SCOPE + FIX-VERIFY + FIX-VERIFY4: build diagnostics object (success path) — from values already in scope + post-save readback
+      // FIX-SCOPE + FIX-VERIFY + FIX-VERIFY4 + FIX-VERIFYPAGE: build diagnostics object (success path)
       try {
         const diag = buildPlanDiagnostics({
           rows,
@@ -1035,6 +1070,8 @@ export function ScheduleScreen({ navigation, route }) {
             perChunk: typeof diagVerifyPerChunk !== 'undefined' ? diagVerifyPerChunk : [],
             retries: typeof diagVerifyRetries !== 'undefined' ? diagVerifyRetries : 0,
             finalCount: typeof diagFinalCount !== 'undefined' ? diagFinalCount : (reloaded ? reloaded.length : null),
+            pages: typeof diagVerifyPages !== 'undefined' ? diagVerifyPages : 0,
+            storedCountSource: typeof diagVerifyStoredCountSource !== 'undefined' ? diagVerifyStoredCountSource : 'exact-count',
           },
           finalCountAnyUser: typeof diagFinalCountAnyUser !== 'undefined' ? diagFinalCountAnyUser : null,
           finalCountAnyStatus: typeof diagFinalCountAnyStatus !== 'undefined' ? diagFinalCountAnyStatus : null,
@@ -1073,7 +1110,7 @@ export function ScheduleScreen({ navigation, route }) {
     }
   };
 
-  // FIX-FINAL3B: resume-save — re-runs verify + upserts MISSING only, idempotent, no delete, no re-plan, loops until stored==total
+  // FIX-VERIFYPAGE: resume-save delegates to pure runResumeSave — paginated id-only reads, stuck detector, exact counts
   const handleResumeSave = async () => {
     if (!resumeInfo || !resumeInfo.rows || !resumeInfo.rows.length) return;
     setResumeBusy(true);
@@ -1087,70 +1124,49 @@ export function ScheduleScreen({ navigation, route }) {
         setGenError('No dates to resume');
         return;
       }
-      let iterations = 0;
-      const maxIter = 5;
-      while (iterations < maxIter) {
-        iterations++;
-        // verify current stored
-        let storedList = [];
-        try {
-          storedList = await db.list('schedule', {
-            eq: { user_id: profile.id, status: 'pending' },
-            gte: { date: firstDate },
-            lte: { date: lastDate },
-          });
-        } catch {}
-        const storedCount = Array.isArray(storedList) ? storedList.length : 0;
-        if (storedCount >= rowsToResume.length) {
-          // success
-          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); setStashInfo(null); } catch {}
-          setResumeInfo(null);
-          await load();
-          setGenOpen(false);
-          setGenError('');
-          return;
-        }
-        const missingRows = getMissingRows(rowsToResume, storedList);
-        if (!missingRows.length) {
-          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); setStashInfo(null); } catch {}
-          setResumeInfo(null);
-          await load();
-          return;
-        }
-        // upsert missing only — idempotent uuid+onConflict, no delete
-        const missChunks = chunkRows(missingRows, 250);
-        for (const chunk of missChunks) {
-          try {
-            await db.insertMany('schedule', chunk);
-          } catch {}
-        }
-        // loop again to verify
-      }
-      // after max iter, check again
-      try {
-        const finalList = await db.list('schedule', {
+      const fetchStoredIds = async () => {
+        // FIX-VERIFYPAGE: paginated db.list schedule select('id') with eq user_id+status pending + gte/lte
+        return await db.list('schedule', {
           eq: { user_id: profile.id, status: 'pending' },
           gte: { date: firstDate },
           lte: { date: lastDate },
+          select: 'id',
         });
-        const finalCount = Array.isArray(finalList) ? finalList.length : 0;
-        if (finalCount >= rowsToResume.length) {
-          setResumeInfo(null);
-          await load();
-        } else {
-          const stillMissing = getMissingRows(rowsToResume, finalList);
-          setResumeInfo({ rows: rowsToResume, total: rowsToResume.length, stored: finalCount, missingRows: stillMissing });
-          setGenError(`Still saved ${finalCount}/${rowsToResume.length} after resume — tap Retry saving again.`);
+      };
+      const upsertRows = async (chunk) => {
+        return await db.insertMany('schedule', chunk);
+      };
+      const result = await runResumeSave({
+        expectedRows: rowsToResume,
+        fetchStoredIds,
+        upsertRows,
+        maxIter: 5,
+      });
+      if (result.status === 'success') {
+        try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); setStashInfo(null); } catch {}
+        setResumeInfo(null);
+        await load();
+        setGenOpen(false);
+        setGenError('');
+      } else {
+        // stuck — exact banner per spec
+        try {
+          const latestIds = await fetchStoredIds();
+          const stillMissing = getMissingRows(rowsToResume, latestIds);
+          setResumeInfo({ rows: rowsToResume, total: rowsToResume.length, stored: result.storedCount, missingRows: stillMissing });
+        } catch {
+          setResumeInfo({ rows: rowsToResume, total: rowsToResume.length, stored: result.storedCount, missingRows: [] });
         }
-      } catch (e) {
-        setGenError(`Resume failed: ${e?.message || e}`);
+        setGenError(`Saved ${result.storedCount}/${rowsToResume.length} — no progress after ${result.iterations} attempts (connection or server). Tap Retry saving to try again.`);
       }
+    } catch (e) {
+      setGenError(`Resume failed: ${e?.message || e}`);
     } finally {
       setResumeBusy(false);
     }
   };
 
-  // FIX-PLANB2: stash finish saving — app died mid-save? next open asks "Finish saving?" resume missing only no re-gen no delete survives kill
+  // FIX-VERIFYPAGE: stash finish saving delegates to same pure helper
   const handleStashFinish = async () => {
     if (!stashInfo || !stashInfo.rows || !stashInfo.rows.length) return;
     setStashBusy(true);
@@ -1159,53 +1175,35 @@ export function ScheduleScreen({ navigation, route }) {
       const allDates = rowsToResume.map(r=>r.date).filter(Boolean).sort();
       const first = allDates[0], last = allDates[allDates.length-1];
       if (!first || !last) return;
-      let iter=0;
-      while (iter<5) {
-        iter++;
-        let storedList=[];
-        try {
-          storedList = await db.list('schedule', {
-            eq: { user_id: profile.id, status: 'pending' },
-            gte: { date: first },
-            lte: { date: last },
-          });
-        } catch {}
-        const storedCount = Array.isArray(storedList)?storedList.length:0;
-        if (storedCount >= rowsToResume.length) {
-          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
-          setStashInfo(null);
-          await load();
-          return;
-        }
-        const missing = getMissingRows(rowsToResume, storedList);
-        if (!missing.length) {
-          try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
-          setStashInfo(null);
-          await load();
-          return;
-        }
-        const missChunks = chunkRows(missing, 250);
-        for (const ch of missChunks) {
-          try { await db.insertMany('schedule', ch); } catch {}
-        }
-      }
-      // final check
-      let finalList=[];
-      try {
-        finalList = await db.list('schedule', {
+      const fetchStoredIds = async () => {
+        return await db.list('schedule', {
           eq: { user_id: profile.id, status: 'pending' },
           gte: { date: first },
           lte: { date: last },
+          select: 'id',
         });
-      } catch {}
-      const finalCount = Array.isArray(finalList)?finalList.length:0;
-      if (finalCount >= rowsToResume.length) {
+      };
+      const upsertRows = async (chunk) => {
+        return await db.insertMany('schedule', chunk);
+      };
+      const result = await runResumeSave({
+        expectedRows: rowsToResume,
+        fetchStoredIds,
+        upsertRows,
+        maxIter: 5,
+      });
+      if (result.status === 'success') {
         try { const { clearStash } = await import('../../lib/saveStash'); await clearStash(); } catch {}
         setStashInfo(null);
         await load();
       } else {
-        const stillMissing = getMissingRows(rowsToResume, finalList);
-        setStashInfo({ rows: rowsToResume, total: rowsToResume.length, stored: finalCount, missingRows: stillMissing });
+        try {
+          const latestIds = await fetchStoredIds();
+          const stillMissing = getMissingRows(rowsToResume, latestIds);
+          setStashInfo({ rows: rowsToResume, total: rowsToResume.length, stored: result.storedCount, missingRows: stillMissing });
+        } catch {
+          setStashInfo({ rows: rowsToResume, total: rowsToResume.length, stored: result.storedCount, missingRows: [] });
+        }
       }
     } finally {
       setStashBusy(false);

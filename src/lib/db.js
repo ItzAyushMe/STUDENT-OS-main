@@ -252,25 +252,76 @@ export const db = {
         }
       }
       const run = async () => {
-        let q = supabase.from(table).select('*');
-        for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
-        for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
-        for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
-        for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
-        for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
-        for (const [col, val] of Object.entries(opts.like || {})) q = q.ilike(col, `%${val}%`);
-        if (opts.order) q = q.order(opts.order.col, { ascending: opts.order.asc !== false });
-        if (opts.limit) q = q.limit(opts.limit);
-        const { data, error } = await q;
-        if (error) throw new Error(`[db.list ${table}] ${error.message}`);
-        return data || [];
+        const PAGE = 500;
+        const selectClause = opts.select || '*';
+        const hasOrder = !!opts.order;
+        const effectiveLimit = opts.limit ? Number(opts.limit) : null;
+        const maxPagesByLimit = effectiveLimit ? Math.ceil(effectiveLimit / PAGE) : 60;
+        const maxPages = Math.min(60, maxPagesByLimit);
+        let all = [];
+        let offset = 0;
+        for (let page = 0; page < maxPages; page++) {
+          let q = supabase.from(table).select(selectClause);
+          for (const [col, val] of Object.entries(opts.eq || {})) q = q.eq(col, val);
+          for (const [col, val] of Object.entries(opts.neq || {})) q = q.neq(col, val);
+          for (const [col, vals] of Object.entries(opts.in || {})) q = q.in(col, vals);
+          for (const [col, val] of Object.entries(opts.gte || {})) q = q.gte(col, val);
+          for (const [col, val] of Object.entries(opts.lte || {})) q = q.lte(col, val);
+          for (const [col, val] of Object.entries(opts.like || {})) q = q.ilike(col, `%${val}%`);
+          if (hasOrder) {
+            q = q.order(opts.order.col, { ascending: opts.order.asc !== false });
+          } else {
+            q = q.order('created_at').order('id');
+          }
+          const from = offset;
+          let to = offset + PAGE - 1;
+          if (effectiveLimit) {
+            const limitEnd = effectiveLimit - 1;
+            if (from > limitEnd) break;
+            if (to > limitEnd) to = limitEnd;
+          }
+          q = q.range(from, to);
+          const { data, error } = await q;
+          if (error) throw new Error(`[db.list ${table}] ${error.message}`);
+          const rows = data || [];
+          if (rows.length) all.push(...rows);
+          if (rows.length < PAGE) break;
+          if (effectiveLimit && all.length >= effectiveLimit) break;
+          offset += PAGE;
+        }
+        if (effectiveLimit && all.length > effectiveLimit) {
+          all = all.slice(0, effectiveLimit);
+        }
+        return all;
       };
       return await remoteWithRetry(run, `db.list ${table}`);
     }
     let rows = await localAll(table);
     rows = rows.filter((r) => matches(r, opts));
     rows = sortRows(rows, opts.order);
+    if (!opts.order) {
+      // stable order for local parity: created_at then id
+      rows = [...rows].sort((a, b) => {
+        const ca = String(a.created_at || a.date || '');
+        const cb = String(b.created_at || b.date || '');
+        if (ca !== cb) return ca.localeCompare(cb);
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+    }
     if (opts.limit) rows = rows.slice(0, opts.limit);
+    // additive select projection support
+    if (opts.select && opts.select !== '*') {
+      const fields = typeof opts.select === 'string' ? opts.select.split(',').map(s => s.trim()).filter(Boolean) : Array.isArray(opts.select) ? opts.select : [];
+      if (fields.length) {
+        rows = rows.map(r => {
+          const proj = {};
+          for (const f of fields) if (f in r) proj[f] = r[f];
+          // always keep id if present for diff logic unless explicitly excluded? Keep id if exists
+          if (!('id' in proj) && 'id' in r) proj.id = r.id;
+          return proj;
+        });
+      }
+    }
     return rows;
   },
 
@@ -492,11 +543,22 @@ export const db = {
     return deletedCount;
   },
 
-  async count(table, eq) {
+  async count(table, opts = {}) {
+    // normalize: old callers pass eq object directly, new callers pass { eq, neq, gte, lte, ... }
+    let filterOpts = opts;
+    const hasFilterKeys = opts && (opts.eq || opts.neq || opts.gte || opts.lte || opts.in || opts.like);
+    if (!hasFilterKeys) {
+      filterOpts = { eq: opts };
+    }
     if (isRemote()) {
       const run = async () => {
         let q = supabase.from(table).select('id', { count: 'exact', head: true });
-        for (const [col, val] of Object.entries(eq || {})) q = q.eq(col, val);
+        for (const [col, val] of Object.entries(filterOpts.eq || {})) q = q.eq(col, val);
+        for (const [col, val] of Object.entries(filterOpts.neq || {})) q = q.neq(col, val);
+        for (const [col, vals] of Object.entries(filterOpts.in || {})) q = q.in(col, vals);
+        for (const [col, val] of Object.entries(filterOpts.gte || {})) q = q.gte(col, val);
+        for (const [col, val] of Object.entries(filterOpts.lte || {})) q = q.lte(col, val);
+        for (const [col, val] of Object.entries(filterOpts.like || {})) q = q.ilike(col, `%${val}%`);
         const { count, error } = await q;
         if (error) throw new Error(`[db.count ${table}] ${error.message}`);
         return count || 0;
@@ -504,7 +566,7 @@ export const db = {
       return await remoteWithRetry(run, `db.count ${table}`);
     }
     const rows = await localAll(table);
-    return rows.filter((r) => matches(r, { eq })).length;
+    return rows.filter((r) => matches(r, filterOpts)).length;
   },
 };
 

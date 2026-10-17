@@ -378,3 +378,76 @@ export async function saveWithWorkers(chunks, insertFn, onProgress, concurrency 
 export function getMissingRowsForResume(sentRows, storedRows) {
   return getMissingRows(sentRows, storedRows);
 }
+
+// FIX-VERIFYPAGE: pure paginated fetch helper — node-testable with fake fetchers
+export async function pagedFetchAll(fetchPage, { pageSize = 500, maxPages = 60 } = {}) {
+  const all = [];
+  let offset = 0;
+  for (let page = 0; page < maxPages; page++) {
+    const rows = await fetchPage(offset, pageSize);
+    if (!Array.isArray(rows)) {
+      // if fetcher returns non-array, treat as empty and stop
+      break;
+    }
+    if (rows.length) all.push(...rows);
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
+}
+
+// FIX-VERIFYPAGE: pure resume-save runner — node-testable, no db, no delete, no re-plan
+// fetchStoredIds: async () => array of ids or rows with id
+// upsertRows: async (chunkRows) => void
+export async function runResumeSave({ expectedRows, fetchStoredIds, upsertRows, maxIter = 5 }) {
+  if (!Array.isArray(expectedRows) || !expectedRows.length) {
+    return { status: 'success', storedCount: 0, missingCount: 0, iterations: 0, lastError: null };
+  }
+  const expectedIds = expectedRows.map(r => r?.id).filter(Boolean);
+  let storedCount = 0;
+  let missingCount = expectedIds.length;
+  let iterations = 0;
+  let lastError = null;
+  let prevStored = null;
+  let prevMissing = null;
+  let lastUpsertSucceeded = true;
+
+  for (let iter = 1; iter <= maxIter; iter++) {
+    iterations = iter;
+    try {
+      const storedRowsOrIds = await fetchStoredIds();
+      const missingIds = computeMissingIds(expectedIds, storedRowsOrIds);
+      storedCount = expectedIds.length - missingIds.length;
+      missingCount = missingIds.length;
+
+      // STUCK DETECTOR: if pair unchanged after a successful upsert iteration, return stuck immediately
+      // Do not trigger stuck if previous upsert failed (transient error should be retried)
+      if (prevStored !== null && prevMissing !== null && lastUpsertSucceeded && prevStored === storedCount && prevMissing === missingCount) {
+        return { status: 'stuck', storedCount, missingCount, iterations, lastError };
+      }
+
+      if (missingCount === 0) {
+        lastError = null;
+        return { status: 'success', storedCount, missingCount, iterations, lastError };
+      }
+
+      const missingSet = new Set(missingIds);
+      const missingRows = expectedRows.filter(r => missingSet.has(r.id));
+      const chunks = chunkRows(missingRows, 250);
+      for (const chunk of chunks) {
+        await upsertRows(chunk);
+      }
+      // upsert succeeded — update prev for next stuck check
+      prevStored = storedCount;
+      prevMissing = missingCount;
+      lastUpsertSucceeded = true;
+    } catch (e) {
+      lastError = e;
+      // failed iteration consumes iteration, never throws — continue
+      lastUpsertSucceeded = false;
+      continue;
+    }
+  }
+
+  return { status: missingCount === 0 ? 'success' : 'stuck', storedCount, missingCount, iterations, lastError };
+}
