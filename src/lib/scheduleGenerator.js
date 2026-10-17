@@ -503,6 +503,41 @@ const REV_WAVE_PICKS = 6;
 const HORIZON_CAP_DAYS = 1100;
 const POST_EXAM_BUFFER_DAYS = 14; // wind-down days after last exam/olympiad/cutoff
 const MAX_BLOCKS_PER_DAY = 40;   // hard stop — an allocation loop can never spin
+const TAIL_MAX_BLOCKS_PER_DAY = 4; // FIX-TAILPOOL: density pin — tail emits at most 4/day
+
+// ---------- FIX-TAILPOOL helpers (deterministic, no Math.random) ----------
+function isPlaceholderChapter(chap){
+  if(!chap) return true;
+  const s=String(chap).trim();
+  return /^(Buffer|Backlog|School Exam|Mock Test|Analysis)$/i.test(s);
+}
+function hashString(str){
+  let h=2166136261;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function seededShuffle(array, seed){
+  const arr=array.slice();
+  const rng=mulberry32(seed);
+  for(let i=arr.length-1;i>0;i--){
+    const j=Math.floor(rng()*(i+1));
+    const tmp=arr[i];
+    arr[i]=arr[j];
+    arr[j]=tmp;
+  }
+  return arr;
+}
 
 // ---------- FIX-S: planner constants ----------
 // S1 — a class day is a PAIR of subjects, never one subject for the whole day
@@ -1443,6 +1478,35 @@ export function planSchedule(input) {
   const studiedByTrack = { class: [], olympiad: [], exam: [] };
   const _ensureTrackArr = (t)=>{ if(!studiedByTrack[t]) studiedByTrack[t]=[]; return studiedByTrack[t]; };
 
+  // FIX-TAILPOOL: stable seed + widened pools (PO-A = all exam-track syllabus chapters, density cap 4)
+  let _tailSeedStr = `${today}|${userId||''}|${examDate||''}|${olympiadDate||''}|${syllabus.map(r=>r.id||`${r.subject}|${r.chapter}|${rowTrack(r)}`).sort().join(',')}`;
+  const _stableSeed = hashString(_tailSeedStr);
+  const _widenedPoolsRaw = { class: [], olympiad: [], exam: [] };
+  const _seenWidened = new Map();
+  for (const r of syllabus) {
+    if (!r) continue;
+    // FIX-TAILPOOL: exclude completed/archived from widened pool — filler is for maintenance of pending/covered, not for re-studying conquered
+    if (String(r.status||'').toLowerCase()==='completed') continue;
+    if (typeof r.progress_percent==='number' && r.progress_percent>=100) continue;
+    try { if (isArchivedRow(r)) continue; } catch {}
+    const tr = rowTrack(r);
+    const chap = r.chapter || r.topic || '';
+    if (isPlaceholderChapter(chap)) continue;
+    const subj = String(r.subject||'').trim();
+    const ch = String(chap||'').trim();
+    if (!subj || !ch) continue;
+    const key = `${tr}|${subj}|${ch}`;
+    if (_seenWidened.has(key)) continue;
+    _seenWidened.set(key, true);
+    const entry = { subject: subj, chapter: ch, track: tr, classLevelNum: normalizeClassTag(r.class_level ?? r.classLevel ?? r.grade) };
+    if (!_widenedPoolsRaw[tr]) _widenedPoolsRaw[tr]=[];
+    _widenedPoolsRaw[tr].push(entry);
+  }
+  const _widenedPools = {};
+  for (const tr of Object.keys(_widenedPoolsRaw)) {
+    const raw = _widenedPoolsRaw[tr];
+    _widenedPools[tr] = seededShuffle(raw, _stableSeed + hashString(tr));
+  }
   for (let d = 0; d < totalDays; d++) {
     const date = horizonDates[d];
     const weekday = horizonWeekdaysMon[d]; // 0=Mon
@@ -2786,10 +2850,26 @@ export function planSchedule(input) {
           return 'ok';
         };
 
-        const fillerForTrackTail = (track, blockCounter, forcedType) => {
-          // FIX-FINAL3A: dedup, hard 2/day, D+1 exclusion
-          let rawPool = ((studiedByTrack[track]||[]).slice());
-          if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+        const fillerForTrackTail = (track, blockCounter, forcedType, dayIndexOverride) => {
+          // FIX-TAILPOOL: widened pool = studiedByTrack[track] ∪ syllabus rows for track (PO-A all exam-track chapters)
+          let rawPool = [];
+          try {
+            const widened = (_widenedPools && _widenedPools[track]) ? _widenedPools[track].slice() : [];
+            const studiedPart = (studiedByTrack[track]||[]).slice();
+            const seenMerge = new Set();
+            const merged = [];
+            for (const it of [...studiedPart, ...widened]) {
+              const k = `${it.subject}|${it.chapter}`;
+              if (!seenMerge.has(k)) { seenMerge.add(k); merged.push(it); }
+            }
+            rawPool = merged;
+            if (!rawPool.length) {
+              rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+            }
+          } catch {
+            rawPool = ((studiedByTrack[track]||[]).slice());
+            if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          }
           const seenTail = new Set();
           const dedupedTail = [];
           for (const it of rawPool) {
@@ -2833,21 +2913,22 @@ export function planSchedule(input) {
           }
           if (pool.length >= 3) {
             const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
-            if (notUsedToday.length >= 2) pool = notUsedToday;
-            pool = [...pool].sort((a, b) => {
-              // FIX-DRAINSHARE: LRU across tracks — use subject|chapter so class history counts for exam stretch
-              const ka = `${a.subject}|${a.chapter}`;
-              const kb = `${b.subject}|${b.chapter}`;
-              const da = chapterLastUsed.get(ka) || chapterLastUsed.get(`${a.track}|${a.subject}|${a.chapter}`) || chapterLastUsed.get(`class|${a.subject}|${a.chapter}`) || '';
-              const db = chapterLastUsed.get(kb) || chapterLastUsed.get(`${b.track}|${b.subject}|${b.chapter}`) || chapterLastUsed.get(`class|${b.subject}|${b.chapter}`) || '';
-              if (da !== db) return da < db ? -1 : 1;
-              return 0;
-            });
+            if (notUsedToday.length >= 2) {
+              pool = notUsedToday;
+            }
+            // FIX-TAILPOOL: no LRU sort, keep seeded shuffled order for deterministic rotation
           }
           if (!pool.length) return null;
           let idx = 0;
-          if (pool.length >= 3) idx = 0;
-          else idx = (studied.length + cur.diff(dayjs(today), 'day') * 3 + blockCounter * 2) % pool.length;
+          const dayIdx = typeof dayIndexOverride === 'number' ? dayIndexOverride : (typeof cur !== 'undefined' && cur.diff ? cur.diff(dayjs(today), 'day') : 0);
+          if (pool.length < 2) {
+            idx = 0; // honest small-pool
+          } else if (pool.length <= 2) {
+            // pool=2: 1 distinct chapter per day (2 blocks same chapter) alternating → zero identical consecutive days
+            idx = dayIdx % pool.length;
+          } else {
+            idx = (dayIdx * 2 + blockCounter) % pool.length;
+          }
           const pick = pool[idx] || pool[pool.length - 1];
           const type = forcedType || 'practice';
           if (type === 'mock') return { subject: pick.subject, topic: `Mock practice: ${pick.chapter}`, type, track: 'exam', chapter: pick.chapter };
@@ -2870,11 +2951,11 @@ export function planSchedule(input) {
           };
           let blockCounter = 0;
           let attempts = 0;
-          while (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
+          while (capacity >= MIN_BLOCK_MIN && blocks < TAIL_MAX_BLOCKS_PER_DAY && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
-            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
-            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null, cur.diff(dayjs(today), 'day'));
             if (!filler) break;
             let rot = 0;
             while (rot < 5 && (dayTopicCounts.get(filler.topic) || 0) >= 2) {
@@ -2897,11 +2978,11 @@ export function planSchedule(input) {
             else if (res === 'cap' || res === 'small') blockCounter += 1;
             else if (res === 'dup') break;
           }
-          while (blocks < 2 && capacity >= MIN_BLOCK_MIN && attempts < 35) {
+          while (blocks < 2 && blocks < TAIL_MAX_BLOCKS_PER_DAY && capacity >= MIN_BLOCK_MIN && attempts < 35) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
-            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
-            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null, cur.diff(dayjs(today), 'day'));
             if (!filler) break;
             const res = pushTail(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
             if (res === 'ok') blockCounter += 1;
@@ -2909,7 +2990,10 @@ export function planSchedule(input) {
           }
         }
 
-        if (lastPickKeyToday) prevDayLastPickKey = lastPickKeyToday;
+        if (lastPickKeyToday) {
+          prevDayLastPickKey = lastPickKeyToday;
+          try { prevDayPickedSet = new Set(dayChaptersUsed); } catch {}
+        }
         if (blocks > 0) {
           stretchDays += 1;
           stretchBlocks += blocks;
@@ -3582,6 +3666,36 @@ export async function planScheduleAsync(input) {
   const studiedByTrack = { class: [], olympiad: [], exam: [] };
   const _ensureTrackArr = (t)=>{ if(!studiedByTrack[t]) studiedByTrack[t]=[]; return studiedByTrack[t]; };
 
+  // FIX-TAILPOOL: stable seed + widened pools (PO-A = all exam-track syllabus chapters, density cap 4)
+  let _tailSeedStr = `${today}|${userId||''}|${examDate||''}|${olympiadDate||''}|${syllabus.map(r=>r.id||`${r.subject}|${r.chapter}|${rowTrack(r)}`).sort().join(',')}`;
+  const _stableSeed = hashString(_tailSeedStr);
+  const _widenedPoolsRaw = { class: [], olympiad: [], exam: [] };
+  const _seenWidened = new Map();
+  for (const r of syllabus) {
+    if (!r) continue;
+    // FIX-TAILPOOL: exclude completed/archived from widened pool — filler is for maintenance of pending/covered, not for re-studying conquered
+    if (String(r.status||'').toLowerCase()==='completed') continue;
+    if (typeof r.progress_percent==='number' && r.progress_percent>=100) continue;
+    try { if (isArchivedRow(r)) continue; } catch {}
+    const tr = rowTrack(r);
+    const chap = r.chapter || r.topic || '';
+    if (isPlaceholderChapter(chap)) continue;
+    const subj = String(r.subject||'').trim();
+    const ch = String(chap||'').trim();
+    if (!subj || !ch) continue;
+    const key = `${tr}|${subj}|${ch}`;
+    if (_seenWidened.has(key)) continue;
+    _seenWidened.set(key, true);
+    const entry = { subject: subj, chapter: ch, track: tr, classLevelNum: normalizeClassTag(r.class_level ?? r.classLevel ?? r.grade) };
+    if (!_widenedPoolsRaw[tr]) _widenedPoolsRaw[tr]=[];
+    _widenedPoolsRaw[tr].push(entry);
+  }
+  const _widenedPools = {};
+  for (const tr of Object.keys(_widenedPoolsRaw)) {
+    const raw = _widenedPoolsRaw[tr];
+    _widenedPools[tr] = seededShuffle(raw, _stableSeed + hashString(tr));
+  }
+
   for (let d = 0; d < totalDays; d++) {
     const date = horizonDates[d];
     const weekday = horizonWeekdaysMon[d]; // 0=Mon
@@ -4925,10 +5039,26 @@ export async function planScheduleAsync(input) {
           return 'ok';
         };
 
-        const fillerForTrackTail = (track, blockCounter, forcedType) => {
-          // FIX-FINAL3A: dedup, hard 2/day, D+1 exclusion
-          let rawPool = ((studiedByTrack[track]||[]).slice());
-          if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+        const fillerForTrackTail = (track, blockCounter, forcedType, dayIndexOverride) => {
+          // FIX-TAILPOOL: widened pool = studiedByTrack[track] ∪ syllabus rows for track (PO-A all exam-track chapters)
+          let rawPool = [];
+          try {
+            const widened = (_widenedPools && _widenedPools[track]) ? _widenedPools[track].slice() : [];
+            const studiedPart = (studiedByTrack[track]||[]).slice();
+            const seenMerge = new Set();
+            const merged = [];
+            for (const it of [...studiedPart, ...widened]) {
+              const k = `${it.subject}|${it.chapter}`;
+              if (!seenMerge.has(k)) { seenMerge.add(k); merged.push(it); }
+            }
+            rawPool = merged;
+            if (!rawPool.length) {
+              rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+            }
+          } catch {
+            rawPool = ((studiedByTrack[track]||[]).slice());
+            if (!rawPool.length) rawPool = studied.filter(s => s.track === 'exam' || s.track === 'olympiad' || s.track === 'class');
+          }
           const seenTail = new Set();
           const dedupedTail = [];
           for (const it of rawPool) {
@@ -4972,21 +5102,22 @@ export async function planScheduleAsync(input) {
           }
           if (pool.length >= 3) {
             const notUsedToday = pool.filter(s => !dayChaptersUsed.has(`${s.subject}|${s.chapter}`));
-            if (notUsedToday.length >= 2) pool = notUsedToday;
-            pool = [...pool].sort((a, b) => {
-              // FIX-DRAINSHARE: LRU across tracks — use subject|chapter so class history counts for exam stretch
-              const ka = `${a.subject}|${a.chapter}`;
-              const kb = `${b.subject}|${b.chapter}`;
-              const da = chapterLastUsed.get(ka) || chapterLastUsed.get(`${a.track}|${a.subject}|${a.chapter}`) || chapterLastUsed.get(`class|${a.subject}|${a.chapter}`) || '';
-              const db = chapterLastUsed.get(kb) || chapterLastUsed.get(`${b.track}|${b.subject}|${b.chapter}`) || chapterLastUsed.get(`class|${b.subject}|${b.chapter}`) || '';
-              if (da !== db) return da < db ? -1 : 1;
-              return 0;
-            });
+            if (notUsedToday.length >= 2) {
+              pool = notUsedToday;
+            }
+            // FIX-TAILPOOL: no LRU sort, keep seeded shuffled order for deterministic rotation
           }
           if (!pool.length) return null;
           let idx = 0;
-          if (pool.length >= 3) idx = 0;
-          else idx = (studied.length + cur.diff(dayjs(today), 'day') * 3 + blockCounter * 2) % pool.length;
+          const dayIdx = typeof dayIndexOverride === 'number' ? dayIndexOverride : (typeof cur !== 'undefined' && cur.diff ? cur.diff(dayjs(today), 'day') : 0);
+          if (pool.length < 2) {
+            idx = 0; // honest small-pool
+          } else if (pool.length <= 2) {
+            // pool=2: 1 distinct chapter per day (2 blocks same chapter) alternating → zero identical consecutive days
+            idx = dayIdx % pool.length;
+          } else {
+            idx = (dayIdx * 2 + blockCounter) % pool.length;
+          }
           const pick = pool[idx] || pool[pool.length - 1];
           const type = forcedType || 'practice';
           if (type === 'mock') return { subject: pick.subject, topic: `Mock practice: ${pick.chapter}`, type, track: 'exam', chapter: pick.chapter };
@@ -5009,11 +5140,11 @@ export async function planScheduleAsync(input) {
           };
           let blockCounter = 0;
           let attempts = 0;
-          while (capacity >= MIN_BLOCK_MIN && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
+          while (capacity >= MIN_BLOCK_MIN && blocks < TAIL_MAX_BLOCKS_PER_DAY && blocks < MAX_BLOCKS_PER_DAY && attempts < 25) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
-            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
-            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null, cur.diff(dayjs(today), 'day'));
             if (!filler) break;
             let rot = 0;
             while (rot < 5 && (dayTopicCounts.get(filler.topic) || 0) >= 2) {
@@ -5036,11 +5167,11 @@ export async function planScheduleAsync(input) {
             else if (res === 'cap' || res === 'small') blockCounter += 1;
             else if (res === 'dup') break;
           }
-          while (blocks < 2 && capacity >= MIN_BLOCK_MIN && attempts < 35) {
+          while (blocks < 2 && blocks < TAIL_MAX_BLOCKS_PER_DAY && capacity >= MIN_BLOCK_MIN && attempts < 35) {
             attempts += 1;
             const desiredType = getVarietyType(blockCounter, dayTypeSeq);
-            let filler = fillerForTrackTail('exam', blockCounter, desiredType);
-            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null);
+            let filler = fillerForTrackTail('exam', blockCounter, desiredType, cur.diff(dayjs(today), 'day'));
+            if (!filler) filler = fillerForTrackTail('exam', blockCounter, null, cur.diff(dayjs(today), 'day'));
             if (!filler) break;
             const res = pushTail(filler.subject, filler.topic, filler.type, Math.min(40, capacity), filler.track);
             if (res === 'ok') blockCounter += 1;
@@ -5048,7 +5179,10 @@ export async function planScheduleAsync(input) {
           }
         }
 
-        if (lastPickKeyToday) prevDayLastPickKey = lastPickKeyToday;
+        if (lastPickKeyToday) {
+          prevDayLastPickKey = lastPickKeyToday;
+          try { prevDayPickedSet = new Set(dayChaptersUsed); } catch {}
+        }
         if (blocks > 0) {
           stretchDays += 1;
           stretchBlocks += blocks;
